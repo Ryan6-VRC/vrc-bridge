@@ -73,7 +73,7 @@ USERC_EXPOSURE      = "/usercamera/Exposure"       # float EV, -3..+3
 USERC_FOCALDIST     = "/usercamera/FocalDistance"  # float metres, 0..10
 USERC_APERTURE      = "/usercamera/Aperture"       # float f-number, 1.4..32
 
-# For RAW smooth scroll we historically watched Zoom; we keep the watch on Zoom.
+# RAW smooth scroll watches Zoom, not FocalDistance.
 # (ParamState registers OSC listeners itself, so both Zoom and FocalDistance are mirrored anyway.)
 USERC_SCROLL = USERC_ZOOM
 
