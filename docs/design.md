@@ -88,11 +88,13 @@ Each step is independently dispatchable. Ordering constraints are real; the numb
 11. **Packaging.** `get_files_dir()` resolves inside the Python tree on a non-editable install; the generated `.vrmanifest` names `controller_manager.py`, which has no `__main__`, so a SteamVR auto-launch runs nothing; `arguments` double-escapes its quotes.
 12. **Grammar.** `osc_muteproxy` declares `name = "index_muteproxy"`, the one mapping whose name disagrees with its file; the README omits that `--router camera` drops Leash and VRCFT.
 
-## Known defects the audit inherits
+## Findings the audit inherits — defects, and one settled non-defect
 
 `index_remy`: `_set_audio_mode` opens with `if mode == self._audio_mode: pass`, a no-op where a return was meant; touchpad handlers write `audio_0` without updating `_last_audio0`, so a later mode change can skip a needed PUT; `Image.open(path).convert("RGB")` leaks the opened handle; `_do_request` logs any completed request as success, so HTTP 500 reads as fine.
 
-`osc_muteproxy` pulses `/input/Voice` on every change including the falling edge, so a latching source double-toggles to a net zero, and because OSC callbacks dispatch per-datagram on separate threads two rapid changes give overlapping pulses that can interleave as 1,1,0,0. Whether the driving parameter is momentary or latching is unresolved from source.
+`osc_muteproxy`'s pulse on every change, falling edge included, is **its contract, not a defect**: it requires a **latching** source. The reference driving parameter is an unsynced bool the avatar flips both directions — a menu Toggle plus `VRCAvatarParameterDriver` behaviours that set it high in some states and low in others, gated on gesture, contact, and `IsLocal` — so one pulse per transition keeps VRChat's mute state mirrored by the parameter. A **momentary** source is what breaks it: a source that returns to zero on its own double-pulses and nets no change. Say so if the mapping is ever documented for third-party use.
+
+The narrow residual: a contact-flippable latch can chatter, and `press_pulse` sleeps on a per-datagram thread, so two flips inside one pulse duration interleave their sends as 1,1,0,0.
 
 Blocking `time.sleep` inside an OSC callback is **not** a defect — dispatch is per-datagram threaded (measured), so `press_pulse` and `osc_vrcft`'s load delay stall nothing. Those comments are correct.
 
