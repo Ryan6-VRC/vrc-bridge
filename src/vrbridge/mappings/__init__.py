@@ -4,10 +4,9 @@ from .index_usercamera import UserCameraMapping
 from .index_virtuallens import VirtualLensMapping
 from .index_vrclens import VRCLensMapping
 from .mapping_base import Mapping, MappingRouter
-from .osc_leash import LeashMapping
 from .osc_muteproxy import MuteProxyMapping
 from .osc_vrcft import VRCFTMapping
 
 __all__ = ["IndexPuppetMapping", "VirtualLensMapping", "UserCameraMapping", "VRCLensMapping",
-           "MuteProxyMapping", "LeashMapping", "RemyMapping", "VRCFTMapping",
+           "MuteProxyMapping", "RemyMapping", "VRCFTMapping",
            "Mapping", "MappingRouter"]
