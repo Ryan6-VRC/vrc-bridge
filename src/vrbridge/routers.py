@@ -36,18 +36,13 @@ class DefaultRouter(MappingRouter):
         self._managed_names = {"index_puppet", "index_usercamera"}
 
         # Lazy imports to avoid circulars when running single-mapping scripts.
-        from vrbridge.mappings import (IndexPuppetMapping, LeashMapping, MuteProxyMapping,
+        from vrbridge.mappings import (IndexPuppetMapping, MuteProxyMapping,
                               UserCameraMapping, VRCFTMapping)
 
         # Register MuteProxy (always on)
         mute = MuteProxyMapping(bridge)
         self.register(mute)
         mute.activate()
-
-        # Register LeashMapping (always on)
-        leash = LeashMapping(bridge)
-        self.register(leash)
-        leash.activate()
 
         # Register VRCFTMapping (always on)
         vrcft = VRCFTMapping(bridge)
@@ -206,8 +201,8 @@ class CameraPrefabRouter(MappingRouter):
 
 class FullRouter(DefaultRouter):
     """
-    Extends DefaultRouter by registering LeashMapping (always on) and
-    RemyMapping, which is enabled *only* when IndexPuppet is active.
+    Extends DefaultRouter by registering RemyMapping, which is enabled
+    *only* when IndexPuppet is active.
 
     - When index_puppet is active: RemyMapping.activate()
       (touchpad press/release bound by _gate become live).

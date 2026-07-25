@@ -42,14 +42,13 @@ A **router** decides which mapping is active at any moment.
 
 | Router    | Behavior |
 |-----------|----------|
-| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `OSCLeash`, and `VRCFT` stay on. |
+| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy` and `VRCFT` stay on. |
 | `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar. |
 | `remy`    | The `default` router plus the Remy AI integration (see below). |
 
 **Core mappings**
 
 - **Index Puppet** — two-axis avatar puppet control from absolute finger position on the touchpads; optional mirroring to both hands from a single controller.
-- **OSC Leash** — translates an avatar "leash" physbone into player movement, so avatar physics can pull you (walk/run/direction from leash stretch and angle).
 - **User Camera** — full VRChat User Camera control (aperture, exposure, zoom, capture, modes).
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
