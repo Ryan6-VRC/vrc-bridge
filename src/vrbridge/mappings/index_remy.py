@@ -29,6 +29,7 @@ The API endpoints above match the FastAPI routes:
 from __future__ import annotations
 
 import base64
+import io
 import os
 import queue
 import threading
@@ -175,21 +176,32 @@ class RemyMapping(Mapping):
 
     # ---- controller callbacks (touchpads: GATED) --------------------------
 
+    def _put_audio0(self, enabled: bool) -> None:
+        """Drive audio_0 and record it.
+
+        Every write to audio_0 must go through here. The touchpad handlers used
+        to enqueue the PUT directly, leaving _last_audio0 stale, so the next
+        _set_audio_mode() compared against a value the server no longer held and
+        skipped a PUT it owed.
+        """
+        self._last_audio0 = enabled
+        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": enabled}))
+
     def _on_left_tpad_press(self, ctx, evt):
         """Left TOUCHPAD_PRESS → enable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": True}))
+        self._put_audio0(True)
 
     def _on_left_tpad_release(self, ctx, evt):
         """Left TOUCHPAD_RELEASE → disable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": False}))
+        self._put_audio0(False)
 
     def _on_right_tpad_press(self, ctx, evt):
         """Right TOUCHPAD_PRESS → enable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": True}))
+        self._put_audio0(True)
 
     def _on_right_tpad_release(self, ctx, evt):
         """Right TOUCHPAD_RELEASE → disable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": False}))
+        self._put_audio0(False)
 
     # ---- OSC callbacks (NOT gated) ----------------------------------------
 
@@ -270,10 +282,17 @@ class RemyMapping(Mapping):
         for attempt in range(self._tune.max_retries + 1):
             try:
                 r = client.request(req.method, req.path, json=req.json)
-                self.bridge.log.info("RemyMapping %s %s -> %s", req.method, req.path, r.status_code)
-                return
             except Exception as e:
                 last_exc = e
+                continue
+            # A response is not a success. Reaching the server and being told 500
+            # used to log at INFO exactly like a 200, so a failing Remy looked healthy.
+            if r.is_success:
+                self.bridge.log.info("RemyMapping %s %s -> %s", req.method, req.path, r.status_code)
+            else:
+                self.bridge.log.warning("RemyMapping %s %s -> %s %s",
+                                        req.method, req.path, r.status_code, r.reason_phrase)
+            return
         self.bridge.log.warning("RemyMapping %s %s failed after %d attempts: %s",
                                 req.method, req.path, self._tune.max_retries + 1, last_exc)
 
@@ -332,15 +351,18 @@ class RemyMapping(Mapping):
 
         `target_height` of None uploads at the source resolution.
         """
-        with Image.open(path).convert("RGB") as img:
-            if target_height:
-                w, h = img.size
-                new_w = max(1, int(w * (target_height / float(h)))) if h else w
-                img = img.resize((new_w, target_height), Image.Resampling.LANCZOS)
-            import io
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            data = buf.getvalue()
+        # `with Image.open(p).convert(...)` binds the context manager to the
+        # *converted* copy, so the file-backed image it was opened from is never
+        # closed. Hold the opened image itself.
+        with Image.open(path) as src:
+            img = src.convert("RGB")
+        if target_height:
+            w, h = img.size
+            new_w = max(1, int(w * (target_height / float(h)))) if h else w
+            img = img.resize((new_w, target_height), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        data = buf.getvalue()
         b64 = base64.b64encode(data).decode("utf-8")
         return f"data:image/jpeg;base64,{b64}"
 
@@ -353,15 +375,14 @@ class RemyMapping(Mapping):
         Only enqueue requests when a value actually changes.
         """
         if mode == self._audio_mode:
-            pass
+            return
 
         self._audio_mode = mode
         target_audio0 = (mode == "self")
         target_audio1 = (mode == "game")
 
         if target_audio0 != self._last_audio0:
-            self._last_audio0 = target_audio0
-            self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": target_audio0}))
+            self._put_audio0(target_audio0)
 
         if target_audio1 != self._last_audio1:
             self._last_audio1 = target_audio1
