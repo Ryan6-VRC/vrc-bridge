@@ -44,8 +44,10 @@ from vrbridge import ControllerEventType, VRBridge
 
 # ------------------------------ Config ------------------------------------
 
-# Base URL of the Remy AI server (FastAPI). Override with VRBRIDGE_REMY_URL.
-BASE_URL: str = os.environ.get("VRBRIDGE_REMY_URL", "http://192.168.1.100:8000")
+# Base URL of the Remy AI server (FastAPI). Point it at your host with
+# VRBRIDGE_REMY_URL; the default is loopback so an unconfigured install never
+# sends requests to whatever answers on someone else's LAN.
+BASE_URL: str = os.environ.get("VRBRIDGE_REMY_URL", "http://127.0.0.1:8000")
 
 # Networking behavior
 HTTP_TIMEOUT_SEC: float = 1.0
