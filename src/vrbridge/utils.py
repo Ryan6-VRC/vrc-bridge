@@ -245,7 +245,13 @@ class _PulseWorker:
                 finally:
                     # The trailing 0 is the whole contract. Never skip it because the
                     # rising edge failed -- a latched /input/Voice holds the mic open.
-                    ctx.send(self.address, 0)
+                    # CallbackContext.send reports a drop rather than raising, so an
+                    # unsent zero would otherwise complete the task and let
+                    # drain_pulses() report success with the parameter still latched.
+                    if ctx.send(self.address, 0) is False:
+                        self._log.warning(
+                            "Trailing zero for %s was not sent (no OSC target); the "
+                            "parameter may be left latched at %r.", self.address, value)
                 if gap:
                     time.sleep(gap)
             except Exception:

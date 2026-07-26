@@ -97,6 +97,7 @@ class RemyMapping(Mapping):
         self._worker = threading.Thread(target=self._worker_loop, name="RemyHTTPWorker", daemon=True)
         self._worker.start()
 
+        self._audio_lock = threading.Lock()
         self._audio_mode: Literal["none","self","game"] = "none"  # current selection
         self._last_audio0: Optional[bool] = None            # last /toggles/audio_0
         self._last_audio1: Optional[bool] = None            # last /toggles/audio_1
@@ -188,6 +189,11 @@ class RemyMapping(Mapping):
         # stale-cache defect this helper was written to fix.
         if self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": enabled})):
             self._last_audio0 = enabled
+
+    def _put_audio1(self, enabled: bool) -> None:
+        """Drive audio_1 and record it. Twin of _put_audio0; see there for why."""
+        if self._enqueue(_HTTPRequest("PUT", "/toggles/audio_1", {"enabled": enabled})):
+            self._last_audio1 = enabled
 
     def _on_left_tpad_press(self, ctx, evt):
         """Left TOUCHPAD_PRESS → enable audio_0."""
@@ -379,6 +385,13 @@ class RemyMapping(Mapping):
           - "game"-> audio_0=False, audio_1=True
         Only enqueue requests when a value actually changes.
         """
+        # OSC dispatch is per-datagram threaded, so two grab changes can enter this
+        # concurrently and interleave: audio_1=true then a stale audio_1=false while
+        # _audio_mode already reads "game". The whole transition is one critical section.
+        with self._audio_lock:
+            self._apply_audio_mode(mode)
+
+    def _apply_audio_mode(self, mode: Literal["none","self","game"]) -> None:
         # No early return on an unchanged mode. The per-value guards below already
         # do the deduplication, and skipping them costs the one case that mattered:
         # at startup _audio_mode is "none" with both mirrors None, so the first
@@ -392,5 +405,4 @@ class RemyMapping(Mapping):
             self._put_audio0(target_audio0)
 
         if target_audio1 != self._last_audio1:
-            self._last_audio1 = target_audio1
-            self._enqueue(_HTTPRequest("PUT", "/toggles/audio_1", {"enabled": target_audio1}))
+            self._put_audio1(target_audio1)

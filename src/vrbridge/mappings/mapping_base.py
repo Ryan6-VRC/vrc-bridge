@@ -5,7 +5,6 @@ from abc import ABC, abstractmethod
 from typing import Callable, Dict
 
 from vrbridge import VRBridge
-from vrbridge.utils import drain_pulses
 
 
 class Mapping(ABC):
@@ -158,13 +157,8 @@ class MappingRouter(ABC):
         except KeyboardInterrupt:
             pass
         finally:
-            # Before OSC goes down: let in-flight pulses send their trailing 0.
-            # The pulse workers are daemon threads, so a pulse caught between its
-            # value and its zero at exit leaves the parameter latched --
-            # /input/Voice stuck at 1 keys the mic open.
-            if not drain_pulses(timeout=1.0):
-                self.bridge.log.warning(
-                    "Timed out draining pending OSC pulses; a parameter may be left latched.")
+            # VRBridge.stop() owns the pulse drain -- it is the only place that can
+            # order it between the controller thread stopping and OSC going down.
             self.bridge.stop()
 
     @abstractmethod

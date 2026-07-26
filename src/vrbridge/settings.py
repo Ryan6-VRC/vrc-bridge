@@ -124,6 +124,15 @@ class UserCameraSettings:
         _ordered(self.aperture_min_f, self.aperture_max_f, f"{at}.aperture_min_f", f"{at}.aperture_max_f")
         _ordered(self.exposure_min_ev, self.exposure_max_ev, f"{at}.exposure_min_ev", f"{at}.exposure_max_ev")
         _positive(self.focaldist_log_eps, f"{at}.focaldist_log_eps")
+        # index_usercamera takes log(focaldist_min + focaldist_log_eps) as the floor of
+        # its focus mapping. _ordered alone would accept a negative min, which loads
+        # clean and then raises a math domain error inside a controller callback --
+        # swallowed to DEBUG, so focus scroll just stops working.
+        if self.focaldist_min + self.focaldist_log_eps <= 0:
+            raise ConfigError(
+                f"{at}.focaldist_min ({self.focaldist_min!r}) + {at}.focaldist_log_eps "
+                f"({self.focaldist_log_eps!r}) must be greater than 0; the focus mapping "
+                "takes the log of their sum")
         _non_empty(self.zoom_steps_mm, f"{at}.zoom_steps_mm")
         _non_empty(self.aperture_steps_f, f"{at}.aperture_steps_f")
         _positive(self.exposure_step_ev, f"{at}.exposure_step_ev")
@@ -423,12 +432,15 @@ def load_settings(path: Path | None = None) -> Settings:
 
     # `from __future__ import annotations` makes f.type a string, so take the
     # class off the default instance instead.
-    kwargs = {f.name: _build(type(f.default), raw[f.name], f.name)
-              for f in fields(Settings) if f.name in raw}
-    settings = Settings(**kwargs)
     try:
+        kwargs = {f.name: _build(type(f.default), raw[f.name], f.name)
+                  for f in fields(Settings) if f.name in raw}
+        settings = Settings(**kwargs)
         settings.validate()
     except ConfigError as exc:
+        # _build and the constructor must be inside this too, not just validate():
+        # ConfigError promises to name the key *and* the file, and a coercion error
+        # raised above the wrapper reported only the key.
         raise ConfigError(f"{path}: {exc}") from None
     return settings
 
