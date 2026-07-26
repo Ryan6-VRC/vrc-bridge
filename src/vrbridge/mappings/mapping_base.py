@@ -52,6 +52,18 @@ class Mapping(ABC):
         self._registered = True
         self._attach()
 
+    def __init_subclass__(cls, **kwargs):
+        """Refuse a subclass that overrides register().
+
+        The docstring above says "do not override"; the entry-point seam hands this
+        base to third parties, so it has to be enforced rather than requested.
+        """
+        super().__init_subclass__(**kwargs)
+        if "register" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} overrides Mapping.register(), which must stay idempotent. "
+                "Put your bindings in _attach() instead -- register() calls it exactly once.")
+
     def _attach(self) -> None:
         """Subclass hook: attach callbacks. Called exactly once, from register()."""
         return

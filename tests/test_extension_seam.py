@@ -39,8 +39,10 @@ def test_every_shipped_mapping_uses_the_attach_hook():
     """A mapping that overrode register() would silently opt out of the guard."""
     import vrbridge.mappings as pkg
 
-    names = [n for n in pkg.__all__ if n.endswith("Mapping") and n != "Mapping"]
-    assert len(names) >= 7, f"expected every shipped mapping to be checked, got {names}"
+    # __all__ + LAZY, so a mapping moved behind the lazy hook stays covered.
+    names = [n for n in list(pkg.__all__) + list(pkg.LAZY)
+             if n.endswith("Mapping") and n != "Mapping"]
+    assert len(names) == 7, f"expected all seven shipped mappings, got {names}"
     for name in names:
         cls = getattr(pkg, name)  # RemyMapping resolves through the lazy __getattr__
         assert issubclass(cls, Mapping)
@@ -97,3 +99,25 @@ def test_a_broken_plugin_is_skipped_not_fatal(monkeypatch, ep, reason):
 def test_a_plugin_may_not_shadow_a_builtin(monkeypatch):
     _fake_eps(monkeypatch, _EP("default", "pkg:R", lambda: _PluginRouter))
     assert cli.discover_routers()["default"] is DefaultRouter
+
+
+def test_star_import_does_not_pull_in_the_optional_extra():
+    """`import *` walks __all__ with getattr, so a lazily-hooked name listed there
+    resolves anyway -- pulling in httpx and Pillow, and hard-failing on an install
+    without the extra."""
+    import vrbridge.mappings as pkg
+
+    assert "RemyMapping" not in pkg.__all__
+    assert "RemyMapping" in pkg.LAZY
+    assert "RemyMapping" in dir(pkg), "dir() should still advertise it"
+
+
+def test_overriding_register_is_refused_at_class_creation():
+    """"Do not override" has to be a contract, not a docstring: the entry-point
+    seam hands this base to third parties."""
+    with pytest.raises(TypeError, match="must stay idempotent"):
+        class Bad(Mapping):
+            name = "bad"
+
+            def register(self) -> None:
+                pass

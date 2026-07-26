@@ -133,7 +133,11 @@ class UserCameraMapping(Mapping):
             hi_x  = self._tune.focaldist_max
             cur_x = clamp(self.focaldist_state.get(ctx), lo_x, hi_x)
 
-            ln_min = math.log(eps)
+            # log the *configured* floor, not an implicit zero: focaldist_min is a
+            # setting now, and at anything above 0 the bottom of the scroll travel
+            # would map below lo_x and clamp into a dead zone. Reduces to log(eps)
+            # at the default of 0.0.
+            ln_min = math.log(lo_x + eps)
             ln_max = math.log(hi_x + eps)
             ln_rng = ln_max - ln_min
             cur_ln = math.log(cur_x + eps)

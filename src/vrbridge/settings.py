@@ -157,7 +157,13 @@ class VirtualLensSettings:
         _log_safe_range(self.focal_min_mm, self.focal_max_mm, f"{at}.focal_min_mm", f"{at}.focal_max_mm")
         _log_safe_range(self.fnumber_min, self.fnumber_max, f"{at}.fnumber_min", f"{at}.fnumber_max")
         _positive(self.exposure_range_ev, f"{at}.exposure_range_ev")
-        _positive(self.aperture_min_x, f"{at}.aperture_min_x")
+        # Not merely positive: at >= 1 the floor in aperture_f_to_x returns the same
+        # value for every finite f-number (one flat ladder), and above 1 it leaves
+        # VL2's 0..1 parameter domain entirely.
+        if not 0.0 < self.aperture_min_x < 1.0:
+            raise ConfigError(
+                f"{at}.aperture_min_x is {self.aperture_min_x!r}; expected a value "
+                "between 0 and 1, exclusive")
         _non_empty(self.zoom_steps_mm, f"{at}.zoom_steps_mm")
         _non_empty(self.aperture_steps_f, f"{at}.aperture_steps_f")
         _positive(self.exposure_step_ev, f"{at}.exposure_step_ev")
@@ -330,7 +336,15 @@ def _coerce(value: Any, default: Any, key: str) -> Any:
     if isinstance(default, tuple):
         if not isinstance(value, list):
             raise ConfigError(f"{key} is {value!r}; expected an array")
-        return tuple(float(v) for v in value)
+        out = []
+        for i, v in enumerate(value):
+            # float(v) on its own raises a bare ValueError naming neither the key
+            # nor the file, and the path re-wrap at load_settings only catches
+            # ConfigError -- so the message would name nothing at all.
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ConfigError(f"{key}[{i}] is {v!r}; expected a number")
+            out.append(float(v))
+        return tuple(out)
     if isinstance(default, bool):
         if not isinstance(value, bool):
             raise ConfigError(f"{key} is {value!r}; expected true or false")

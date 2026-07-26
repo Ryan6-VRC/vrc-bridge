@@ -186,14 +186,18 @@ class ControllerManager:
                     # A permanently broken SteamVR used to retry at 2 Hz forever.
                     # Back off, and say plainly that this is not transient any more --
                     # otherwise the only signal is an identical traceback on repeat.
-                    backoff = min(0.5 * (2 ** max(0, consecutive_failures - 1)),
+                    # Cap the exponent, not just the result: 2 ** n builds the full
+                    # int before min() sees it, and past ~1026 failures the int->float
+                    # conversion raises OverflowError from inside this finally block,
+                    # killing the controller thread while the bridge stays up.
+                    backoff = min(0.5 * 2 ** min(max(0, consecutive_failures - 1), 6),
                                   self.MAX_RETRY_BACKOFF)
                     if consecutive_failures == 5 and self.log:
                         self.log.error(
                             "Controller input has failed to start %d times in a row. SteamVR is "
                             "probably not running, or the action manifest at %s is unreadable. "
                             "Retrying every %.0fs; the bridge stays up but no controller events "
-                            "will arrive.", consecutive_failures, self.ACTIONS, self.MAX_RETRY_BACKOFF)
+                            "will arrive.", consecutive_failures, self.ACTIONS, backoff)
                 if backoff:
                     self._stop.wait(backoff)
 

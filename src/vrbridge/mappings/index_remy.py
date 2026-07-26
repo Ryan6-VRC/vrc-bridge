@@ -183,8 +183,11 @@ class RemyMapping(Mapping):
         _set_audio_mode() compared against a value the server no longer held and
         skipped a PUT it owed.
         """
-        self._last_audio0 = enabled
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": enabled}))
+        # Record only what was accepted. _enqueue drops on a full queue with just a
+        # warning, and a mirror holding a PUT the server never received is the same
+        # stale-cache defect this helper was written to fix.
+        if self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": enabled})):
+            self._last_audio0 = enabled
 
     def _on_left_tpad_press(self, ctx, evt):
         """Left TOUCHPAD_PRESS → enable audio_0."""
@@ -228,13 +231,15 @@ class RemyMapping(Mapping):
 
     # ---- worker plumbing --------------------------------------------------
 
-    def _enqueue(self, task: object) -> None:
-        """Put a task on the worker queue without blocking the controller thread."""
+    def _enqueue(self, task: object) -> bool:
+        """Queue a task without blocking the controller thread. False if dropped."""
         try:
             self._q.put_nowait(task)
+            return True
         except queue.Full:
             # Drop rather than block the input thread.
             self.bridge.log.warning("RemyMapping queue full; dropping task: %r", task)
+            return False
 
     def _worker_loop(self) -> None:
         """
@@ -374,9 +379,11 @@ class RemyMapping(Mapping):
           - "game"-> audio_0=False, audio_1=True
         Only enqueue requests when a value actually changes.
         """
-        if mode == self._audio_mode:
-            return
-
+        # No early return on an unchanged mode. The per-value guards below already
+        # do the deduplication, and skipping them costs the one case that mattered:
+        # at startup _audio_mode is "none" with both mirrors None, so the first
+        # inbound grab=0 is what reconciles a Remy still holding audio_0 on from a
+        # previous run. An early return makes that a no-op.
         self._audio_mode = mode
         target_audio0 = (mode == "self")
         target_audio1 = (mode == "game")
