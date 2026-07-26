@@ -2,6 +2,8 @@
 
 Primary reader: agent.
 
+**Cite by path, never by SHA.** This repo's history is slated for re-creation when it is packaged as a product, so a commit reference recorded anywhere — here, a PR body, a handoff — rots. Name the file and the symbol.
+
 vrc-bridge is a **product**: the SteamVR-input to VRChat-OSC substrate for people building OSC-driven gimmicks. The controller layer is the load-bearing half nothing else supplies, and the camera mappings are both shipped features and the worked examples that teach the substrate. It is not a personal input rig to be minimized, and it is **not** the workspace's internal verification surface — that question is settled below, not open.
 
 The contract is with third-party mapping authors, not with this workspace's gates. `docs/verify.md` governs claims about *avatars*; this repo's claims are about software, gated by ordinary tests. "Only provable in a live client" describes the whole VRChat tooling ecosystem, not a defect in this repo.
