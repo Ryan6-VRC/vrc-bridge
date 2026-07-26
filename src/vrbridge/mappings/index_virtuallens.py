@@ -2,10 +2,10 @@
 VirtualLens2 controls via VRBridge (Index touchpads & presses)
 
 - TOUCHPAD_PRESS:
-    * LEFT short -> Drop/Pickup via VirtualLens2_Control (uses PositionMode)
-    * LEFT long  -> RemotePlayerMask toggle 0/1
-    * RIGHT  short -> AFMode toggle between 0 and 1 (else -> 0)
-    * RIGHT  long  -> AutoLeveler toggle between 0 and 3 (else -> 0)
+    * LEFT  short -> Drop/Pickup via VirtualLens2_Control (uses PositionMode)
+    * LEFT  long  -> AFMode toggle between 0 and 1 (else -> 0)
+    * RIGHT short -> AutoLeveler toggle between 0 and 3 (else -> 0)
+    * RIGHT long  -> RemotePlayerMask toggle 0/1
 - TOUCHPAD_SCROLL (stepped):
     * LEFT  VScroll -> Aperture +/- (discrete ladder)
     * LEFT  HScroll -> Exposure +/- (discrete ladder)

@@ -6,10 +6,10 @@ VRCLens controls via VRBridge (Index touchpads & presses)
 - Left touchpad vertical      -> Aperture +/- (VRCL feature toggles 193/192).
 - Left touchpad horizontal    -> Exposure +/- (VRCL feature toggles 110/108).
 - Short/Long presses (TOUCHPAD):
-    * LEFT  short -> Stabilize (14)
-    * LEFT  long  -> Portrait  (222)
-    * RIGHT short -> Drop      (251)
-    * RIGHT long  -> AutoFocus (13)
+    * LEFT  short -> Drop      (251)
+    * LEFT  long  -> AutoFocus (13)
+    * RIGHT short -> Stabilize (14)
+    * RIGHT long  -> Portrait  (222)
 
 Requires the vrbridge project to be importable.
 """
