@@ -43,7 +43,7 @@ class ControllerManager:
         self._initialized = False
 
         # Paths for SteamVR files; write them if missing.
-        files = cfg.ensure_steamvr_files(files_dir=files_dir or cfg.get_files_dir(), entry_script=os.path.abspath(__file__))
+        files = cfg.ensure_steamvr_files(files_dir=files_dir or cfg.get_files_dir())
         self.ACTIONS = files.actions
         self.BIND_KNU = files.bindings_knuckles
         self.BIND_OCU = files.bindings_oculus

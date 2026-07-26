@@ -34,7 +34,7 @@ vrbridge --router camera  # camera-prefab router
 vrbridge --help           # all options
 ```
 
-Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/`.
+Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/` in a source checkout, or under your per-user data directory for an installed package. Set `VRBRIDGE_FILES_DIR` to put them somewhere else.
 
 ## Routers and mappings
 

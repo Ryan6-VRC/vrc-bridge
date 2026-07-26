@@ -37,18 +37,29 @@ LONG_PRESS_THRESHOLD:   float = 0.40   # seconds
 APP_KEY:  str = "com.vrbridge.input"
 APP_NAME: str = "VRBridge Controller Input"
 
+def _user_data_dir() -> Path:
+    """Per-user writable location for generated files, for an installed package."""
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "vrbridge"
+    return Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "vrbridge"
+
+
 # Where to write the SteamVR files (manifest + bindings + actions).
-# By default, we keep them in a sibling "steamvr" directory next to this package
-# (i.e., vrbridge/../steamvr). You can override by setting VRBRIDGE_FILES_DIR
-# to an absolute path.
+# Override with VRBRIDGE_FILES_DIR (absolute path).
 def get_files_dir() -> str:
     env = os.environ.get("VRBRIDGE_FILES_DIR")
     if env:
         return str(Path(env).expanduser().resolve())
-    # Default to <repo-root>/steamvr_files (two levels up from src/vrbridge/).
-    # These files are generated/regenerated at runtime; override with VRBRIDGE_FILES_DIR.
+    # A source checkout keeps them at <repo-root>/steamvr_files, where .gitignore
+    # already covers them. An installed package cannot: two levels up from
+    # site-packages/vrbridge/ is inside the Python tree, which is the wrong place
+    # to write runtime state and may not be writable at all.
     here = Path(__file__).resolve().parent
-    return str((here.parent.parent / "steamvr_files").resolve())
+    repo_root = here.parent.parent  # src/vrbridge -> src -> checkout root
+    if (repo_root / "pyproject.toml").is_file():
+        return str((repo_root / "steamvr_files").resolve())
+    return str((_user_data_dir() / "steamvr_files").resolve())
 
 @dataclass(frozen=True)
 class SteamVRFiles:
@@ -57,7 +68,7 @@ class SteamVRFiles:
     bindings_oculus: str
     vrmanifest: str
 
-def ensure_steamvr_files(*, files_dir: str | None = None, entry_script: str | None = None) -> SteamVRFiles:
+def ensure_steamvr_files(*, files_dir: str | None = None) -> SteamVRFiles:
     """
     Ensure SteamVR JSON files exist and return their paths.
 
@@ -66,7 +77,6 @@ def ensure_steamvr_files(*, files_dir: str | None = None, entry_script: str | No
     - vrbridge_input.vrmanifest : Registers our background app identity.
 
     If `files_dir` is None, uses get_files_dir().
-    If `entry_script` is None, uses this module path (works for background apps).
     """
     d = Path(files_dir) if files_dir is not None else Path(get_files_dir())
     d.mkdir(parents=True, exist_ok=True)
@@ -183,16 +193,19 @@ def ensure_steamvr_files(*, files_dir: str | None = None, entry_script: str | No
         with bind_oc.open("w", encoding="utf-8") as f:
             json.dump(BIND_OCU, f, indent=2)
 
-    # vrmanifest is small; rewrite every run so it always points at the current interpreter and script.
-    entry = Path(entry_script or __file__).resolve()
+    # vrmanifest is small; rewrite every run so it always points at the current interpreter.
+    # Launch the CLI module, not a file path: the only module that ever passed itself
+    # here was controller_manager, which has no __main__, so a SteamVR auto-launch
+    # started the interpreter and exited. "-m vrbridge.cli" resolves for both an
+    # editable checkout and an installed package, and needs no quoting.
     vrman_json = {
         "source": "user",
         "applications": [{
             "app_key": APP_KEY,
             "launch_type": "binary",
             "binary_path_windows": sys.executable,
-            "arguments": f"\\\"{str(entry)}\\\"",
-            "working_directory": str(entry.parent),
+            "arguments": "-m vrbridge.cli",
+            "working_directory": str(d.resolve()),
             "is_background_process": True,
             "strings": {"en_us": {"name": APP_NAME}},
             "action_manifest_path": str(actions.resolve()),
