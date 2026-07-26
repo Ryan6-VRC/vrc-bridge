@@ -20,7 +20,7 @@ VOICE_INPUT_ADDR = "/input/Voice"
 
 class MuteProxyMapping(Mapping):
     """Always-on friendly: handler stays registered; gated by self.enabled."""
-    name = "index_muteproxy"
+    name = "osc_muteproxy"
 
     def __init__(self, bridge: VRBridge,
                  *, mute_addr: str = MUTE_PROXY_ADDR,

@@ -43,7 +43,7 @@ A **router** decides which mapping is active at any moment.
 | Router    | Behavior |
 |-----------|----------|
 | `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy` and `VRCFT` stay on. |
-| `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar. |
+| `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` stays on, but `VRCFT` is not registered. |
 | `remy`    | The `default` router plus the Remy AI integration (see below). |
 
 **Core mappings**
