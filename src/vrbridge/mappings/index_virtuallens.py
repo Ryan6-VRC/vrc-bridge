@@ -184,7 +184,23 @@ class VirtualLensMapping(Mapping):
         self.remotemask_state.set(ctx, 1 if cur == 0 else 0)
 
     def toggle_drop(self, ctx, evt):
-        """Drop (13) if PositionMode==0 else Pickup (12)"""
+        """Drop (13) if PositionMode==0 else Pickup (12).
+
+        UNSETTLED, and deliberately left as-is: this writes Control and leaves it
+        latched at the command value, where index_vrclens drives its structurally
+        identical command channel with press_pulse and returns it to 0. The two
+        cannot both be right.
+
+        Latching appears to work because the two commands alternate, so a press
+        always changes the value. It would stop working the moment the same command
+        is sent twice in a row -- which the optimistic position_state.ingest() below
+        makes reachable if the mirror ever desyncs from VL2's own echo.
+
+        Settle it against VirtualLens2's prefab (does its FX read a transition into
+        the value, or the value itself?), not by pattern-matching the sibling. Until
+        then there is no press_duration in VirtualLensSettings, because a config key
+        that exists only to serve an unmade change is a key that does nothing.
+        """
         cur = self.position_state.get()
         if cur == 0:
             # Pickedup -> Drop

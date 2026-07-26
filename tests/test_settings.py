@@ -53,7 +53,10 @@ def test_defaults_are_the_shipped_values():
     v = s.virtuallens
     assert (v.focal_min_mm, v.focal_max_mm) == (12.0, 300.0)
     assert (v.fnumber_min, v.fnumber_max) == (1.0, 22.0)
-    assert (v.exposure_range_ev, v.aperture_min_x, v.press_duration) == (3.0, 0.0001, 0.1)
+    assert (v.exposure_range_ev, v.aperture_min_x) == (3.0, 0.0001)
+    # No press_duration: index_virtuallens latches VirtualLens2_Control rather than
+    # pulsing it, so the key would configure nothing. See toggle_drop's docstring.
+    assert not hasattr(v, "press_duration")
     assert list(v.zoom_steps_mm) == [12, 16, 20, 24, 28, 35, 50, 70, 85, 105, 135, 200, 300]
     assert list(v.aperture_steps_f) == [1.0, 1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0]
 

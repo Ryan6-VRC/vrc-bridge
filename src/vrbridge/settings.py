@@ -141,7 +141,9 @@ class VirtualLensSettings:
     fnumber_max: float = 22.0
     exposure_range_ev: float = 3.0
     aperture_min_x: float = 0.0001       # keeps the f-max rung clear of the x==0 Infinity sentinel
-    press_duration: float = 0.1
+    # No press_duration here on purpose: this mapping drives VirtualLens2_Control
+    # with a latched write, not a pulse. See index_virtuallens.toggle_drop -- the
+    # key belongs here only once that question is settled.
     zoom_steps_mm: tuple[float, ...] = (12, 16, 20, 24, 28, 35, 50, 70, 85, 105, 135, 200, 300)
     aperture_steps_f: tuple[float, ...] = (1.0, 1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0)
     exposure_step_ev: float = 1.0 / 3.0
@@ -156,7 +158,6 @@ class VirtualLensSettings:
         _log_safe_range(self.fnumber_min, self.fnumber_max, f"{at}.fnumber_min", f"{at}.fnumber_max")
         _positive(self.exposure_range_ev, f"{at}.exposure_range_ev")
         _positive(self.aperture_min_x, f"{at}.aperture_min_x")
-        _positive(self.press_duration, f"{at}.press_duration")
         _non_empty(self.zoom_steps_mm, f"{at}.zoom_steps_mm")
         _non_empty(self.aperture_steps_f, f"{at}.aperture_steps_f")
         _positive(self.exposure_step_ev, f"{at}.exposure_step_ev")
