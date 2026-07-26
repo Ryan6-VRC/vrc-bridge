@@ -58,7 +58,9 @@ class Mapping(ABC):
         base to third parties, so it has to be enforced rather than requested.
         """
         super().__init_subclass__(**kwargs)
-        if "register" in cls.__dict__:
+        # Resolve through the MRO, not cls.__dict__: a mixin supplying register()
+        # bypasses a __dict__ check entirely.
+        if cls.register is not Mapping.register:
             raise TypeError(
                 f"{cls.__name__} overrides Mapping.register(), which must stay idempotent. "
                 "Put your bindings in _attach() instead -- register() calls it exactly once.")

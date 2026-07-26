@@ -196,8 +196,10 @@ class ControllerManager:
                         self.log.error(
                             "Controller input has failed to start %d times in a row. SteamVR is "
                             "probably not running, or the action manifest at %s is unreadable. "
-                            "Retrying every %.0fs; the bridge stays up but no controller events "
-                            "will arrive.", consecutive_failures, self.ACTIONS, backoff)
+                            "Next retry in %.0fs, backing off to %.0fs; the bridge stays up but "
+                            "no controller events "
+                            "will arrive.", consecutive_failures, self.ACTIONS, backoff,
+                            self.MAX_RETRY_BACKOFF)
                 if backoff:
                     self._stop.wait(backoff)
 

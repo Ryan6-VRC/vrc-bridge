@@ -110,6 +110,10 @@ def test_a_present_file_overrides_only_what_it_names(tmp_path):
     ("[controller]\ninvert_vscroll = 0\n", "invert_vscroll"),
     ("[controller]\npoll_interval = 'fast'\n", "poll_interval"),
     ("[usercamera]\nzoom_min_mm = 200.0\n", "zoom_min_mm"),
+    # All three below were added in response to review; none was pinned until now.
+    ("[vrclens]\nzoom_steps = ['a']\n", "zoom_steps[0]"),
+    ("[virtuallens]\naperture_min_x = 1.5\n", "aperture_min_x"),
+    ("[usercamera]\nfocaldist_min = -1.0\n", "focaldist_min"),
 ])
 def test_bad_settings_are_refused_and_name_the_key(tmp_path, body, must_name):
     """A refusal has to name the offending key.
@@ -123,6 +127,9 @@ def test_bad_settings_are_refused_and_name_the_key(tmp_path, body, must_name):
     with pytest.raises(ConfigError) as exc:
         load_settings(p)
     assert must_name in str(exc.value)
+    # ConfigError's docstring is an invariant: the key *and* the file. A coercion
+    # error used to escape above the wrapper that adds the path.
+    assert str(p) in str(exc.value), "refusal did not name the settings file"
 
 
 def test_malformed_toml_is_refused_rather_than_skipped(tmp_path):

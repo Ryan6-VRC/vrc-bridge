@@ -112,6 +112,18 @@ def test_star_import_does_not_pull_in_the_optional_extra():
     assert "RemyMapping" in dir(pkg), "dir() should still advertise it"
 
 
+def test_a_mixin_cannot_smuggle_in_a_register_override():
+    """The guard checked cls.__dict__, which multiple inheritance walks straight
+    past -- the class body is clean while register still resolves to the mixin."""
+    class RegisterMixin:
+        def register(self) -> None:
+            pass
+
+    with pytest.raises(TypeError, match="must stay idempotent"):
+        class Plugin(RegisterMixin, Mapping):
+            name = "plugin"
+
+
 def test_overriding_register_is_refused_at_class_creation():
     """"Do not override" has to be a contract, not a docstring: the entry-point
     seam hands this base to third parties."""

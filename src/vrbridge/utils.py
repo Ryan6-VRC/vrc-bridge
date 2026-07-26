@@ -188,9 +188,9 @@ class _PulseWorker:
 
     *Blocking.* press_pulse used to sleep inline. The design record rules that a
     blocking sleep in an OSC callback is harmless, and it is -- OSC dispatch is
-    per-datagram threaded. But every caller of press_pulse is a *controller*
-    callback, and those run synchronously on the single ControllerLoop thread, so
-    the sleep froze input polling. A two-step aperture scroll cost 0.2s; a
+    per-datagram threaded, which is why osc_muteproxy's pulse was always safe. But
+    six of the seven callers are *controller* callbacks, and those run synchronously
+    on the single ControllerLoop thread, so the sleep froze input polling. A two-step aperture scroll cost 0.2s; a
     diagonal left-pad drag fires the vertical and horizontal handlers from the
     same sample and cost 0.4s -- exactly long_press_threshold, so a tap arriving
     just after could be observed late and reclassified as a long press, firing the
@@ -258,6 +258,10 @@ class _PulseWorker:
                 # Off the caller's thread, so nothing else would ever surface this.
                 self._log.exception("Pulse on %s failed", self.address)
             finally:
+                # Drop the reference before blocking on the next get(): an idle
+                # worker would otherwise pin this CallbackContext, and through it
+                # the OSCManager and the whole bridge, for the process lifetime.
+                ctx = None
                 self._q.task_done()
 
     def drain(self, timeout: float = 5.0) -> bool:

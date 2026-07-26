@@ -111,6 +111,16 @@ class VirtualLensMapping(Mapping):
         self.exposure_steps_x, exposure_dropped = exposure_ladder(
             exposure_ev_rungs(-t.exposure_range_ev, t.exposure_range_ev, t.exposure_step_ev),
             t.exposure_range_ev)
+        # A legal-but-large aperture_min_x floors most rungs to the same value. The
+        # ladder is not shorter, so the dropped-rung warning below cannot see it --
+        # but stepping does nothing across the flattened span, which is the same
+        # failure from the operator's side.
+        flattened = sum(1 for v in self.aperture_steps_x if v == t.aperture_min_x)
+        if flattened > 1:
+            bridge.log.warning(
+                "index_virtuallens: aperture_min_x (%s) floors %d of %d aperture rungs to the "
+                "same value; stepping will not move between them.",
+                t.aperture_min_x, flattened, len(self.aperture_steps_x))
         for label, dropped, unit, lo, hi in (
             ("zoom", zoom_dropped, "mm", t.focal_min_mm, t.focal_max_mm),
             ("aperture", aperture_dropped, "f", t.fnumber_min, t.fnumber_max),
