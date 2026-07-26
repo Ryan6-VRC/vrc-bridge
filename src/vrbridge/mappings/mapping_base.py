@@ -70,15 +70,35 @@ class MappingRouter(ABC):
     A router wires up mappings, decides which ones should be enabled/disabled
     based on external state, and drives their update() calls.
     """
+    #: Seconds between repeat reports of one mapping's failing update().
+    UPDATE_FAILURE_REPORT_GAP: float = 10.0
+
     def __init__(self, bridge: VRBridge):
         self.bridge = bridge
         # Central registry for all mappings this router owns.
         self._mappings: Dict[str, Mapping] = {}
+        # name -> [failure count, last time we reported it]
+        self._update_failures: Dict[str, list] = {}
 
     def register(self, mapping: "Mapping") -> None:
         """Register (and .register()) a mapping with the router."""
         mapping.register()
         self._mappings[mapping.name] = mapping
+
+    def _report_update_failure(self, name: str, now: float) -> None:
+        """Report a throwing update() on the first failure, then at a bounded rate.
+
+        Swallowing it hid a mapping that threw on every tick. Logging every tick
+        would emit at update_hz and bury everything else, so repeats are rate
+        limited and carry the running count.
+        """
+        st = self._update_failures.setdefault(name, [0, 0.0])
+        st[0] += 1
+        if st[0] == 1 or (now - st[1]) >= self.UPDATE_FAILURE_REPORT_GAP:
+            self.bridge.log.exception(
+                "Mapping %s raised in update() (%d time(s) so far). It stays registered "
+                "and enabled; its periodic behavior is not running.", name, st[0])
+            st[1] = now
 
     def run_forever(self, *, update_hz: float = 10.0):
         """Start I/O and enter the routing loop."""
@@ -98,8 +118,9 @@ class MappingRouter(ABC):
                     try:
                         m.update(now)
                     except Exception:
-                        # Don't crash the loop if a mapping throws in update()
-                        pass
+                        # One mapping must not take down the loop -- but it must
+                        # not vanish either (CLAUDE.md rule 7).
+                        self._report_update_failure(m.name, now)
 
                 time.sleep(tick)
         except KeyboardInterrupt:

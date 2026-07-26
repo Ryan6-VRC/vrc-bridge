@@ -58,9 +58,20 @@ class ParamState:
         return self.last if self.last is not None else self.default
 
     def set(self, ctx, x) -> float:
-        """Send a new value via ctx and update our mirror."""
+        """Send a new value via ctx and update our mirror if the send was accepted.
+
+        The mirror used to advance first and ignore the result. OSCManager.send
+        returns False when no VRChat target has been discovered yet, so scrolling
+        before VRChat appears walked the mirror up a ladder that was never
+        transmitted -- and the first successful send then jumped the camera to
+        wherever that walk had reached. Nothing said so.
+
+        Only an explicit False counts as a refusal, so a ctx whose send() returns
+        None (the common case for a test double) still advances the mirror.
+        """
+        if ctx.send(self.addr, x) is False:
+            return self.last
         self.last = x
-        ctx.send(self.addr, x)
         return self.last
 
     def ingest(self, value: Any):

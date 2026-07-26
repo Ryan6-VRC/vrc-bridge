@@ -138,12 +138,17 @@ class ControllerManager:
         }
 
     # ---------------------- Main loop -------------------------------------
+    #: Backoff after a failed init/run cycle grows to this ceiling, in seconds.
+    MAX_RETRY_BACKOFF: float = 30.0
+
     def _run(self):
+        consecutive_failures = 0
         while not self._stop.is_set():
             try:
                 if not self._initialized:
                     self._init_openvr()
                     self._initialized = True
+                    consecutive_failures = 0
                     if self.log: self.log.info("OpenVR initialized.")
 
                 while not self._stop.is_set():
@@ -165,14 +170,32 @@ class ControllerManager:
                 self._stop.set()
                 break
             except Exception as e:
-                if self.log: self.log.exception("Controller loop error: %s", e)
+                consecutive_failures += 1
+                if self.log:
+                    self.log.exception("Controller loop error (attempt %d): %s",
+                                       consecutive_failures, e)
             finally:
                 try:
                     openvr.shutdown()
                 except Exception as e:
                     if self.log: self.log.debug("openvr.shutdown failed: %s", e)
                 self._initialized = False
-                time.sleep(0.5)
+                if self._stop.is_set():
+                    backoff = 0.0
+                else:
+                    # A permanently broken SteamVR used to retry at 2 Hz forever.
+                    # Back off, and say plainly that this is not transient any more --
+                    # otherwise the only signal is an identical traceback on repeat.
+                    backoff = min(0.5 * (2 ** max(0, consecutive_failures - 1)),
+                                  self.MAX_RETRY_BACKOFF)
+                    if consecutive_failures == 5 and self.log:
+                        self.log.error(
+                            "Controller input has failed to start %d times in a row. SteamVR is "
+                            "probably not running, or the action manifest at %s is unreadable. "
+                            "Retrying every %.0fs; the bridge stays up but no controller events "
+                            "will arrive.", consecutive_failures, self.ACTIONS, self.MAX_RETRY_BACKOFF)
+                if backoff:
+                    self._stop.wait(backoff)
 
     def _poll_vr_events(self):
         """Poll system-level events and respond to quit requests."""

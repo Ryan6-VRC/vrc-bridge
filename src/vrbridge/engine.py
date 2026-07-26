@@ -36,7 +36,13 @@ class CallbackContext:
     """
     osc: OSCManager
     def get(self, address: str, default=None): return self.osc.get_cached(address, default)
-    def send(self, address: str, value): self.osc.send(address, value)
+    def send(self, address: str, value) -> bool:
+        """Send, returning False if it was dropped (no target yet, or a socket error).
+
+        A caller that mirrors what it sends needs this to decide whether to
+        advance that mirror; discarding it is how ParamState drifted from the avatar.
+        """
+        return self.osc.send(address, value)
 
 class VRBridge:
     """Orchestrates OSC I/O and SteamVR controller events.
