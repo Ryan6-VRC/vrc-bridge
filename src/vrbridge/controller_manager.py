@@ -229,7 +229,7 @@ class ControllerManager:
 
     def _poll_once(self):
         s = self._state
-        t = self._tune
+        tune = self._tune   # NB: `t` is taken further down by action data
         for hand in (self._h_left, self._h_right):
             # --- Touchpad click family ---
             try:
@@ -242,7 +242,7 @@ class ControllerManager:
                     else:
                         self._emit("touchpad.release", hand)
                         held = now - s[hand]["tpad_down_ts"]
-                        self._emit("touchpad.long_press" if held >= t.long_press_threshold else "touchpad.short_press", hand)
+                        self._emit("touchpad.long_press" if held >= tune.long_press_threshold else "touchpad.short_press", hand)
                         s[hand]["tpad_down"] = False; s[hand]["tpad_down_ts"] = 0.0
                     s[hand]["tpad_last_click"] = d.bState
             except Exception as e:
@@ -293,26 +293,26 @@ class ControllerManager:
                                 s[hand]["last_y"] = p.y
 
                                 # Emit high-frequency raw deltas (x & y)
-                                rdx = t.invert_hscroll * dx
-                                rdy = t.invert_vscroll * dy
-                                if (abs(rdx) >= t.raw_scroll_min_delta) or (abs(rdy) >= t.raw_scroll_min_delta):
+                                rdx = tune.invert_hscroll * dx
+                                rdy = tune.invert_vscroll * dy
+                                if (abs(rdx) >= tune.raw_scroll_min_delta) or (abs(rdy) >= tune.raw_scroll_min_delta):
                                     self._emit("touchpad.scroll_raw", hand, dx=rdx, dy=rdy,
                                                ax=float(p.x), ay=float(p.y))
 
-                                if abs(dy) >= t.deadzone:
-                                    s[hand]["acc_y"] += t.invert_vscroll * dy
-                                    steps_v = int(s[hand]["acc_y"] / t.v_scroll_step)
+                                if abs(dy) >= tune.deadzone:
+                                    s[hand]["acc_y"] += tune.invert_vscroll * dy
+                                    steps_v = int(s[hand]["acc_y"] / tune.v_scroll_step)
                                     if steps_v:
-                                        steps_v = max(min(steps_v, t.max_steps_per_frame), -t.max_steps_per_frame)
+                                        steps_v = max(min(steps_v, tune.max_steps_per_frame), -tune.max_steps_per_frame)
                                         self._emit("touchpad.vscroll", hand, steps=steps_v)
-                                        s[hand]["acc_y"] -= steps_v * t.v_scroll_step
-                                if abs(dx) >= t.deadzone:
-                                    s[hand]["acc_x"] += t.invert_hscroll * dx
-                                    steps_h = int(s[hand]["acc_x"] / t.h_scroll_step)
+                                        s[hand]["acc_y"] -= steps_v * tune.v_scroll_step
+                                if abs(dx) >= tune.deadzone:
+                                    s[hand]["acc_x"] += tune.invert_hscroll * dx
+                                    steps_h = int(s[hand]["acc_x"] / tune.h_scroll_step)
                                     if steps_h:
-                                        steps_h = max(min(steps_h, t.max_steps_per_frame), -t.max_steps_per_frame)
+                                        steps_h = max(min(steps_h, tune.max_steps_per_frame), -tune.max_steps_per_frame)
                                         self._emit("touchpad.hscroll", hand, steps=steps_h)
-                                        s[hand]["acc_x"] -= steps_h * t.h_scroll_step
+                                        s[hand]["acc_x"] -= steps_h * tune.h_scroll_step
             except Exception as e:
                 if self.log: self.log.debug("touchpad scroll read failed: %s", e)
 
@@ -327,7 +327,7 @@ class ControllerManager:
                     else:
                         self._emit("thumbstick.release", hand)
                         held = now - s[hand]["joy_down_ts"]
-                        self._emit("thumbstick.long_press" if held >= t.long_press_threshold else "thumbstick.short_press", hand)
+                        self._emit("thumbstick.long_press" if held >= tune.long_press_threshold else "thumbstick.short_press", hand)
                         s[hand]["joy_down"] = False; s[hand]["joy_down_ts"] = 0.0
                     s[hand]["joy_last_click"] = j.bState
             except Exception as e:
