@@ -40,7 +40,7 @@ SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL: bool = True  # Reset whenever a step zoo
 
 # UserCamera slider ranges (from VRChat docs)
 ZOOM_MIN_MM:       float = 20.0
-ZOOM_MAX_MM:       float = 300.0
+ZOOM_MAX_MM:       float = 150.0
 EXPOSURE_MIN_EV:   float = -3.0
 EXPOSURE_MAX_EV:   float =  3.0
 FOCALDIST_MIN:     float = 0.0
@@ -54,7 +54,7 @@ APERTURE_MAX_F:    float = 32.0
 FOCALDIST_LOG_EPS: float = 0.10  # metres; tweak if you want more/less sensitivity near zero
 
 # Natural step ladders (kept compact and within allowed ranges)
-ZOOM_STEPS_MM: list[float] = [20, 22, 26, 30, 35, 45, 55, 70, 85, 105, 135, 200, 300]
+ZOOM_STEPS_MM: list[float] = [20, 22, 26, 30, 35, 45, 55, 70, 85, 105, 135, 150]
 APERTURE_STEPS: list[float] = [1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0, 32.0]
 # Exposure: -3..+3 in 1/3 EV steps
 EXPOSURE_STEPS_EV: list[float] = [round(EXPOSURE_MIN_EV + i*(1/3), 6)
@@ -68,7 +68,7 @@ USERC_AUTOLEVELROLL = "/usercamera/AutoLevelRoll"
 USERC_SHOWFOCUS     = "/usercamera/ShowFocus"
 USERC_CAPTURE       = "/usercamera/Capture"
 
-USERC_ZOOM          = "/usercamera/Zoom"           # float mm, 20..300
+USERC_ZOOM          = "/usercamera/Zoom"           # float mm, 20..150
 USERC_EXPOSURE      = "/usercamera/Exposure"       # float EV, -3..+3
 USERC_FOCALDIST     = "/usercamera/FocalDistance"  # float metres, 0..10
 USERC_APERTURE      = "/usercamera/Aperture"       # float f-number, 1.4..32
