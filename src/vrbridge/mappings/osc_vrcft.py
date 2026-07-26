@@ -4,11 +4,9 @@ import time
 
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge import VRBridge
+from vrbridge.settings import settings
 
 # ------------------------------ Config ------------------------------------
-
-# The substring to search for in discovered OSCQuery service names.
-VRCFT_SERVICE_NAME: str = "VRCFT"
 
 # Avatar parameters to set when VRCFT is detected.
 # VRCFT may also control these, but setting them helps with avatar logic.
@@ -23,9 +21,8 @@ INACTIVE_PARAMS: dict[str, int] = {
     "/avatar/parameters/EyeTrackingActive": 0,
 }
 
-# How long to wait after an avatar change before sending parameters.
-# This gives the avatar time to fully load and initialize its parameters.
-AVATAR_LOAD_DELAY_SECS: float = 1.0
+# The mDNS service-name substring and the post-avatar-change delay are
+# settings.VRCFTSettings.service_name / .avatar_load_delay_secs.
 
 # ----------------------------- Mapping ------------------------------------
 
@@ -35,6 +32,10 @@ class VRCFTMapping(Mapping):
     parameters accordingly after an avatar change.
     """
     name = "osc_vrcft"
+
+    def __init__(self, bridge: VRBridge, tuning=None):
+        super().__init__(bridge)
+        self._tune = tuning if tuning is not None else settings().vrcft
 
     def register(self) -> None:
         """Register a callback for avatar changes."""
@@ -47,10 +48,10 @@ class VRCFTMapping(Mapping):
         and sends the corresponding parameter set.
         """
         # This callback can block; it only runs once per avatar change.
-        time.sleep(AVATAR_LOAD_DELAY_SECS)
+        time.sleep(self._tune.avatar_load_delay_secs)
 
         # Use the new OSCManager method to check for the service.
-        is_vrcft_running = self.bridge.osc.is_service_running(VRCFT_SERVICE_NAME)
+        is_vrcft_running = self.bridge.osc.is_service_running(self._tune.service_name)
 
         params_to_set = ACTIVE_PARAMS if is_vrcft_running else INACTIVE_PARAMS
 

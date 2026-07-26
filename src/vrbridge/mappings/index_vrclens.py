@@ -2,7 +2,7 @@
 VRCLens controls via VRBridge (Index touchpads & presses)
 
 - Right touchpad RAW vertical -> smooth zoom (continuous).
-- Right touchpad horizontal   -> stepped zoom using ZOOM_STEPS.
+- Right touchpad horizontal   -> stepped zoom along the configured zoom ladder.
 - Left touchpad vertical      -> Aperture +/- (VRCL feature toggles 193/192).
 - Left touchpad horizontal    -> Exposure +/- (VRCL feature toggles 110/108).
 - Short/Long presses (TOUCHPAD):
@@ -18,21 +18,13 @@ from __future__ import annotations
 import time
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import VRCLensSettings, settings
 from vrbridge import ControllerEventType, VRBridge
 from vrbridge.utils import (ParamState, SmoothScroller, clamp01, press_pulse,
                             step_param)
 
-# ------------------------------ Config ------------------------------------
-
-# General button pulse
-PRESS_DURATION: float = 0.1
-
-# Smooth scroll tuning
-SMOOTH_SCROLL_SENSITIVITY:      float = 0.15  # How much x changes per unit dy
-SMOOTH_SCROLL_MAX_DELTA:        float = 0.10  # Clamp per raw event
-SMOOTH_SCROLL_STICKY_ABS:       float = 0.06  # Cumulative |dy| to unstick
-SMOOTH_SCROLL_STICKY_RESET_GAP: float = 0.20  # Seconds without raw -> treat as new touch
-SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL: bool = True  # Reset whenever a step zoom occurs
+# Tuning (press duration, zoom ladder, smooth-scroll feel) lives in
+# settings.VRCLensSettings and is read at construction.
 
 # ------------------------------ OSC paths ---------------------------------
 
@@ -40,10 +32,8 @@ VRCL_ZOOM   = "/avatar/parameters/VRCLZoomRadial"
 VRCL_SCROLL = "/avatar/parameters/VRCLZoomRadial" # Or use VRCLFocusRadial for manual focus
 VRCL_TOGGLE = "/avatar/parameters/VRCLFeatureToggle"
 
-# User-configurable zoom steps (0..1 range in VRCLens)
-ZOOM_STEPS: list[float] = [0.00, 0.12, 0.25, 0.38, 0.50, 0.60, 0.65, 0.75, 0.82, 0.90, 1.00]
-
-# VRCL feature codes
+# VRCL feature codes. Opaque command identifiers from VRCLens, not tuning:
+# they name features, so they stay in source rather than in the settings file.
 FEATURE_DROP:      int = 251
 FEATURE_AUTOFOCUS: int = 13
 FEATURE_STABILIZE: int = 14
@@ -62,21 +52,26 @@ FEATURE_EXPOSURE_PLUS:  int = 110
 class VRCLensMapping(Mapping):
     name = "index_vrclens"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning: VRCLensSettings | None = None):
         super().__init__(bridge)
-        # Param tracking
-        self.zoom_state = ParamState(VRCL_ZOOM, default=ZOOM_STEPS[1], bridge=bridge)
+        self._tune = tuning if tuning is not None else settings().vrclens
+        self.zoom_steps = list(self._tune.zoom_steps)
+
+        # Param tracking. The default names a value on the ladder rather than an
+        # index into it, so retuning the ladder cannot silently re-point it.
+        self.zoom_state = ParamState(VRCL_ZOOM, default=self._tune.default_zoom, bridge=bridge)
 
         if VRCL_SCROLL == VRCL_ZOOM:
             self.scroll_state = self.zoom_state
         else:
             self.scroll_state = ParamState(VRCL_SCROLL, default=0.5, bridge=bridge)
 
+        ss = self._tune.smooth_scroll
         self._smoother = SmoothScroller(
-            sensitivity=SMOOTH_SCROLL_SENSITIVITY,
-            max_delta=SMOOTH_SCROLL_MAX_DELTA,
-            sticky_abs=SMOOTH_SCROLL_STICKY_ABS,
-            reset_gap=SMOOTH_SCROLL_STICKY_RESET_GAP,
+            sensitivity=ss.sensitivity,
+            max_delta=ss.max_delta,
+            sticky_abs=ss.sticky_abs,
+            reset_gap=ss.sticky_reset_gap,
         )
 
     # ---- callbacks ----
@@ -91,33 +86,33 @@ class VRCLensMapping(Mapping):
         steps = int(getattr(evt, "steps", 0) or 0)
         code = FEATURE_APERTURE_PLUS if steps > 0 else FEATURE_APERTURE_MINUS
         for _ in range(abs(steps)):
-            press_pulse(ctx, VRCL_TOGGLE, int(code), PRESS_DURATION)
+            press_pulse(ctx, VRCL_TOGGLE, int(code), self._tune.press_duration)
 
     def step_exposure(self, ctx, evt):
         """Exposure +/- (feature presses per step)."""
         steps = int(getattr(evt, "steps", 0) or 0)
         code = FEATURE_EXPOSURE_PLUS if steps > 0 else FEATURE_EXPOSURE_MINUS
         for _ in range(abs(steps)):
-            press_pulse(ctx, VRCL_TOGGLE, int(code), PRESS_DURATION)
+            press_pulse(ctx, VRCL_TOGGLE, int(code), self._tune.press_duration)
 
     def step_zoom(self, ctx, evt):
         """Zoom step +/-"""
-        if SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL:
+        if self._tune.smooth_scroll.reset_sticky_on_step:
             self._smoother.reset()
         steps = int(getattr(evt, "steps", 0) or 0)
-        step_param(ctx, self.zoom_state, ZOOM_STEPS, steps)
+        step_param(ctx, self.zoom_state, self.zoom_steps, steps)
 
     def toggle_stabilize(self, ctx, evt):
-        press_pulse(ctx, VRCL_TOGGLE, FEATURE_STABILIZE, PRESS_DURATION)
+        press_pulse(ctx, VRCL_TOGGLE, FEATURE_STABILIZE, self._tune.press_duration)
 
     def toggle_portrait(self, ctx, evt):
-        press_pulse(ctx, VRCL_TOGGLE, FEATURE_PORTRAIT, PRESS_DURATION)
+        press_pulse(ctx, VRCL_TOGGLE, FEATURE_PORTRAIT, self._tune.press_duration)
 
     def toggle_drop(self, ctx, evt):
-        press_pulse(ctx, VRCL_TOGGLE, FEATURE_DROP, PRESS_DURATION)
+        press_pulse(ctx, VRCL_TOGGLE, FEATURE_DROP, self._tune.press_duration)
 
     def toggle_autofocus(self, ctx, evt):
-        press_pulse(ctx, VRCL_TOGGLE, FEATURE_AUTOFOCUS, PRESS_DURATION)
+        press_pulse(ctx, VRCL_TOGGLE, FEATURE_AUTOFOCUS, self._tune.press_duration)
 
     # ---- lifecycle ----
 

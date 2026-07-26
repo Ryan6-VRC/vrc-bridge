@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge import VRBridge
+from vrbridge.settings import settings
 from vrbridge.utils import press_pulse
 
 # ------------------------------ Config ------------------------------------
@@ -13,7 +14,7 @@ from vrbridge.utils import press_pulse
 # --- OSC Parameter Names ---
 MUTE_PROXY_ADDR  = "/avatar/parameters/GestureControl/MuteProxy"
 VOICE_INPUT_ADDR = "/input/Voice"
-PRESS_DURATION   = 1.0 / 30  # Seconds
+# Pulse duration is settings.MuteProxySettings.press_duration.
 
 # ----------------------------- Mapping ------------------------------------
 
@@ -24,11 +25,11 @@ class MuteProxyMapping(Mapping):
     def __init__(self, bridge: VRBridge,
                  *, mute_addr: str = MUTE_PROXY_ADDR,
                  voice_addr: str = VOICE_INPUT_ADDR,
-                 duration: float = PRESS_DURATION):
+                 duration: float | None = None):
         super().__init__(bridge)
         self.mute_addr = str(mute_addr)
         self.voice_addr = str(voice_addr)
-        self.duration = float(duration)
+        self.duration = float(duration) if duration is not None else settings().muteproxy.press_duration
         self._handler = None
 
     def register(self) -> None:

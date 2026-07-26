@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Dict, Literal, Tuple
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import PuppetSettings, settings
 from vrbridge import ControllerEventType, VRBridge
 
 Hand = Literal["left", "right"]
@@ -30,38 +31,21 @@ LEFT_Y_ADDR  = "/avatar/parameters/IndexPuppet/Left_Y"
 RIGHT_X_ADDR = "/avatar/parameters/IndexPuppet/Right_X"
 RIGHT_Y_ADDR = "/avatar/parameters/IndexPuppet/Right_Y"
 
-# Quantization of floats to additional boolean addresses (OSCmooth-style).
-# If QUANT_LEVEL == 0, only the original float addresses are written.
-# If QUANT_LEVEL > 0, we also drive boolean parameters dynamically derived
-# from the float address names:
-#   e.g. "/avatar/parameters/IndexPuppet/Left_X" ->
-#        "/avatar/parameters/IndexPuppet/Left_XNegative",
-#        "/avatar/parameters/IndexPuppet/Left_X1",
-#        "/avatar/parameters/IndexPuppet/Left_X2",
-#        "/avatar/parameters/IndexPuppet/Left_X4", ...
-# The number of magnitude bits equals QUANT_LEVEL.
-QUANT_LEVEL: int = 3
-
 # IndexPuppet/Enable will be set to False N seconds after the last touch
 TOUCH_ACTIVE_ADDR = "/avatar/parameters/IndexPuppet/Enable"
-TOUCH_ACTIVE_IDLE_SECS: float = 0.5
 
-# Single-touch behavior:
-# - "separate": (default) if only one touchpad is used, write only that side.
-# - "together": when only a single touchpad is used, mirror its values to both
-#               left and right addresses; when both pads are used, each writes
-#               to its own addresses as normal.
-SINGLE_TOUCH_MODE: Literal["together","separate"] = "together"
-
-# Optional axis inversion
-INVERT_X: int = 1     # set to -1 to invert X
-INVERT_Y: int = 1     # set to -1 to invert Y
-
-# Float-only smoothing:
-# - Quantized booleans remain raw/immediate.
-# - Float outputs are low-pass filtered with a time constant (seconds).
-# Set <= 0.0 to disable smoothing.
-FLOAT_SMOOTH_TAU_SECS: float = 0.12
+# Tuning lives in settings.PuppetSettings and is read at construction:
+#   quant_level            magnitude bits for the OSCmooth-style boolean codec.
+#                          0 writes only the float addresses. Above 0 also drives
+#                          booleans derived from each float address name --
+#                          "…/Left_X" gives "…/Left_XNegative", "…/Left_X1",
+#                          "…/Left_X2", "…/Left_X4", one bit per level.
+#   touch_active_idle_secs how long after the last touch Enable drops.
+#   single_touch_mode      "together" mirrors a lone pad to both sides;
+#                          "separate" writes only the side being touched.
+#   invert_x / invert_y    -1 to flip an axis.
+#   float_smooth_tau_secs  low-pass time constant for float output; <= 0 disables.
+#                          Quantized booleans are always raw and immediate.
 
 # --------------------------- Quantization ---------------------------------
 
@@ -88,24 +72,20 @@ def _quant_encode_unit(x: float, n: int) -> Tuple[bool, int]:
     neg = (x < 0.0) and (k > 0)  # avoid a negative zero
     return neg, k
 
-# Precompute boolean address maps for each axis (empty if disabled)
-_QUANT_ADDRS = {
-    LEFT_X_ADDR:  _derive_bool_addrs(LEFT_X_ADDR,  QUANT_LEVEL),
-    LEFT_Y_ADDR:  _derive_bool_addrs(LEFT_Y_ADDR,  QUANT_LEVEL),
-    RIGHT_X_ADDR: _derive_bool_addrs(RIGHT_X_ADDR, QUANT_LEVEL),
-    RIGHT_Y_ADDR: _derive_bool_addrs(RIGHT_Y_ADDR, QUANT_LEVEL),
-}
+def quant_addr_map(n: int) -> dict:
+    """Boolean address map for all four axes at quant level n."""
+    return {addr: _derive_bool_addrs(addr, n)
+            for addr in (LEFT_X_ADDR, LEFT_Y_ADDR, RIGHT_X_ADDR, RIGHT_Y_ADDR)}
 
 def _send_axis_float(ctx, base_addr: str, value: float):
     """Send only the float axis value."""
     ctx.send(base_addr, value)
 
-def _send_axis_bits(ctx, base_addr: str, value: float):
+def _send_axis_bits(ctx, base_addr: str, value: float, n: int, addr_map: dict):
     """Send only quantized booleans derived from the provided raw value."""
-    n = QUANT_LEVEL
     if n <= 0:
         return
-    addrs = _QUANT_ADDRS.get(base_addr)
+    addrs = addr_map.get(base_addr)
     if not addrs or not addrs["bits"]:
         return
     neg, k = _quant_encode_unit(value, n)
@@ -162,12 +142,14 @@ class HandState:
 class IndexPuppetMapping(Mapping):
     name = "index_puppet"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning: PuppetSettings | None = None):
         super().__init__(bridge)
+        self._tune = tuning if tuning is not None else settings().puppet
+        self._quant_addrs = quant_addr_map(self._tune.quant_level)
         self._state: Dict[Hand, HandState] = {"left": HandState(), "right": HandState()}
         self._last_contact_ts: float = 0.0
         self._touch_active: bool = False
-        self._float_smoother = FloatAxisSmoother(FLOAT_SMOOTH_TAU_SECS)
+        self._float_smoother = FloatAxisSmoother(self._tune.float_smooth_tau_secs)
 
     # -- helpers --
 
@@ -185,8 +167,8 @@ class IndexPuppetMapping(Mapping):
         if not st.active:
             return 0.0, 0.0
         
-        x = ax * INVERT_X
-        y = ay * INVERT_Y
+        x = ax * self._tune.invert_x
+        y = ay * self._tune.invert_y
         return _clamp_unit(x), _clamp_unit(y)
 
     def _send_axis(self, ctx, base_addr: str, raw_value: float, now: float):
@@ -195,15 +177,15 @@ class IndexPuppetMapping(Mapping):
         - booleans: raw/immediate
         - float: always smoothed
         """
-        _send_axis_bits(ctx, base_addr, raw_value)
+        _send_axis_bits(ctx, base_addr, raw_value, self._tune.quant_level, self._quant_addrs)
         float_value = self._float_smoother.filter(base_addr, raw_value, now)
         _send_axis_float(ctx, base_addr, float_value)
 
     def _send_for_hand(self, ctx, hand: Hand, x: float, y: float, now: float):
-        """Send axis values honoring SINGLE_TOUCH_MODE."""
+        """Send axis values honoring single_touch_mode."""
         # Determine if we should mirror to the other hand
         other = self._other_hand(hand)
-        mirror = (SINGLE_TOUCH_MODE == "together") and \
+        mirror = (self._tune.single_touch_mode == "together") and \
                  self._state[hand].active and \
                  (not self._state[other].active)
 
@@ -223,7 +205,7 @@ class IndexPuppetMapping(Mapping):
             self._send_axis(ctx, addr_y, y, now)
 
     def _send_zero_for_hand(self, ctx, hand: Hand, now: float):
-        """Send zeros, mirroring when appropriate for SINGLE_TOUCH_MODE."""
+        """Send zeros, mirroring when appropriate for single_touch_mode."""
         # Reuse generic logic with 0.0
         self._send_for_hand(ctx, hand, 0.0, 0.0, now)
 
@@ -315,6 +297,6 @@ class IndexPuppetMapping(Mapping):
     def update(self, now: float) -> None:
         # Clear the flag after N seconds of inactivity
         if not (self._state["left"].active or self._state["right"].active):
-            if self._touch_active and (now - self._last_contact_ts) >= TOUCH_ACTIVE_IDLE_SECS:
+            if self._touch_active and (now - self._last_contact_ts) >= self._tune.touch_active_idle_secs:
                 self.bridge.osc.send(TOUCH_ACTIVE_ADDR, 0)
                 self._touch_active = False

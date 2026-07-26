@@ -40,25 +40,16 @@ import httpx
 from PIL import Image
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import settings
 from vrbridge import ControllerEventType, VRBridge
 
 # ------------------------------ Config ------------------------------------
 
-# Base URL of the Remy AI server (FastAPI). Point it at your host with
-# VRBRIDGE_REMY_URL; the default is loopback so an unconfigured install never
-# sends requests to whatever answers on someone else's LAN.
-BASE_URL: str = os.environ.get("VRBRIDGE_REMY_URL", "http://127.0.0.1:8000")
-
-# Networking behavior
-HTTP_TIMEOUT_SEC: float = 1.0
-WORK_QUEUE_MAXSIZE: int = 8
-MAX_RETRIES: int = 1 # total attempts = MAX_RETRIES + 1
-
-# Image upload behavior. Override the watched folder with VRBRIDGE_REMY_WATCH_DIR.
-WATCH_DIR: Path = Path(os.environ.get("VRBRIDGE_REMY_WATCH_DIR", str(Path.home() / "Pictures" / "VRChat")))
+# Host, timeouts, queue depth, retries, watched folder and upload height are
+# settings.RemySettings, read at construction. VRBRIDGE_REMY_URL and
+# VRBRIDGE_REMY_WATCH_DIR still override the host and folder, so an existing
+# environment-driven setup keeps working.
 IMAGE_EXTS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
-RESIZE_ON_UPLOAD: bool = True
-TARGET_HEIGHT: int = 480  # only used if PIL is available and RESIZE_ON_UPLOAD is True
 
 # OSC parameter to mirror grab state into Audio toggles
 SELFAUDIO_GRAB_ADDR: str = "/avatar/parameters/GrabSync/SelfAudio" # Contact indicating local hand nearby
@@ -95,9 +86,13 @@ class RemyMapping(Mapping):
     """
     name = "index_remy"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning=None):
         super().__init__(bridge)
-        self._q: "queue.Queue[object]" = queue.Queue(maxsize=WORK_QUEUE_MAXSIZE)
+        t = self._tune = tuning if tuning is not None else settings().remy
+        self._base_url = os.environ.get("VRBRIDGE_REMY_URL") or t.base_url
+        env_dir = os.environ.get("VRBRIDGE_REMY_WATCH_DIR")
+        self._watch_dir = Path(env_dir).expanduser() if env_dir else t.resolved_watch_dir()
+        self._q: "queue.Queue[object]" = queue.Queue(maxsize=t.work_queue_maxsize)
         self._worker = threading.Thread(target=self._worker_loop, name="RemyHTTPWorker", daemon=True)
         self._worker.start()
 
@@ -243,7 +238,7 @@ class RemyMapping(Mapping):
         that terminates with the process.
         """
         # Create a single client to reuse connections
-        with httpx.Client(base_url=BASE_URL, timeout=HTTP_TIMEOUT_SEC) as client:
+        with httpx.Client(base_url=self._base_url, timeout=self._tune.http_timeout_sec) as client:
             while True:
                 task = self._q.get()
                 try:
@@ -272,7 +267,7 @@ class RemyMapping(Mapping):
         Logs status code at INFO on success, WARNING on failure.
         """
         last_exc = None
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self._tune.max_retries + 1):
             try:
                 r = client.request(req.method, req.path, json=req.json)
                 self.bridge.log.info("RemyMapping %s %s -> %s", req.method, req.path, r.status_code)
@@ -280,7 +275,7 @@ class RemyMapping(Mapping):
             except Exception as e:
                 last_exc = e
         self.bridge.log.warning("RemyMapping %s %s failed after %d attempts: %s",
-                                req.method, req.path, MAX_RETRIES + 1, last_exc)
+                                req.method, req.path, self._tune.max_retries + 1, last_exc)
 
     def _do_toggle_start_stop(self, client: httpx.Client) -> None:
         """GET /state; if 'stopped' then POST /start else POST /stop."""
@@ -296,13 +291,14 @@ class RemyMapping(Mapping):
 
     def _do_upload_latest(self, client: httpx.Client) -> None:
         """Find the newest image in WATCH_DIR and POST to /upload_image."""
-        latest = self._find_latest_image(WATCH_DIR)
+        latest = self._find_latest_image(self._watch_dir)
         if not latest:
-            self.bridge.log.info("RemyMapping: no images found under %s", WATCH_DIR)
+            self.bridge.log.info("RemyMapping: no images found under %s", self._watch_dir)
             return
 
         try:
-            payload = {"image_data": self._encode_image_dataurl(latest)}
+            height = self._tune.target_height if self._tune.resize_on_upload else None
+            payload = {"image_data": self._encode_image_dataurl(latest, height)}
         except Exception as e:
             self.bridge.log.warning("RemyMapping: failed preparing image %s: %s", latest, e)
             return
@@ -331,12 +327,16 @@ class RemyMapping(Mapping):
         return newest_path
 
     @staticmethod
-    def _encode_image_dataurl(path: Path) -> str:
-        """Read and resize an image, returning a data string ready for POST /upload_image."""
+    def _encode_image_dataurl(path: Path, target_height: int | None) -> str:
+        """Read an image, optionally resize it, and return a data URL for /upload_image.
+
+        `target_height` of None uploads at the source resolution.
+        """
         with Image.open(path).convert("RGB") as img:
-            w, h = img.size
-            new_w = max(1, int(w * (TARGET_HEIGHT / float(h)))) if h else w
-            img = img.resize((new_w, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+            if target_height:
+                w, h = img.size
+                new_w = max(1, int(w * (target_height / float(h)))) if h else w
+                img = img.resize((new_w, target_height), Image.Resampling.LANCZOS)
             import io
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)

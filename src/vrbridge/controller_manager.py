@@ -9,6 +9,7 @@ from typing import Callable, Literal, Optional
 import openvr
 
 from . import config as cfg
+from .settings import ControllerSettings, settings
 
 HandType = Literal["left", "right"]
 
@@ -33,9 +34,13 @@ class ControllerManager:
     - Emits touchpad (Index trackpad) and thumbstick/joystick (Knuckles/Quest) events.
     - Tolerates SteamVR restarts/disconnects and quits gracefully on VREvent_Quit.
     """
-    def __init__(self, *, logger=None, vr_background: bool = True, files_dir: str | None = None):
+    def __init__(self, *, logger=None, vr_background: bool = True, files_dir: str | None = None,
+                 tuning: ControllerSettings | None = None):
         self.log = logger
         self.vr_background = vr_background
+        # Read tuning once, here rather than at import, so a settings file is
+        # actually consulted and an embedder can pass its own.
+        self._tune = tuning if tuning is not None else settings().controller
         self._listener: Optional[Callable[[ControllerEvent], None]] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -155,7 +160,7 @@ class ControllerManager:
                         break  # re-init
 
                     self._poll_once()
-                    time.sleep(cfg.CONTROLLER_POLL_INTERVAL)
+                    time.sleep(self._tune.poll_interval)
             except KeyboardInterrupt:
                 self._stop.set()
                 break
@@ -201,6 +206,7 @@ class ControllerManager:
 
     def _poll_once(self):
         s = self._state
+        t = self._tune
         for hand in (self._h_left, self._h_right):
             # --- Touchpad click family ---
             try:
@@ -213,7 +219,7 @@ class ControllerManager:
                     else:
                         self._emit("touchpad.release", hand)
                         held = now - s[hand]["tpad_down_ts"]
-                        self._emit("touchpad.long_press" if held >= cfg.LONG_PRESS_THRESHOLD else "touchpad.short_press", hand)
+                        self._emit("touchpad.long_press" if held >= t.long_press_threshold else "touchpad.short_press", hand)
                         s[hand]["tpad_down"] = False; s[hand]["tpad_down_ts"] = 0.0
                     s[hand]["tpad_last_click"] = d.bState
             except Exception as e:
@@ -264,26 +270,26 @@ class ControllerManager:
                                 s[hand]["last_y"] = p.y
 
                                 # Emit high-frequency raw deltas (x & y)
-                                rdx = cfg.INVERT_HSCROLL * dx
-                                rdy = cfg.INVERT_VSCROLL * dy
-                                if (abs(rdx) >= cfg.RAW_SCROLL_MIN_DELTA) or (abs(rdy) >= cfg.RAW_SCROLL_MIN_DELTA):
+                                rdx = t.invert_hscroll * dx
+                                rdy = t.invert_vscroll * dy
+                                if (abs(rdx) >= t.raw_scroll_min_delta) or (abs(rdy) >= t.raw_scroll_min_delta):
                                     self._emit("touchpad.scroll_raw", hand, dx=rdx, dy=rdy,
                                                ax=float(p.x), ay=float(p.y))
 
-                                if abs(dy) >= cfg.TRACKPAD_DEADZONE:
-                                    s[hand]["acc_y"] += cfg.INVERT_VSCROLL * dy
-                                    steps_v = int(s[hand]["acc_y"] / cfg.TRACKPAD_V_SCROLL_STEP)
+                                if abs(dy) >= t.deadzone:
+                                    s[hand]["acc_y"] += t.invert_vscroll * dy
+                                    steps_v = int(s[hand]["acc_y"] / t.v_scroll_step)
                                     if steps_v:
-                                        steps_v = max(min(steps_v, cfg.MAX_STEPS_PER_FRAME), -cfg.MAX_STEPS_PER_FRAME)
+                                        steps_v = max(min(steps_v, t.max_steps_per_frame), -t.max_steps_per_frame)
                                         self._emit("touchpad.vscroll", hand, steps=steps_v)
-                                        s[hand]["acc_y"] -= steps_v * cfg.TRACKPAD_V_SCROLL_STEP
-                                if abs(dx) >= cfg.TRACKPAD_DEADZONE:
-                                    s[hand]["acc_x"] += cfg.INVERT_HSCROLL * dx
-                                    steps_h = int(s[hand]["acc_x"] / cfg.TRACKPAD_H_SCROLL_STEP)
+                                        s[hand]["acc_y"] -= steps_v * t.v_scroll_step
+                                if abs(dx) >= t.deadzone:
+                                    s[hand]["acc_x"] += t.invert_hscroll * dx
+                                    steps_h = int(s[hand]["acc_x"] / t.h_scroll_step)
                                     if steps_h:
-                                        steps_h = max(min(steps_h, cfg.MAX_STEPS_PER_FRAME), -cfg.MAX_STEPS_PER_FRAME)
+                                        steps_h = max(min(steps_h, t.max_steps_per_frame), -t.max_steps_per_frame)
                                         self._emit("touchpad.hscroll", hand, steps=steps_h)
-                                        s[hand]["acc_x"] -= steps_h * cfg.TRACKPAD_H_SCROLL_STEP
+                                        s[hand]["acc_x"] -= steps_h * t.h_scroll_step
             except Exception as e:
                 if self.log: self.log.debug("touchpad scroll read failed: %s", e)
 
@@ -298,7 +304,7 @@ class ControllerManager:
                     else:
                         self._emit("thumbstick.release", hand)
                         held = now - s[hand]["joy_down_ts"]
-                        self._emit("thumbstick.long_press" if held >= cfg.LONG_PRESS_THRESHOLD else "thumbstick.short_press", hand)
+                        self._emit("thumbstick.long_press" if held >= t.long_press_threshold else "thumbstick.short_press", hand)
                         s[hand]["joy_down"] = False; s[hand]["joy_down_ts"] = 0.0
                     s[hand]["joy_last_click"] = j.bState
             except Exception as e:

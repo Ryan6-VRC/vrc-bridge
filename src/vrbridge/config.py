@@ -1,10 +1,11 @@
 """
-Configuration and SteamVR file helpers for vrbridge.
+SteamVR file helpers for vrbridge: the action manifest, the default controller
+bindings, and the .vrmanifest that registers our background app identity.
 
-This module centralizes tunable constants (trackpad scroll tuning, thresholds,
-inversion, etc.) and the small utility that ensures the SteamVR action manifest
-and default controller bindings exist. Keeping these here makes the controller
-backend simpler and easier to test.
+The trackpad and press tunables that used to live here are now
+`settings.ControllerSettings`, so they can be retuned without editing installed
+source. The JSON below is *not* tunable: it is a hardware contract discovered
+against SteamVR's binding UI, and every path and action name in it is load-bearing.
 """
 from __future__ import annotations
 
@@ -14,35 +15,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# --------------------------- Tunables ------------------------------------
-
-# Controller poll loop interval (seconds). Higher = fewer polls/OSC events.
-CONTROLLER_POLL_INTERVAL: float = 0.02
-
-# Trackpad scroll tuning (Index/Knuckles)
-TRACKPAD_V_SCROLL_STEP: float = 0.35   # how far (y) accumulates per "step"
-TRACKPAD_H_SCROLL_STEP: float = 0.70   # how far (x) accumulates per "step"
-TRACKPAD_DEADZONE:      float = 0.01   # ignore tiny jitter
-MAX_STEPS_PER_FRAME:    int   = 2      # clamp burstiness
-INVERT_VSCROLL:         int   = 1      # -1 to invert, 1 to keep
-INVERT_HSCROLL:         int   = 1
-
-# When the absolute per-sample delta is below this, we don't emit the raw event.
-RAW_SCROLL_MIN_DELTA:   float = 0.0005
-
-# Press classification
-LONG_PRESS_THRESHOLD:   float = 0.40   # seconds
+from .settings import app_base_dir
 
 # SteamVR application identity
 APP_KEY:  str = "com.vrbridge.input"
 APP_NAME: str = "VRBridge Controller Input"
-
-def _user_data_dir() -> Path:
-    """Per-user writable location for generated files, for an installed package."""
-    base = os.environ.get("LOCALAPPDATA")
-    if base:
-        return Path(base) / "vrbridge"
-    return Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "vrbridge"
 
 
 # Where to write the SteamVR files (manifest + bindings + actions).
@@ -51,15 +28,7 @@ def get_files_dir() -> str:
     env = os.environ.get("VRBRIDGE_FILES_DIR")
     if env:
         return str(Path(env).expanduser().resolve())
-    # A source checkout keeps them at <repo-root>/steamvr_files, where .gitignore
-    # already covers them. An installed package cannot: two levels up from
-    # site-packages/vrbridge/ is inside the Python tree, which is the wrong place
-    # to write runtime state and may not be writable at all.
-    here = Path(__file__).resolve().parent
-    repo_root = here.parent.parent  # src/vrbridge -> src -> checkout root
-    if (repo_root / "pyproject.toml").is_file():
-        return str((repo_root / "steamvr_files").resolve())
-    return str((_user_data_dir() / "steamvr_files").resolve())
+    return str((app_base_dir() / "steamvr_files").resolve())
 
 @dataclass(frozen=True)
 class SteamVRFiles:

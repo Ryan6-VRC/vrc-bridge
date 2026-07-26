@@ -19,41 +19,26 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Iterable
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import (VirtualLensSettings, exposure_ev_rungs, filter_to_range,
+                               log_unlerp, settings)
 from vrbridge import ControllerEventType, VRBridge
 from vrbridge.utils import ParamState, SmoothScroller, clamp01, step_param
 
-# ------------------------------ Config ------------------------------------
-
-# Shared pulse duration for control pulses
-PRESS_DURATION: float = 0.1
-
-# Smooth scroll tuning
-SMOOTH_SCROLL_SENSITIVITY:      float = 0.15  # How much x changes per unit dy
-SMOOTH_SCROLL_MAX_DELTA:        float = 0.10  # Clamp per raw event
-SMOOTH_SCROLL_STICKY_ABS:       float = 0.06  # Cumulative |dy| to unstick
-SMOOTH_SCROLL_STICKY_RESET_GAP: float = 0.20  # Seconds without raw -> treat as new touch
-SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL: bool = True  # Reset whenever a step zoom occurs
-
-# User-configurable optical ranges (should match your VL2 setup)
-FOCAL_MIN_MM: float = 12.0
-FOCAL_MAX_MM: float = 300.0
-FNUMBER_MIN:  float = 1.0
-FNUMBER_MAX:  float = 22.0
-EXPOSURE_RANGE_EV: float = 3.0  # +/- range
-
-# Natural step ladders that define the increments in which Zoom, Aperture, and Exposure will change
-ZOOM_STEPS_MM: list[float] = [12, 16, 20, 24, 28, 35, 50, 70, 85, 105, 135, 200, 300]
-APERTURE_STEPS: list[float] = [1.0, 1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0]
-APERTURE_MIN_X: float = 0.0001  # keep x==0.0 for "Infinity"; smallest finite aperture should be >= this
-# Exposure: -3..+3 in 1/3 EV steps
-EXPOSURE_STEPS_EV: list[float] = [round(-EXPOSURE_RANGE_EV + i*(1/3), 6) for i in range(int((2*EXPOSURE_RANGE_EV)/(1/3)) + 1)]
+# Tuning -- the optical ranges, the step ladders and the smooth-scroll feel --
+# lives in settings.VirtualLensSettings. The ranges must match the VL2 prefab's
+# own configuration: they are the domain of its parameter encoding, so a mismatch
+# mis-encodes every value rather than merely feeling wrong.
+#
+# The ladders are derived at construction, not at import. Deriving them at import
+# meant a bad range raised from inside math.log while the package was still being
+# imported, taking down every router rather than the one mapping that owns it.
 
 # ------------------------------ OSC paths ---------------------------------
 
-# VirtualLens2 parameters (OSC uses '_' instead of spaces)
+# VirtualLens2 parameters. The underscores are part of VL2's own expression
+# parameter names, which VRChat appends to /avatar/parameters/ verbatim.
 VL2_ZOOM          = "/avatar/parameters/VirtualLens2_Zoom"
 VL2_SCROLL        = "/avatar/parameters/VirtualLens2_Zoom" # Or use VirtualLens2_Distance for manual focus
 VL2_APERTURE      = "/avatar/parameters/VirtualLens2_Aperture"
@@ -71,50 +56,85 @@ CMD_DROP   = 13
 
 # ------------------------------ Helpers -----------------------------------
 
-def exp_map_x(value: float, vmin: float, vmax: float) -> float:
-    """Inverse of y = vmin * exp(x * ln(vmax/vmin)) to obtain x in [0,1]."""
-    value = max(min(value, vmax), vmin)
-    r = vmax / vmin
-    if r <= 0.0:
-        return 0.0
-    return clamp01(math.log(value / vmin) / math.log(r))
+def zoom_mm_to_x(value_mm: float, focal_min_mm: float, focal_max_mm: float) -> float:
+    """Focal length in mm to VirtualLens2's log-encoded Zoom parameter in [0,1]."""
+    return log_unlerp(value_mm, focal_min_mm, focal_max_mm)
 
 def ev_map_x(E: float, E_range: float) -> float:
+    """Exposure compensation in EV to VL2's linear Exposure parameter; 0 EV is 0.5."""
     return clamp01((E / E_range + 1.0) / 2.0)
 
-def zoom_mm_to_x(steps_mm: Iterable[float]) -> list[float]:
-    return [exp_map_x(f, FOCAL_MIN_MM, FOCAL_MAX_MM) for f in steps_mm if FOCAL_MIN_MM <= f <= FOCAL_MAX_MM]
-
-def aperture_f_to_x(F: float, Fmin: float = FNUMBER_MIN, Fmax: float = FNUMBER_MAX) -> float:
+def aperture_f_to_x(F: float, Fmin: float, Fmax: float, min_x: float) -> float:
     """
     VirtualLens2 aperture inverse mapping (empirical):
       - x==0.0 => Infinity (special)
       - For finite F in [Fmin, Fmax], x = ln(Fmax/F) / ln(Fmax/Fmin)
-    Floor at APERTURE_MIN_X so Fmax step doesn't hit Infinity.
+    Floor at min_x so the Fmax rung doesn't collide with the Infinity sentinel.
+
+    Descending by design: higher x is a wider aperture (more blur), so +1 step
+    stops down, matching index_usercamera's ascending f-number ladder in the
+    direction the operator feels.
     """
     F = max(min(F, Fmax), Fmin)
-    r = Fmax / Fmin
-    x = math.log(Fmax / F) / math.log(r)
-    return max(APERTURE_MIN_X, clamp01(x))
+    x = math.log(Fmax / F) / math.log(Fmax / Fmin)
+    return max(min_x, clamp01(x))
 
-def exposure_ex_to_x(steps_ev: Iterable[float]) -> list[float]:
-    return [ev_map_x(E, EXPOSURE_RANGE_EV) for E in steps_ev if -EXPOSURE_RANGE_EV <= E <= EXPOSURE_RANGE_EV]
+def zoom_ladder(steps_mm, focal_min_mm, focal_max_mm) -> tuple[list[float], list[float]]:
+    """Encoded zoom rungs, plus the mm rungs dropped for falling outside the range."""
+    kept, dropped = filter_to_range(steps_mm, focal_min_mm, focal_max_mm)
+    return [zoom_mm_to_x(f, focal_min_mm, focal_max_mm) for f in kept], dropped
 
-ZOOM_STEPS_X     = zoom_mm_to_x(ZOOM_STEPS_MM)
-APERTURE_STEPS_X = [aperture_f_to_x(F) for F in APERTURE_STEPS] + [0.0]
-EXPOSURE_STEPS_X = exposure_ex_to_x(EXPOSURE_STEPS_EV)
+def aperture_ladder(steps_f, fnumber_min, fnumber_max, min_x) -> tuple[list[float], list[float]]:
+    """Encoded aperture rungs with the Infinity sentinel appended, plus dropped f-numbers."""
+    kept, dropped = filter_to_range(steps_f, fnumber_min, fnumber_max)
+    return [aperture_f_to_x(F, fnumber_min, fnumber_max, min_x) for F in kept] + [0.0], dropped
+
+def exposure_ladder(steps_ev, e_range) -> tuple[list[float], list[float]]:
+    """Encoded exposure rungs, plus the EV rungs dropped for falling outside +/- e_range."""
+    kept, dropped = filter_to_range(steps_ev, -e_range, e_range)
+    return [ev_map_x(E, e_range) for E in kept], dropped
 
 # -------------------------- Mapping ---------------------------------------
 
 class VirtualLensMapping(Mapping):
     name = "index_virtuallens"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning: VirtualLensSettings | None = None):
         super().__init__(bridge)
-        # Param tracking
-        self.zoom_state     =    ParamState(VL2_ZOOM,     default=ZOOM_STEPS_X[5],     bridge=bridge)
-        self.aperture_state =    ParamState(VL2_APERTURE, default=APERTURE_STEPS_X[7], bridge=bridge)
-        self.exposure_state =    ParamState(VL2_EXPOSURE, default=0.5,                 bridge=bridge)
+        t = self._tune = tuning if tuning is not None else settings().virtuallens
+
+        # Derive the ladders here, and say which rungs the configured ranges
+        # excluded. Dropping them silently is how a range edit shortens a ladder
+        # under the operator with no way to notice.
+        self.zoom_steps_x, zoom_dropped = zoom_ladder(t.zoom_steps_mm, t.focal_min_mm, t.focal_max_mm)
+        self.aperture_steps_x, aperture_dropped = aperture_ladder(
+            t.aperture_steps_f, t.fnumber_min, t.fnumber_max, t.aperture_min_x)
+        self.exposure_steps_x, exposure_dropped = exposure_ladder(
+            exposure_ev_rungs(-t.exposure_range_ev, t.exposure_range_ev, t.exposure_step_ev),
+            t.exposure_range_ev)
+        for label, dropped, unit, lo, hi in (
+            ("zoom", zoom_dropped, "mm", t.focal_min_mm, t.focal_max_mm),
+            ("aperture", aperture_dropped, "f", t.fnumber_min, t.fnumber_max),
+            ("exposure", exposure_dropped, "EV", -t.exposure_range_ev, t.exposure_range_ev),
+        ):
+            if dropped:
+                bridge.log.warning(
+                    "index_virtuallens: %d %s rung(s) fall outside the configured %s..%s %s range "
+                    "and will not be reachable: %s",
+                    len(dropped), label, lo, hi, unit,
+                    ", ".join(str(v) for v in dropped))
+
+        # Param tracking. Startup values name an optical value, then encode it --
+        # an index into a derived ladder silently re-points when a range changes.
+        self.zoom_state     =    ParamState(VL2_ZOOM,     bridge=bridge,
+                                            default=zoom_mm_to_x(t.default_zoom_mm,
+                                                                 t.focal_min_mm, t.focal_max_mm))
+        self.aperture_state =    ParamState(VL2_APERTURE, bridge=bridge,
+                                            default=aperture_f_to_x(t.default_aperture_f,
+                                                                    t.fnumber_min, t.fnumber_max,
+                                                                    t.aperture_min_x))
+        self.exposure_state =    ParamState(VL2_EXPOSURE, default=ev_map_x(0.0, t.exposure_range_ev),
+                                            bridge=bridge)
         self.autoleveler_state = ParamState(VL2_AUTOLEVELER,   bridge=bridge)
         self.remotemask_state  = ParamState(VL2_REMOTE_MASK,   bridge=bridge)
         self.position_state    = ParamState(VL2_POSITION_MODE, bridge=bridge)
@@ -125,11 +145,12 @@ class VirtualLensMapping(Mapping):
         else:
             self.scroll_state = ParamState(VL2_SCROLL, default=0.5, bridge=bridge)
 
+        ss = t.smooth_scroll
         self._smoother = SmoothScroller(
-            sensitivity=SMOOTH_SCROLL_SENSITIVITY,
-            max_delta=SMOOTH_SCROLL_MAX_DELTA,
-            sticky_abs=SMOOTH_SCROLL_STICKY_ABS,
-            reset_gap=SMOOTH_SCROLL_STICKY_RESET_GAP,
+            sensitivity=ss.sensitivity,
+            max_delta=ss.max_delta,
+            sticky_abs=ss.sticky_abs,
+            reset_gap=ss.sticky_reset_gap,
         )
 
     # ---- callbacks ----
@@ -141,17 +162,17 @@ class VirtualLensMapping(Mapping):
 
     def step_aperture(self, ctx, evt):
         """Aperture step +/-"""
-        step_param(ctx, self.aperture_state, APERTURE_STEPS_X, evt.steps)
+        step_param(ctx, self.aperture_state, self.aperture_steps_x, evt.steps)
 
     def step_exposure(self, ctx, evt):
         """Exposure step +/-"""
-        step_param(ctx, self.exposure_state, EXPOSURE_STEPS_X, evt.steps)
+        step_param(ctx, self.exposure_state, self.exposure_steps_x, evt.steps)
 
     def step_zoom(self, ctx, evt):
         """Zoom step +/-"""
-        if SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL:
+        if self._tune.smooth_scroll.reset_sticky_on_step:
             self._smoother.reset()
-        step_param(ctx, self.zoom_state, ZOOM_STEPS_X, evt.steps)
+        step_param(ctx, self.zoom_state, self.zoom_steps_x, evt.steps)
 
     def toggle_autolevel(self, ctx, evt):
         """AutoLeveler: toggle 0 <-> 3; else -> 0"""
