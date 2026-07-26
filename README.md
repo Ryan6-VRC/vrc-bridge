@@ -52,7 +52,7 @@ A **router** decides which mapping is active at any moment.
 - **User Camera** — full VRChat User Camera control (aperture, exposure, zoom, capture, modes).
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
-- **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (e.g. `http://192.168.1.100:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
+- **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
 ## Extending vrc-bridge
 
