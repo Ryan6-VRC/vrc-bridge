@@ -29,6 +29,7 @@ The API endpoints above match the FastAPI routes:
 from __future__ import annotations
 
 import base64
+import io
 import os
 import queue
 import threading
@@ -40,23 +41,16 @@ import httpx
 from PIL import Image
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import settings
 from vrbridge import ControllerEventType, VRBridge
 
 # ------------------------------ Config ------------------------------------
 
-# Base URL of the Remy AI server (FastAPI). Override with VRBRIDGE_REMY_URL.
-BASE_URL: str = os.environ.get("VRBRIDGE_REMY_URL", "http://192.168.1.100:8000")
-
-# Networking behavior
-HTTP_TIMEOUT_SEC: float = 1.0
-WORK_QUEUE_MAXSIZE: int = 8
-MAX_RETRIES: int = 1 # total attempts = MAX_RETRIES + 1
-
-# Image upload behavior. Override the watched folder with VRBRIDGE_REMY_WATCH_DIR.
-WATCH_DIR: Path = Path(os.environ.get("VRBRIDGE_REMY_WATCH_DIR", str(Path.home() / "Pictures" / "VRChat")))
+# Host, timeouts, queue depth, retries, watched folder and upload height are
+# settings.RemySettings, read at construction. VRBRIDGE_REMY_URL and
+# VRBRIDGE_REMY_WATCH_DIR still override the host and folder, so an existing
+# environment-driven setup keeps working.
 IMAGE_EXTS: tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
-RESIZE_ON_UPLOAD: bool = True
-TARGET_HEIGHT: int = 480  # only used if PIL is available and RESIZE_ON_UPLOAD is True
 
 # OSC parameter to mirror grab state into Audio toggles
 SELFAUDIO_GRAB_ADDR: str = "/avatar/parameters/GrabSync/SelfAudio" # Contact indicating local hand nearby
@@ -78,7 +72,7 @@ class _ToggleStartStop:
 
 @dataclass
 class _UploadLatestImage:
-    """Ask worker to locate the newest image in WATCH_DIR and POST /upload_image."""
+    """Ask worker to locate the newest image in the watched folder and POST /upload_image."""
     pass
 
 
@@ -93,21 +87,25 @@ class RemyMapping(Mapping):
     """
     name = "index_remy"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning=None):
         super().__init__(bridge)
-        self._q: "queue.Queue[object]" = queue.Queue(maxsize=WORK_QUEUE_MAXSIZE)
+        t = self._tune = tuning if tuning is not None else settings().remy
+        self._base_url = os.environ.get("VRBRIDGE_REMY_URL") or t.base_url
+        env_dir = os.environ.get("VRBRIDGE_REMY_WATCH_DIR")
+        self._watch_dir = Path(env_dir).expanduser() if env_dir else t.resolved_watch_dir()
+        self._q: "queue.Queue[object]" = queue.Queue(maxsize=t.work_queue_maxsize)
         self._worker = threading.Thread(target=self._worker_loop, name="RemyHTTPWorker", daemon=True)
         self._worker.start()
 
+        self._audio_lock = threading.Lock()
         self._audio_mode: Literal["none","self","game"] = "none"  # current selection
         self._last_audio0: Optional[bool] = None            # last /toggles/audio_0
         self._last_audio1: Optional[bool] = None            # last /toggles/audio_1
 
     # ---- registration -----------------------------------------------------
 
-    def register(self) -> None:
+    def _attach(self) -> None:
         """Attach controller callbacks. Thumbsticks are unconditional; touchpads are gated."""
-        super().register()
 
         # Thumbsticks (always active)
         self.bridge.on_controller(
@@ -166,8 +164,8 @@ class RemyMapping(Mapping):
         Left THUMBSTICK_LONG_PRESS → POST /upload_image with the newest file.
 
         We enqueue a sentinel so the *worker* (not the controller thread) does:
-          - find newest image in WATCH_DIR
-          - optionally resize to TARGET_HEIGHT if Pillow is available
+          - find newest image in the watched folder
+          - resize to the configured target height, unless resize_on_upload is off
           - base64 encode and POST {"image_data": "data:<mime>;base64,<...>"} to /upload_image
         """
         self._enqueue(_UploadLatestImage())
@@ -178,21 +176,40 @@ class RemyMapping(Mapping):
 
     # ---- controller callbacks (touchpads: GATED) --------------------------
 
+    def _put_audio0(self, enabled: bool) -> None:
+        """Drive audio_0 and record it.
+
+        Every write to audio_0 must go through here. The touchpad handlers used
+        to enqueue the PUT directly, leaving _last_audio0 stale, so the next
+        _set_audio_mode() compared against a value the server no longer held and
+        skipped a PUT it owed.
+        """
+        # Record only what was accepted. _enqueue drops on a full queue with just a
+        # warning, and a mirror holding a PUT the server never received is the same
+        # stale-cache defect this helper was written to fix.
+        if self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": enabled})):
+            self._last_audio0 = enabled
+
+    def _put_audio1(self, enabled: bool) -> None:
+        """Drive audio_1 and record it. Twin of _put_audio0; see there for why."""
+        if self._enqueue(_HTTPRequest("PUT", "/toggles/audio_1", {"enabled": enabled})):
+            self._last_audio1 = enabled
+
     def _on_left_tpad_press(self, ctx, evt):
         """Left TOUCHPAD_PRESS → enable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": True}))
+        self._put_audio0(True)
 
     def _on_left_tpad_release(self, ctx, evt):
         """Left TOUCHPAD_RELEASE → disable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": False}))
+        self._put_audio0(False)
 
     def _on_right_tpad_press(self, ctx, evt):
         """Right TOUCHPAD_PRESS → enable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": True}))
+        self._put_audio0(True)
 
     def _on_right_tpad_release(self, ctx, evt):
         """Right TOUCHPAD_RELEASE → disable audio_0."""
-        self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": False}))
+        self._put_audio0(False)
 
     # ---- OSC callbacks (NOT gated) ----------------------------------------
 
@@ -220,28 +237,31 @@ class RemyMapping(Mapping):
 
     # ---- worker plumbing --------------------------------------------------
 
-    def _enqueue(self, task: object) -> None:
-        """Put a task on the worker queue without blocking the controller thread."""
+    def _enqueue(self, task: object) -> bool:
+        """Queue a task without blocking the controller thread. False if dropped."""
         try:
             self._q.put_nowait(task)
+            return True
         except queue.Full:
             # Drop rather than block the input thread.
             self.bridge.log.warning("RemyMapping queue full; dropping task: %r", task)
+            return False
 
     def _worker_loop(self) -> None:
         """
         Background worker that executes queued tasks.
 
         Guarantees:
-          - Uses a small timeout (HTTP_TIMEOUT_SEC).
+          - Uses the configured HTTP timeout.
           - Never raises back into the controller thread; all errors are logged and swallowed.
-          - Light retry: each failing request is retried up to MAX_RETRIES additional times.
+          - Light retry: a request that *raises* is retried up to max_retries more
+            times. A response is never retried, whatever its status.
 
         This isolates network variability from the input loop.  The worker is a daemon thread
         that terminates with the process.
         """
         # Create a single client to reuse connections
-        with httpx.Client(base_url=BASE_URL, timeout=HTTP_TIMEOUT_SEC) as client:
+        with httpx.Client(base_url=self._base_url, timeout=self._tune.http_timeout_sec) as client:
             while True:
                 task = self._q.get()
                 try:
@@ -270,15 +290,22 @@ class RemyMapping(Mapping):
         Logs status code at INFO on success, WARNING on failure.
         """
         last_exc = None
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self._tune.max_retries + 1):
             try:
                 r = client.request(req.method, req.path, json=req.json)
-                self.bridge.log.info("RemyMapping %s %s -> %s", req.method, req.path, r.status_code)
-                return
             except Exception as e:
                 last_exc = e
+                continue
+            # A response is not a success. Reaching the server and being told 500
+            # used to log at INFO exactly like a 200, so a failing Remy looked healthy.
+            if r.is_success:
+                self.bridge.log.info("RemyMapping %s %s -> %s", req.method, req.path, r.status_code)
+            else:
+                self.bridge.log.warning("RemyMapping %s %s -> %s %s",
+                                        req.method, req.path, r.status_code, r.reason_phrase)
+            return
         self.bridge.log.warning("RemyMapping %s %s failed after %d attempts: %s",
-                                req.method, req.path, MAX_RETRIES + 1, last_exc)
+                                req.method, req.path, self._tune.max_retries + 1, last_exc)
 
     def _do_toggle_start_stop(self, client: httpx.Client) -> None:
         """GET /state; if 'stopped' then POST /start else POST /stop."""
@@ -293,14 +320,15 @@ class RemyMapping(Mapping):
         self._do_request(client, _HTTPRequest("POST", dest))
 
     def _do_upload_latest(self, client: httpx.Client) -> None:
-        """Find the newest image in WATCH_DIR and POST to /upload_image."""
-        latest = self._find_latest_image(WATCH_DIR)
+        """Find the newest image in the watched folder and POST to /upload_image."""
+        latest = self._find_latest_image(self._watch_dir)
         if not latest:
-            self.bridge.log.info("RemyMapping: no images found under %s", WATCH_DIR)
+            self.bridge.log.info("RemyMapping: no images found under %s", self._watch_dir)
             return
 
         try:
-            payload = {"image_data": self._encode_image_dataurl(latest)}
+            height = self._tune.target_height if self._tune.resize_on_upload else None
+            payload = {"image_data": self._encode_image_dataurl(latest, height)}
         except Exception as e:
             self.bridge.log.warning("RemyMapping: failed preparing image %s: %s", latest, e)
             return
@@ -329,16 +357,23 @@ class RemyMapping(Mapping):
         return newest_path
 
     @staticmethod
-    def _encode_image_dataurl(path: Path) -> str:
-        """Read and resize an image, returning a data string ready for POST /upload_image."""
-        with Image.open(path).convert("RGB") as img:
+    def _encode_image_dataurl(path: Path, target_height: int | None) -> str:
+        """Read an image, optionally resize it, and return a data URL for /upload_image.
+
+        `target_height` of None uploads at the source resolution.
+        """
+        # `with Image.open(p).convert(...)` binds the context manager to the
+        # *converted* copy, so the file-backed image it was opened from is never
+        # closed. Hold the opened image itself.
+        with Image.open(path) as src:
+            img = src.convert("RGB")
+        if target_height:
             w, h = img.size
-            new_w = max(1, int(w * (TARGET_HEIGHT / float(h)))) if h else w
-            img = img.resize((new_w, TARGET_HEIGHT), Image.Resampling.LANCZOS)
-            import io
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            data = buf.getvalue()
+            new_w = max(1, int(w * (target_height / float(h)))) if h else w
+            img = img.resize((new_w, target_height), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        data = buf.getvalue()
         b64 = base64.b64encode(data).decode("utf-8")
         return f"data:image/jpeg;base64,{b64}"
 
@@ -350,17 +385,24 @@ class RemyMapping(Mapping):
           - "game"-> audio_0=False, audio_1=True
         Only enqueue requests when a value actually changes.
         """
-        if mode == self._audio_mode:
-            pass
+        # OSC dispatch is per-datagram threaded, so two grab changes can enter this
+        # concurrently and interleave: audio_1=true then a stale audio_1=false while
+        # _audio_mode already reads "game". The whole transition is one critical section.
+        with self._audio_lock:
+            self._apply_audio_mode(mode)
 
+    def _apply_audio_mode(self, mode: Literal["none","self","game"]) -> None:
+        # No early return on an unchanged mode. The per-value guards below already
+        # do the deduplication, and skipping them costs the one case that mattered:
+        # at startup _audio_mode is "none" with both mirrors None, so the first
+        # inbound grab=0 is what reconciles a Remy still holding audio_0 on from a
+        # previous run. An early return makes that a no-op.
         self._audio_mode = mode
         target_audio0 = (mode == "self")
         target_audio1 = (mode == "game")
 
         if target_audio0 != self._last_audio0:
-            self._last_audio0 = target_audio0
-            self._enqueue(_HTTPRequest("PUT", "/toggles/audio_0", {"enabled": target_audio0}))
+            self._put_audio0(target_audio0)
 
         if target_audio1 != self._last_audio1:
-            self._last_audio1 = target_audio1
-            self._enqueue(_HTTPRequest("PUT", "/toggles/audio_1", {"enabled": target_audio1}))
+            self._put_audio1(target_audio1)

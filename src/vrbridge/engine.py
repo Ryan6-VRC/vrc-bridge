@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, Literal, Optional
 
 from .controller_manager import ControllerEvent, ControllerManager
 from .osc_manager import OSCManager
-from .utils import setup_logging
+from .utils import drain_pulses, setup_logging
 
 Hand = Literal["left", "right", "both"]
 
@@ -36,7 +36,13 @@ class CallbackContext:
     """
     osc: OSCManager
     def get(self, address: str, default=None): return self.osc.get_cached(address, default)
-    def send(self, address: str, value): self.osc.send(address, value)
+    def send(self, address: str, value) -> bool:
+        """Send, returning False if it was dropped (no target yet, or a socket error).
+
+        A caller that mirrors what it sends needs this to decide whether to
+        advance that mirror; discarding it is how ParamState drifted from the avatar.
+        """
+        return self.osc.send(address, value)
 
 class VRBridge:
     """Orchestrates OSC I/O and SteamVR controller events.
@@ -77,7 +83,9 @@ class VRBridge:
     def on_osc(self, address: str, callback: Callable[[CallbackContext, str, Any], None], *, watch: Iterable[str] | None = None):
         with self._lock:
             self._osc_callbacks.setdefault(address, []).append(callback)
-        # Always watch the primary address so it shows up in the OSCQuery tree and is cached.
+        # Watch the primary address so its value is cached. Note this does NOT put
+        # it in the served OSCQuery tree -- that tree is a hardcoded two-node
+        # constant in osc_manager. VRChat is its only consumer and does not read it.
         self.osc.watch(address)
         if watch:
             for addr in watch:
@@ -97,9 +105,20 @@ class VRBridge:
         self.log.info("VRBridge started (OSC in: %s, HTTP: %s).", self.osc.osc_port, self.osc.http_port)
 
     def stop(self):
-        self.osc.stop()
+        # Order matters. Stop the controller thread first so no new pulses can be
+        # produced, then drain the ones in flight, then take OSC down -- the sink has
+        # to outlive the drain or the trailing zeros go nowhere.
+        #
+        # Draining in MappingRouter.run_forever instead was wrong four ways: the
+        # controller loop was still producing, osc.stop() ran before the 1.5s
+        # controller join so callbacks fired into a dead OSCManager, and a library
+        # embedder calling stop() directly never drained at all.
         if self.controllers:
             self.controllers.stop()
+        if not drain_pulses(timeout=1.0):
+            self.log.warning(
+                "Timed out draining pending OSC pulses; a parameter may be left latched.")
+        self.osc.stop()
         self.log.info("VRBridge stopped.")
 
     # ---------------------- Internal dispatch -----------------------------

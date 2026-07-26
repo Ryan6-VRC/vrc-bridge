@@ -9,6 +9,7 @@ from typing import Callable, Literal, Optional
 import openvr
 
 from . import config as cfg
+from .settings import ControllerSettings, settings
 
 HandType = Literal["left", "right"]
 
@@ -33,9 +34,13 @@ class ControllerManager:
     - Emits touchpad (Index trackpad) and thumbstick/joystick (Knuckles/Quest) events.
     - Tolerates SteamVR restarts/disconnects and quits gracefully on VREvent_Quit.
     """
-    def __init__(self, *, logger=None, vr_background: bool = True, files_dir: str | None = None):
+    def __init__(self, *, logger=None, vr_background: bool = True, files_dir: str | None = None,
+                 tuning: ControllerSettings | None = None):
         self.log = logger
         self.vr_background = vr_background
+        # Read tuning once, here rather than at import, so a settings file is
+        # actually consulted and an embedder can pass its own.
+        self._tune = tuning if tuning is not None else settings().controller
         self._listener: Optional[Callable[[ControllerEvent], None]] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -43,7 +48,7 @@ class ControllerManager:
         self._initialized = False
 
         # Paths for SteamVR files; write them if missing.
-        files = cfg.ensure_steamvr_files(files_dir=files_dir or cfg.get_files_dir(), entry_script=os.path.abspath(__file__))
+        files = cfg.ensure_steamvr_files(files_dir=files_dir or cfg.get_files_dir())
         self.ACTIONS = files.actions
         self.BIND_KNU = files.bindings_knuckles
         self.BIND_OCU = files.bindings_oculus
@@ -133,12 +138,17 @@ class ControllerManager:
         }
 
     # ---------------------- Main loop -------------------------------------
+    #: Backoff after a failed init/run cycle grows to this ceiling, in seconds.
+    MAX_RETRY_BACKOFF: float = 30.0
+
     def _run(self):
+        consecutive_failures = 0
         while not self._stop.is_set():
             try:
                 if not self._initialized:
                     self._init_openvr()
                     self._initialized = True
+                    consecutive_failures = 0
                     if self.log: self.log.info("OpenVR initialized.")
 
                 while not self._stop.is_set():
@@ -155,19 +165,43 @@ class ControllerManager:
                         break  # re-init
 
                     self._poll_once()
-                    time.sleep(cfg.CONTROLLER_POLL_INTERVAL)
+                    time.sleep(self._tune.poll_interval)
             except KeyboardInterrupt:
                 self._stop.set()
                 break
             except Exception as e:
-                if self.log: self.log.exception("Controller loop error: %s", e)
+                consecutive_failures += 1
+                if self.log:
+                    self.log.exception("Controller loop error (attempt %d): %s",
+                                       consecutive_failures, e)
             finally:
                 try:
                     openvr.shutdown()
                 except Exception as e:
                     if self.log: self.log.debug("openvr.shutdown failed: %s", e)
                 self._initialized = False
-                time.sleep(0.5)
+                if self._stop.is_set():
+                    backoff = 0.0
+                else:
+                    # A permanently broken SteamVR used to retry at 2 Hz forever.
+                    # Back off, and say plainly that this is not transient any more --
+                    # otherwise the only signal is an identical traceback on repeat.
+                    # Cap the exponent, not just the result: 2 ** n builds the full
+                    # int before min() sees it, and past ~1026 failures the int->float
+                    # conversion raises OverflowError from inside this finally block,
+                    # killing the controller thread while the bridge stays up.
+                    backoff = min(0.5 * 2 ** min(max(0, consecutive_failures - 1), 6),
+                                  self.MAX_RETRY_BACKOFF)
+                    if consecutive_failures == 5 and self.log:
+                        self.log.error(
+                            "Controller input has failed to start %d times in a row. SteamVR is "
+                            "probably not running, or the action manifest at %s is unreadable. "
+                            "Next retry in %.0fs, backing off to %.0fs; the bridge stays up but "
+                            "no controller events "
+                            "will arrive.", consecutive_failures, self.ACTIONS, backoff,
+                            self.MAX_RETRY_BACKOFF)
+                if backoff:
+                    self._stop.wait(backoff)
 
     def _poll_vr_events(self):
         """Poll system-level events and respond to quit requests."""
@@ -201,6 +235,7 @@ class ControllerManager:
 
     def _poll_once(self):
         s = self._state
+        tune = self._tune   # NB: `t` is taken further down by action data
         for hand in (self._h_left, self._h_right):
             # --- Touchpad click family ---
             try:
@@ -213,7 +248,7 @@ class ControllerManager:
                     else:
                         self._emit("touchpad.release", hand)
                         held = now - s[hand]["tpad_down_ts"]
-                        self._emit("touchpad.long_press" if held >= cfg.LONG_PRESS_THRESHOLD else "touchpad.short_press", hand)
+                        self._emit("touchpad.long_press" if held >= tune.long_press_threshold else "touchpad.short_press", hand)
                         s[hand]["tpad_down"] = False; s[hand]["tpad_down_ts"] = 0.0
                     s[hand]["tpad_last_click"] = d.bState
             except Exception as e:
@@ -264,26 +299,26 @@ class ControllerManager:
                                 s[hand]["last_y"] = p.y
 
                                 # Emit high-frequency raw deltas (x & y)
-                                rdx = cfg.INVERT_HSCROLL * dx
-                                rdy = cfg.INVERT_VSCROLL * dy
-                                if (abs(rdx) >= cfg.RAW_SCROLL_MIN_DELTA) or (abs(rdy) >= cfg.RAW_SCROLL_MIN_DELTA):
+                                rdx = tune.invert_hscroll * dx
+                                rdy = tune.invert_vscroll * dy
+                                if (abs(rdx) >= tune.raw_scroll_min_delta) or (abs(rdy) >= tune.raw_scroll_min_delta):
                                     self._emit("touchpad.scroll_raw", hand, dx=rdx, dy=rdy,
                                                ax=float(p.x), ay=float(p.y))
 
-                                if abs(dy) >= cfg.TRACKPAD_DEADZONE:
-                                    s[hand]["acc_y"] += cfg.INVERT_VSCROLL * dy
-                                    steps_v = int(s[hand]["acc_y"] / cfg.TRACKPAD_V_SCROLL_STEP)
+                                if abs(dy) >= tune.deadzone:
+                                    s[hand]["acc_y"] += tune.invert_vscroll * dy
+                                    steps_v = int(s[hand]["acc_y"] / tune.v_scroll_step)
                                     if steps_v:
-                                        steps_v = max(min(steps_v, cfg.MAX_STEPS_PER_FRAME), -cfg.MAX_STEPS_PER_FRAME)
+                                        steps_v = max(min(steps_v, tune.max_steps_per_frame), -tune.max_steps_per_frame)
                                         self._emit("touchpad.vscroll", hand, steps=steps_v)
-                                        s[hand]["acc_y"] -= steps_v * cfg.TRACKPAD_V_SCROLL_STEP
-                                if abs(dx) >= cfg.TRACKPAD_DEADZONE:
-                                    s[hand]["acc_x"] += cfg.INVERT_HSCROLL * dx
-                                    steps_h = int(s[hand]["acc_x"] / cfg.TRACKPAD_H_SCROLL_STEP)
+                                        s[hand]["acc_y"] -= steps_v * tune.v_scroll_step
+                                if abs(dx) >= tune.deadzone:
+                                    s[hand]["acc_x"] += tune.invert_hscroll * dx
+                                    steps_h = int(s[hand]["acc_x"] / tune.h_scroll_step)
                                     if steps_h:
-                                        steps_h = max(min(steps_h, cfg.MAX_STEPS_PER_FRAME), -cfg.MAX_STEPS_PER_FRAME)
+                                        steps_h = max(min(steps_h, tune.max_steps_per_frame), -tune.max_steps_per_frame)
                                         self._emit("touchpad.hscroll", hand, steps=steps_h)
-                                        s[hand]["acc_x"] -= steps_h * cfg.TRACKPAD_H_SCROLL_STEP
+                                        s[hand]["acc_x"] -= steps_h * tune.h_scroll_step
             except Exception as e:
                 if self.log: self.log.debug("touchpad scroll read failed: %s", e)
 
@@ -298,7 +333,7 @@ class ControllerManager:
                     else:
                         self._emit("thumbstick.release", hand)
                         held = now - s[hand]["joy_down_ts"]
-                        self._emit("thumbstick.long_press" if held >= cfg.LONG_PRESS_THRESHOLD else "thumbstick.short_press", hand)
+                        self._emit("thumbstick.long_press" if held >= tune.long_press_threshold else "thumbstick.short_press", hand)
                         s[hand]["joy_down"] = False; s[hand]["joy_down_ts"] = 0.0
                     s[hand]["joy_last_click"] = j.bState
             except Exception as e:

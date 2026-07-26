@@ -4,7 +4,7 @@ VRBridge entry point.
 Starts the bridge, selects a mapping or router, and runs the event loop.
 
 Usage:
-    python main.py [--log-level INFO] [--log-callbacks] [--router {name}]
+    vrbridge [--log-level INFO] [--log-callbacks] [--router {name}] [--no-steamvr]
 
 This simply wires up VRBridge + a MappingRouter and hands off to the
 router's main loop. DefaultRouter is responsible for choosing among the
@@ -14,19 +14,54 @@ Puppet and UserCamera mappings and keeping MuteProxy always-on.
 from __future__ import annotations
 
 import argparse
+from importlib.metadata import entry_points
 from typing import Dict, Type
 
 from vrbridge.routers import CameraPrefabRouter, DefaultRouter, FullRouter, MappingRouter
 from vrbridge import VRBridge
+from vrbridge.utils import setup_logging
 
-# Registry of available MappingRouter classes. Extend here to add new routers.
-ROUTERS: Dict[str, MappingRouter] = {
+#: Installed packages advertise routers under this entry-point group.
+#: See README "Extending vrc-bridge".
+ROUTER_ENTRY_POINT_GROUP = "vrbridge.routers"
+
+# Routers shipped with the package. These hold classes, not instances.
+ROUTERS: Dict[str, Type[MappingRouter]] = {
     "default": DefaultRouter,
     "camera": CameraPrefabRouter,
     "remy": FullRouter,
 }
 
 DEFAULT_ROUTER = "default"
+
+
+def discover_routers() -> Dict[str, Type[MappingRouter]]:
+    """The built-in routers plus any an installed package advertises.
+
+    A plugin that fails to load is named and skipped rather than taking the CLI
+    down with it -- but it is never silently absent, because "my router did not
+    show up in --help", with nothing said, is not diagnosable from outside.
+    A plugin may not shadow a built-in name.
+    """
+    log = setup_logging()
+    found: Dict[str, Type[MappingRouter]] = dict(ROUTERS)
+    for ep in entry_points(group=ROUTER_ENTRY_POINT_GROUP):
+        if ep.name in ROUTERS:
+            log.warning("Ignoring router plugin %r from %s: that name is built in.",
+                        ep.name, ep.value)
+            continue
+        try:
+            cls = ep.load()
+        except Exception as exc:
+            log.warning("Router plugin %r (%s) failed to import and was skipped: %s",
+                        ep.name, ep.value, exc)
+            continue
+        if not (isinstance(cls, type) and issubclass(cls, MappingRouter)):
+            log.warning("Router plugin %r (%s) is not a MappingRouter subclass; skipped.",
+                        ep.name, ep.value)
+            continue
+        found[ep.name] = cls
+    return found
 
 def _format_options(options: list[str]) -> str:
     """Return a human-friendly, quoted list like: 'a', 'b', or 'c'."""
@@ -40,7 +75,7 @@ def _format_options(options: list[str]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="python main.py",
+        prog="vrbridge",
         description="Run the VRBridge default mapping router.",
     )
 
@@ -57,7 +92,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Log each callback invocation (verbose).",
     )
 
-    router_choices = sorted(ROUTERS.keys())
+    available = discover_routers()
+    router_choices = sorted(available)
 
     parser.add_argument(
         "--router",
@@ -84,7 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # Instantiate via registry
-    router_cls = ROUTERS.get(args.router, DefaultRouter)
+    router_cls = available[args.router]
     router = router_cls(bridge)
     router.run_forever(update_hz=45)
 

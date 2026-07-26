@@ -1,6 +1,9 @@
 # Generated SteamVR action manifest + bindings (recreated at runtime by config.py)
 steamvr_files/
 
+# Local tuning overrides (see src/vrbridge/settings.py)
+vrbridge.toml
+
 # Python cache / build
 __pycache__/
 *.py[cod]

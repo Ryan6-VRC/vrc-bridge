@@ -1,23 +1,21 @@
 """
 UserCamera controls via VRBridge (Index touchpads & presses)
 
-- TOUCHPAD_PRESS:
+- Touchpad short/long press:
     * LEFT  short -> Toggle /usercamera/AutoLevelRoll
     * LEFT  long  -> Toggle /usercamera/ShowFocus
     * RIGHT short -> Capture Photo via /usercamera/Capture
     * RIGHT long  -> Switch between Photo and Print Mode
 
-- TOUCHPAD_SCROLL (stepped):
+- Touchpad stepped scroll:
     * LEFT  VScroll -> Aperture +/- (discrete ladder in f-numbers)
     * LEFT  HScroll -> Exposure +/- (discrete ladder in EV)
     * RIGHT HScroll -> Zoom +/- (discrete ladder in millimeters)
 
-- TOUCHPAD_SCROLL_RAW:
+- Touchpad raw scroll:
     * RIGHT VScroll (raw dy) -> Smooth control:
         - When ShowFocus == 1: adjust FocalDistance
         - When ShowFocus == 0: adjust Zoom
-
-Requires the vrbridge project to be importable.
 """
 
 from __future__ import annotations
@@ -26,39 +24,23 @@ import math
 import time
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import UserCameraSettings, exposure_ev_rungs, filter_to_range, settings
 from vrbridge import ControllerEvent, ControllerEventType, VRBridge
 from vrbridge.utils import ParamState, SmoothScroller, clamp, step_param
 
 # ------------------------------ Config ------------------------------------
 
-# Smooth scroll tuning (dimensionless deltas; we scale to range below)
-SMOOTH_SCROLL_SENSITIVITY:      float = 0.15  # How much 'fraction of range' changes per unit dy
-SMOOTH_SCROLL_MAX_DELTA:        float = 0.10  # Clamp per raw event (fraction of range)
-SMOOTH_SCROLL_STICKY_ABS:       float = 0.06  # Cumulative |dy| to unstick
-SMOOTH_SCROLL_STICKY_RESET_GAP: float = 0.20  # Seconds without raw -> treat as new touch
-SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL: bool = True  # Reset whenever a step zoom occurs
-
-# UserCamera slider ranges (from VRChat docs)
-ZOOM_MIN_MM:       float = 20.0
-ZOOM_MAX_MM:       float = 300.0
-EXPOSURE_MIN_EV:   float = -3.0
-EXPOSURE_MAX_EV:   float =  3.0
-FOCALDIST_MIN:     float = 0.0
-FOCALDIST_MAX:     float = 10.0
-APERTURE_MIN_F:    float = 1.4
-APERTURE_MAX_F:    float = 32.0
-
-# Focus smooth-scroll mapping:
-# Use shifted log so the slider can reach EXACT 0.0 m while staying numerically stable.
-# We transform with ln(x + ε) in [ln(ε), ln(FOCALDIST_MAX + ε)], then invert via exp(t) - ε.
-FOCALDIST_LOG_EPS: float = 0.10  # metres; tweak if you want more/less sensitivity near zero
-
-# Natural step ladders (kept compact and within allowed ranges)
-ZOOM_STEPS_MM: list[float] = [20, 22, 26, 30, 35, 45, 55, 70, 85, 105, 135, 200, 300]
-APERTURE_STEPS: list[float] = [1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0, 32.0]
-# Exposure: -3..+3 in 1/3 EV steps
-EXPOSURE_STEPS_EV: list[float] = [round(EXPOSURE_MIN_EV + i*(1/3), 6)
-                                  for i in range(int((EXPOSURE_MAX_EV - EXPOSURE_MIN_EV)/(1/3)) + 1)]
+# Tuning lives in settings.UserCameraSettings and is read at construction.
+#
+# Two kinds of number live there and they are not interchangeable. zoom_*,
+# focaldist_* and aperture_* are VRChat's published slider bounds -- protocol
+# facts, and sending outside them just gets clamped. exposure_min_ev/max_ev are
+# this mapping's chosen working range, deliberately narrower than VRChat's
+# -10..4, because a third-of-a-stop ladder across the full range would be 43 rungs.
+#
+# The smooth-scroll numbers match the two lens mappings' but do not mean the same
+# thing: here a delta is a fraction of a *log range* and gets multiplied by its
+# width before use, so the two sets must stay separately settable.
 
 # ------------------------------ OSC paths ---------------------------------
 
@@ -68,7 +50,7 @@ USERC_AUTOLEVELROLL = "/usercamera/AutoLevelRoll"
 USERC_SHOWFOCUS     = "/usercamera/ShowFocus"
 USERC_CAPTURE       = "/usercamera/Capture"
 
-USERC_ZOOM          = "/usercamera/Zoom"           # float mm, 20..300
+USERC_ZOOM          = "/usercamera/Zoom"           # float mm, 20..150
 USERC_EXPOSURE      = "/usercamera/Exposure"       # float EV, -3..+3
 USERC_FOCALDIST     = "/usercamera/FocalDistance"  # float metres, 0..10
 USERC_APERTURE      = "/usercamera/Aperture"       # float f-number, 1.4..32
@@ -82,9 +64,33 @@ USERC_SCROLL = USERC_ZOOM
 class UserCameraMapping(Mapping):
     name = "index_usercamera"
 
-    def __init__(self, bridge: VRBridge):
+    def __init__(self, bridge: VRBridge, tuning: UserCameraSettings | None = None):
         super().__init__(bridge)
-        # Param mirrors (defaults match VRChat table)
+        t = self._tune = tuning if tuning is not None else settings().usercamera
+
+        # Step ladders, derived here rather than at import so a retuned range is
+        # actually consulted, and so an out-of-range rung is named rather than dropped.
+        self.zoom_steps_mm, zoom_dropped = filter_to_range(
+            t.zoom_steps_mm, t.zoom_min_mm, t.zoom_max_mm)
+        self.aperture_steps_f, aperture_dropped = filter_to_range(
+            t.aperture_steps_f, t.aperture_min_f, t.aperture_max_f)
+        self.exposure_steps_ev, exposure_dropped = filter_to_range(
+            exposure_ev_rungs(t.exposure_min_ev, t.exposure_max_ev, t.exposure_step_ev),
+            t.exposure_min_ev, t.exposure_max_ev)
+        for label, dropped, unit, lo, hi in (
+            ("zoom", zoom_dropped, "mm", t.zoom_min_mm, t.zoom_max_mm),
+            ("aperture", aperture_dropped, "f", t.aperture_min_f, t.aperture_max_f),
+            ("exposure", exposure_dropped, "EV", t.exposure_min_ev, t.exposure_max_ev),
+        ):
+            if dropped:
+                bridge.log.warning(
+                    "index_usercamera: %d %s rung(s) fall outside VRChat's %s..%s %s range "
+                    "and would only be clamped: %s",
+                    len(dropped), label, lo, hi, unit,
+                    ", ".join(str(v) for v in dropped))
+
+        # Param mirrors. These defaults are VRChat's own documented startup values,
+        # not tuning, so they stay in source.
         self.mode_state         = ParamState(USERC_MODE,          default=0,    bridge=bridge) # 0 Off
         self.remote_state       = ParamState(USERC_REMOTE_MASK,   default=1,    bridge=bridge)
         self.autoroll_state     = ParamState(USERC_AUTOLEVELROLL, default=0,    bridge=bridge)
@@ -97,17 +103,20 @@ class UserCameraMapping(Mapping):
 
         # Smooth scroller for raw vertical (right pad)
         self._smoother = SmoothScroller(
-            sensitivity=SMOOTH_SCROLL_SENSITIVITY,
-            max_delta=SMOOTH_SCROLL_MAX_DELTA,
-            sticky_abs=SMOOTH_SCROLL_STICKY_ABS,
-            reset_gap=SMOOTH_SCROLL_STICKY_RESET_GAP,
+            sensitivity=t.smooth_scroll.sensitivity,
+            max_delta=t.smooth_scroll.max_delta,
+            sticky_abs=t.smooth_scroll.sticky_abs,
+            reset_gap=t.smooth_scroll.sticky_reset_gap,
         )
 
     # ---- callbacks ----
 
     # RAW smooth scroll:
-    # - ShowFocus == 1 => FocalDistance via shifted log(m) (invert sign to match Zoom feel; can reach 0.0 m)
+    # - ShowFocus == 1 => FocalDistance via shifted log(m + eps)
     # - ShowFocus == 0 => Zoom via log(mm)
+    # Both branches move the same direction for the same finger travel; there is
+    # no sign inversion between them. An earlier comment claimed one. Which
+    # direction focus *should* run is unverified -- it needs a headset, not a read.
     def smooth_scroll(self, ctx, evt: ControllerEvent):
         dy   = evt.dy
         when = evt.when
@@ -116,13 +125,19 @@ class UserCameraMapping(Mapping):
             return
 
         if self.showfocus_state.get():
-            # ---- Focus: shifted-log mapping ln(x + ε) so 0.0 m is reachable ----
-            eps   = max(1e-6, FOCALDIST_LOG_EPS)
-            lo_x  = 0.0
-            hi_x  = FOCALDIST_MAX
+            # ---- Focus: shifted-log mapping ln(x + eps), reaching ~0.0 m ----
+            # The shift keeps the low end numerically stable; the bottom of the
+            # range comes out at ~1e-17 rather than a literal 0.0.
+            eps   = self._tune.focaldist_log_eps
+            lo_x  = self._tune.focaldist_min
+            hi_x  = self._tune.focaldist_max
             cur_x = clamp(self.focaldist_state.get(ctx), lo_x, hi_x)
 
-            ln_min = math.log(eps)
+            # log the *configured* floor, not an implicit zero: focaldist_min is a
+            # setting now, and at anything above 0 the bottom of the scroll travel
+            # would map below lo_x and clamp into a dead zone. Reduces to log(eps)
+            # at the default of 0.0.
+            ln_min = math.log(lo_x + eps)
             ln_max = math.log(hi_x + eps)
             ln_rng = ln_max - ln_min
             cur_ln = math.log(cur_x + eps)
@@ -132,9 +147,9 @@ class UserCameraMapping(Mapping):
             self.focaldist_state.set(ctx, new_x)
         else:
             # ---- Zoom: work in log(mm) so equal scroll yields equal zoom ratios ----
-            cur_mm = clamp(self.zoom_state.get(ctx), ZOOM_MIN_MM, ZOOM_MAX_MM)
-            ln_min = math.log(ZOOM_MIN_MM)
-            ln_max = math.log(ZOOM_MAX_MM)
+            cur_mm = clamp(self.zoom_state.get(ctx), self._tune.zoom_min_mm, self._tune.zoom_max_mm)
+            ln_min = math.log(self._tune.zoom_min_mm)
+            ln_max = math.log(self._tune.zoom_max_mm)
             ln_rng = ln_max - ln_min
             cur_ln = math.log(cur_mm)
             new_ln = clamp(cur_ln + d_frac * ln_rng, ln_min, ln_max)
@@ -143,17 +158,17 @@ class UserCameraMapping(Mapping):
 
     def step_aperture(self, ctx, evt: ControllerEvent):
         """Aperture step +/- (f-number list)"""
-        step_param(ctx, self.aperture_state, APERTURE_STEPS, evt.steps)
+        step_param(ctx, self.aperture_state, self.aperture_steps_f, evt.steps)
 
     def step_exposure(self, ctx, evt: ControllerEvent):
         """Exposure step +/- (EV list)"""
-        step_param(ctx, self.exposure_state, EXPOSURE_STEPS_EV, evt.steps)
+        step_param(ctx, self.exposure_state, self.exposure_steps_ev, evt.steps)
 
     def step_zoom(self, ctx, evt: ControllerEvent):
         """Zoom step +/- (mm list)"""
-        if SMOOTH_SCROLL_RESET_STICKY_ON_RHSCROLL:
+        if self._tune.smooth_scroll.reset_sticky_on_step:
             self._smoother.reset()
-        step_param(ctx, self.zoom_state, ZOOM_STEPS_MM, evt.steps)
+        step_param(ctx, self.zoom_state, self.zoom_steps_mm, evt.steps)
 
     # --- presses (short/long) ---
 
@@ -179,8 +194,7 @@ class UserCameraMapping(Mapping):
 
     # ---- lifecycle ----
 
-    def register(self) -> None:
-        super().register()
+    def _attach(self) -> None:
         # Smooth control (right pad raw vertical)
         self.bridge.on_controller(
             ControllerEventType.TOUCHPAD_SCROLL_RAW, hand="right",
