@@ -104,4 +104,4 @@ Blocking `time.sleep` inside an OSC callback is **not** a defect — dispatch is
 
 Its replacement is a `vrc-patterns` entry rebuilding the leash on face-proximity box receivers rather than OSCLeash's six-sphere direction cage — `box-tracker` establishes the mechanism, and the design question is how far below six contacts an axis-separable readout gets. Until that ships there is no leash in this repo.
 
-Every other named project here is an interface, not an ancestor. Of them only Voicemeeter carries a link today; the rest are step 10.
+Every other named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.

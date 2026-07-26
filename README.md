@@ -54,6 +54,15 @@ A **router** decides which mapping is active at any moment.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
 - **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (e.g. `http://192.168.1.100:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
+## Interoperates with
+
+vrc-bridge speaks to these projects over OSC. None of their code is vendored here — the parameter names their mappings drive are each project's own contract, and their documentation is the authority on them.
+
+- [VirtualLens2](https://vlens2.logilabo.dev/) by ろじらぼ / logilabo — the camera prefab `index_virtuallens` drives ([BOOTH](https://logilabo.booth.pm/items/2280136)).
+- [VRCLens](https://hirabiki.booth.pm/) by ひらびき / hirabiki — the camera prefab `index_vrclens` drives.
+- [OSCmooth](https://github.com/regzo2/OSCmooth) by regzo2 — the float-to-boolean quantization convention `index_puppet` follows.
+- [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) by benaclejames — detected over mDNS by `osc_vrcft`, which sets the matching avatar parameters.
+
 ## How it works
 
 vrc-bridge registers itself with SteamVR as a background application to receive low-level controller input. It simultaneously runs an OSC server (in) and client (out) for VRChat. The core engine processes inputs, and the active router directs them to the correct mapping, which emits the appropriate OSC commands.
