@@ -169,8 +169,20 @@ class SmoothScroller:
         return delta
 
 
+#: Quiet time after a pulse's trailing 0 before the next pulse on that address.
+#: The requirement is only "longer than one VRChat frame" -- 1/30 s clears one
+#: even at 30 fps. It used to default to the pulse duration, which at 0.1 s was
+#: ~9 frames and made a queued train drain at 5 Hz.
+PULSE_GAP_SECS: float = 1.0 / 30
+
+#: Pending pulses held per address before new ones are dropped. A dropped
+#: increment is better than one landing a second late: the old synchronous
+#: press_pulse could not build a backlog, because the sleep *was* the backpressure.
+PULSE_QUEUE_DEPTH: int = 4
+
+
 class _PulseWorker:
-    """Runs one-shot pulses on one background thread, strictly in order.
+    """Runs one address's one-shot pulses on its own thread, strictly in order.
 
     Two problems, one mechanism.
 
@@ -188,63 +200,115 @@ class _PulseWorker:
     next value in the same VRChat frame (~11ms at 90fps), so an edge-triggered
     consumer saw one transition instead of N. A gap after each pulse separates them.
 
-    Serializing on one thread also settles the residual the design record notes
-    for a chatter-prone latch: two flips inside one pulse duration used to
-    interleave as 1,1,0,0 rather than 1,0,1,0.
+    **One worker per address, not one for the process.** Ordering only has to hold
+    per address -- that is all the coalescing argument above needs. A single shared
+    queue made unrelated pulses block each other: under CameraPrefabRouter, a
+    /input/Voice mute pulse (1/30 s) submitted during a VRCLens scroll burst waited
+    behind every queued camera pulse. Before pulses were asynchronous those two ran
+    on independent threads and could not interact at all.
+
+    Serializing per address still settles the residual the design record notes for
+    a chatter-prone latch: two flips inside one pulse duration used to interleave
+    as 1,1,0,0 rather than 1,0,1,0.
     """
 
-    def __init__(self):
-        self._q: "queue.Queue[tuple]" = queue.Queue()
+    def __init__(self, address: str):
+        self.address = address
+        self._q: "queue.Queue[tuple]" = queue.Queue(maxsize=PULSE_QUEUE_DEPTH)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._log = logging.getLogger("vrbridge")
 
-    def submit(self, ctx, address: str, value, duration: float, gap: float) -> None:
+    def submit(self, ctx, value, duration: float, gap: float) -> bool:
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(target=self._run, name="OSCPulse", daemon=True)
+                self._thread = threading.Thread(
+                    target=self._run, name=f"OSCPulse{self.address}", daemon=True)
                 self._thread.start()
-        self._q.put((ctx, address, value, duration, gap))
+        try:
+            self._q.put_nowait((ctx, value, duration, gap))
+            return True
+        except queue.Full:
+            self._log.warning(
+                "Pulse queue for %s is full (%d pending); dropping value %r. Input is "
+                "arriving faster than the hold+gap can clear it.",
+                self.address, PULSE_QUEUE_DEPTH, value)
+            return False
 
     def _run(self) -> None:
         while True:
-            ctx, address, value, duration, gap = self._q.get()
+            ctx, value, duration, gap = self._q.get()
             try:
-                ctx.send(address, value)
-                time.sleep(duration)
-                ctx.send(address, 0)
+                try:
+                    ctx.send(self.address, value)
+                    time.sleep(duration)
+                finally:
+                    # The trailing 0 is the whole contract. Never skip it because the
+                    # rising edge failed -- a latched /input/Voice holds the mic open.
+                    ctx.send(self.address, 0)
                 if gap:
                     time.sleep(gap)
             except Exception:
                 # Off the caller's thread, so nothing else would ever surface this.
-                self._log.exception("Pulse on %s failed", address)
+                self._log.exception("Pulse on %s failed", self.address)
             finally:
                 self._q.task_done()
 
     def drain(self, timeout: float = 5.0) -> bool:
-        """Block until every queued pulse has finished. For tests and shutdown."""
+        """Block until this address's queued pulses have finished."""
         deadline = time.monotonic() + timeout
-        while not self._q.empty():
-            if time.monotonic() > deadline:
+        while self._q.unfinished_tasks:
+            if time.monotonic() >= deadline:
                 return False
             time.sleep(0.005)
-        self._q.join()
         return True
 
 
-_pulses = _PulseWorker()
+_pulse_workers: "dict[str, _PulseWorker]" = {}
+_pulse_workers_lock = threading.Lock()
 
 
-def press_pulse(ctx, address: str, value, duration: float, *, gap: float | None = None):
+def _worker_for(address: str) -> _PulseWorker:
+    with _pulse_workers_lock:
+        worker = _pulse_workers.get(address)
+        if worker is None:
+            worker = _pulse_workers[address] = _PulseWorker(address)
+        return worker
+
+
+def drain_pulses(timeout: float = 5.0) -> bool:
+    """Wait for every address's pending pulses to finish. Returns False on timeout.
+
+    Call this before tearing down OSC. The workers are daemon threads, so without
+    it a pulse caught between its value and its trailing 0 at exit leaves the
+    parameter latched -- /input/Voice stuck at 1 keys the mic open.
+    """
+    deadline = time.monotonic() + timeout
+    with _pulse_workers_lock:
+        workers = list(_pulse_workers.values())
+    ok = True
+    for worker in workers:
+        ok = worker.drain(timeout=max(0.0, deadline - time.monotonic())) and ok
+    return ok
+
+
+def press_pulse(ctx, address: str, value, duration: float, *, gap: float | None = None) -> bool:
     """Queue a one-shot 'press': send value, hold for duration, send 0.
 
     Returns immediately. The hold happens on a shared worker thread, so a
     controller callback can fire one without stalling input polling.
 
-    `gap` is the quiet time enforced after the trailing 0 before the next pulse
-    runs; it defaults to `duration`. It exists so a train of pulses on one
-    address reads as N distinct transitions rather than one -- both values need
-    to be longer than a VRChat frame.
+    `gap` is the quiet time enforced after the trailing 0 before the next pulse on
+    the same address, defaulting to PULSE_GAP_SECS. It exists so a train reads as
+    N distinct transitions rather than one; both it and `duration` need to outlast
+    a VRChat frame.
+
+    Ordering is guaranteed per address only. Pulses to different addresses run on
+    independent workers and may interleave -- which is the point: a mute pulse must
+    not queue behind a camera scroll burst.
+
+    Returns False if the address's queue was full and the pulse was dropped.
     """
-    duration = max(0.0, duration)
-    _pulses.submit(ctx, address, value, duration, duration if gap is None else max(0.0, gap))
+    return _worker_for(address).submit(
+        ctx, value, max(0.0, duration),
+        PULSE_GAP_SECS if gap is None else max(0.0, gap))
