@@ -27,7 +27,10 @@ dependencies = [
 [project.optional-dependencies]
 # Only the Remy integration mapping needs an HTTP client and an image encoder.
 remy = ["httpx>=0.28", "pillow>=11"]
-dev = ["pytest>=8"]
+# The suite pins Remy's OSC addresses and resolves RemyMapping through the lazy
+# hook, so it needs the remy extra. Guarding those tests with importorskip
+# instead would silently un-pin the addresses they exist to protect.
+dev = ["pytest>=8", "vrc-bridge[remy]"]
 
 [project.scripts]
 vrbridge = "vrbridge.cli:main"
