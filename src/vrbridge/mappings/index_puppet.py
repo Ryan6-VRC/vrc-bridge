@@ -279,8 +279,7 @@ class IndexPuppetMapping(Mapping):
 
     # -- lifecycle --
 
-    def register(self) -> None:
-        super().register()
+    def _attach(self) -> None:
         
         # Listen for Avatar Changes
         self.bridge.on_osc("/avatar/change", self._on_avatar_change)

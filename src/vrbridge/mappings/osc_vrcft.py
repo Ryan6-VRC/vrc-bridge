@@ -37,9 +37,8 @@ class VRCFTMapping(Mapping):
         super().__init__(bridge)
         self._tune = tuning if tuning is not None else settings().vrcft
 
-    def register(self) -> None:
+    def _attach(self) -> None:
         """Register a callback for avatar changes."""
-        super().register()
         self.bridge.on_osc("/avatar/change", self._gate(self._on_avatar_change))
 
     def _on_avatar_change(self, ctx, address: str, avatar_id: str):

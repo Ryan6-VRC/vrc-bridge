@@ -32,9 +32,8 @@ class MuteProxyMapping(Mapping):
         self.duration = float(duration) if duration is not None else settings().muteproxy.press_duration
         self._handler = None
 
-    def register(self) -> None:
+    def _attach(self) -> None:
         """Attach OSC callback once, like other mappings."""
-        super().register()
 
         def _on_mute_proxy_change(ctx, address, value):
             press_pulse(ctx, self.voice_addr, 1, self.duration)

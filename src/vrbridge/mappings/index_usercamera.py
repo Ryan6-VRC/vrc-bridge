@@ -187,8 +187,7 @@ class UserCameraMapping(Mapping):
 
     # ---- lifecycle ----
 
-    def register(self) -> None:
-        super().register()
+    def _attach(self) -> None:
         # Smooth control (right pad raw vertical)
         self.bridge.on_controller(
             ControllerEventType.TOUCHPAD_SCROLL_RAW, hand="right",

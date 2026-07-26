@@ -54,6 +54,35 @@ A **router** decides which mapping is active at any moment.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
 - **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (e.g. `http://192.168.1.100:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
+## Extending vrc-bridge
+
+There are two supported routes, and they answer different questions.
+
+**Use it as a library** when you want the input and OSC plumbing but your own control flow. Build a `VRBridge`, attach callbacks up front, then start it:
+
+```python
+from vrbridge import VRBridge, ControllerEventType
+
+bridge = VRBridge()
+bridge.on_osc("/avatar/parameters/MyThing", lambda ctx, addr, value: print(addr, value))
+bridge.on_controller(ControllerEventType.TOUCHPAD_SHORT_PRESS, hand="left",
+                     callback=lambda ctx, evt: ctx.send("/input/Jump", 1))
+bridge.start()
+```
+
+`ctx.send` returns `False` if the message was dropped because VRChat has not been discovered yet — check it if you mirror what you send. To write a reusable mapping instead of loose callbacks, subclass `vrbridge.mappings.Mapping` and put your bindings in `_attach()`; the base calls it exactly once, so registering twice cannot double-bind your callbacks.
+
+**Ship a router** when you want your mapping set selectable from the installed CLI. Advertise a `MappingRouter` subclass under the `vrbridge.routers` entry-point group and it appears in `vrbridge --router`:
+
+```toml
+[project.entry-points."vrbridge.routers"]
+myrouter = "mypackage.routers:MyRouter"
+```
+
+A plugin that fails to import, is not a `MappingRouter`, or reuses a built-in name is skipped with a warning naming it — it is never silently missing.
+
+Settings work the same way for both: `vrbridge.settings.settings()` returns the resolved configuration, and any mapping accepts a `tuning=` argument if you would rather pass your own.
+
 ## Interoperates with
 
 vrc-bridge speaks to these projects over OSC. None of their code is vendored here — the parameter names their mappings drive are each project's own contract, and their documentation is the authority on them.

@@ -103,9 +103,8 @@ class RemyMapping(Mapping):
 
     # ---- registration -----------------------------------------------------
 
-    def register(self) -> None:
+    def _attach(self) -> None:
         """Attach controller callbacks. Thumbsticks are unconditional; touchpads are gated."""
-        super().register()
 
         # Thumbsticks (always active)
         self.bridge.on_controller(

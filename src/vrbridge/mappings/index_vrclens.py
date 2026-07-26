@@ -116,8 +116,7 @@ class VRCLensMapping(Mapping):
 
     # ---- lifecycle ----
 
-    def register(self) -> None:
-        super().register()
+    def _attach(self) -> None:
         # Smooth zoom (right pad raw vertical)
         self.bridge.on_controller(ControllerEventType.TOUCHPAD_SCROLL_RAW, hand="right",
                                   callback=self._gate(self.smooth_scroll),

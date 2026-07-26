@@ -12,7 +12,8 @@ class Mapping(ABC):
     Base class for a controller-to-OSC mapping.
 
     Lifecycle:
-      * register(bridge): attach all callbacks (only once).
+      * register(): attach all callbacks, exactly once. Subclasses override
+        _attach(), not this.
       * activate(): enable this mapping's behavior.
       * deactivate(): disable this mapping's behavior.
       * update(now): optional periodic tick (router will call if defined).
@@ -31,10 +32,28 @@ class Mapping(ABC):
     # ---- lifecycle --------------------------------------------------------
 
     def register(self) -> None:
-        """Attach callbacks (idempotent). Subclasses should call super()."""
+        """Attach callbacks. Idempotent: a second call is a no-op.
+
+        Do not override. Subclasses put their bindings in _attach(), which this
+        calls exactly once.
+
+        The guard used to live here while every subclass overrode register(),
+        called super() -- which returned None whether or not it had already run --
+        and then bound its callbacks unconditionally. VRBridge.on_controller
+        appends without de-duplicating, so registering one mapping twice bound
+        every callback twice and each press fired twice: two photos per capture,
+        and a toggle that flipped and flipped back. No router does that today, but
+        the entry-point seam hands register() to third parties, and a contract
+        that says "idempotent" has to be one.
+        """
         if self._registered:
             return
         self._registered = True
+        self._attach()
+
+    def _attach(self) -> None:
+        """Subclass hook: attach callbacks. Called exactly once, from register()."""
+        return
 
     def activate(self) -> None:
         """Enable behavior."""
