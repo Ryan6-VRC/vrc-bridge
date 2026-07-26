@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -167,11 +169,82 @@ class SmoothScroller:
         return delta
 
 
-def press_pulse(ctx, address: str, value, duration: float):
+class _PulseWorker:
+    """Runs one-shot pulses on one background thread, strictly in order.
+
+    Two problems, one mechanism.
+
+    *Blocking.* press_pulse used to sleep inline. The design record rules that a
+    blocking sleep in an OSC callback is harmless, and it is -- OSC dispatch is
+    per-datagram threaded. But every caller of press_pulse is a *controller*
+    callback, and those run synchronously on the single ControllerLoop thread, so
+    the sleep froze input polling. A two-step aperture scroll cost 0.2s; a
+    diagonal left-pad drag fires the vertical and horizontal handlers from the
+    same sample and cost 0.4s -- exactly long_press_threshold, so a tap arriving
+    just after could be observed late and reclassified as a long press, firing the
+    wrong VRCLens feature.
+
+    *Coalescing.* A train of N pulses sent back to back put the trailing 0 and the
+    next value in the same VRChat frame (~11ms at 90fps), so an edge-triggered
+    consumer saw one transition instead of N. A gap after each pulse separates them.
+
+    Serializing on one thread also settles the residual the design record notes
+    for a chatter-prone latch: two flips inside one pulse duration used to
+    interleave as 1,1,0,0 rather than 1,0,1,0.
     """
-    One-shot 'press': send value, sleep duration seconds, send 0.
-    Keep tiny and synchronous; caller is a short-lived callback.
+
+    def __init__(self):
+        self._q: "queue.Queue[tuple]" = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._log = logging.getLogger("vrbridge")
+
+    def submit(self, ctx, address: str, value, duration: float, gap: float) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="OSCPulse", daemon=True)
+                self._thread.start()
+        self._q.put((ctx, address, value, duration, gap))
+
+    def _run(self) -> None:
+        while True:
+            ctx, address, value, duration, gap = self._q.get()
+            try:
+                ctx.send(address, value)
+                time.sleep(duration)
+                ctx.send(address, 0)
+                if gap:
+                    time.sleep(gap)
+            except Exception:
+                # Off the caller's thread, so nothing else would ever surface this.
+                self._log.exception("Pulse on %s failed", address)
+            finally:
+                self._q.task_done()
+
+    def drain(self, timeout: float = 5.0) -> bool:
+        """Block until every queued pulse has finished. For tests and shutdown."""
+        deadline = time.monotonic() + timeout
+        while not self._q.empty():
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.005)
+        self._q.join()
+        return True
+
+
+_pulses = _PulseWorker()
+
+
+def press_pulse(ctx, address: str, value, duration: float, *, gap: float | None = None):
+    """Queue a one-shot 'press': send value, hold for duration, send 0.
+
+    Returns immediately. The hold happens on a shared worker thread, so a
+    controller callback can fire one without stalling input polling.
+
+    `gap` is the quiet time enforced after the trailing 0 before the next pulse
+    runs; it defaults to `duration`. It exists so a train of pulses on one
+    address reads as N distinct transitions rather than one -- both values need
+    to be longer than a VRChat frame.
     """
-    ctx.send(address, value)
-    time.sleep(max(0.0, duration))
-    ctx.send(address, 0)
+    duration = max(0.0, duration)
+    _pulses.submit(ctx, address, value, duration, duration if gap is None else max(0.0, gap))
