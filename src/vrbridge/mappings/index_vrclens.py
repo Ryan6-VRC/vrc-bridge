@@ -10,8 +10,6 @@ VRCLens controls via VRBridge (Index touchpads & presses)
     * LEFT  long  -> AutoFocus (13)
     * RIGHT short -> Stabilize (14)
     * RIGHT long  -> Portrait  (222)
-
-Requires the vrbridge project to be importable.
 """
 from __future__ import annotations
 

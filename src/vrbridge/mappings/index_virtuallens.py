@@ -1,19 +1,18 @@
 """
 VirtualLens2 controls via VRBridge (Index touchpads & presses)
 
-- TOUCHPAD_PRESS:
+- Touchpad short/long press:
     * LEFT  short -> Drop/Pickup via VirtualLens2_Control (uses PositionMode)
     * LEFT  long  -> AFMode toggle between 0 and 1 (else -> 0)
     * RIGHT short -> AutoLeveler toggle between 0 and 3 (else -> 0)
     * RIGHT long  -> RemotePlayerMask toggle 0/1
-- TOUCHPAD_SCROLL (stepped):
+- Touchpad stepped scroll:
     * LEFT  VScroll -> Aperture +/- (discrete ladder)
     * LEFT  HScroll -> Exposure +/- (discrete ladder)
     * RIGHT HScroll -> Zoom +/- (discrete ladder)
-- TOUCHPAD_SCROLL_RAW:
-    * RIGHT VScroll (raw dy) -> Smooth Zoom (sensitivity/deadzone configurable)
-
-Requires the vrbridge project to be importable.
+- Touchpad raw scroll:
+    * RIGHT VScroll (raw dy) -> Smooth Zoom (sensitivity and sticky-start
+      threshold configurable; the raw-sample deadzone is a controller setting)
 """
 from __future__ import annotations
 

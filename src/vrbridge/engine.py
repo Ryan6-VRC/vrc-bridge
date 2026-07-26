@@ -83,7 +83,9 @@ class VRBridge:
     def on_osc(self, address: str, callback: Callable[[CallbackContext, str, Any], None], *, watch: Iterable[str] | None = None):
         with self._lock:
             self._osc_callbacks.setdefault(address, []).append(callback)
-        # Always watch the primary address so it shows up in the OSCQuery tree and is cached.
+        # Watch the primary address so its value is cached. Note this does NOT put
+        # it in the served OSCQuery tree -- that tree is a hardcoded two-node
+        # constant in osc_manager. VRChat is its only consumer and does not read it.
         self.osc.watch(address)
         if watch:
             for addr in watch:

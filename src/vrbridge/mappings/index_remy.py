@@ -72,7 +72,7 @@ class _ToggleStartStop:
 
 @dataclass
 class _UploadLatestImage:
-    """Ask worker to locate the newest image in WATCH_DIR and POST /upload_image."""
+    """Ask worker to locate the newest image in the watched folder and POST /upload_image."""
     pass
 
 
@@ -163,8 +163,8 @@ class RemyMapping(Mapping):
         Left THUMBSTICK_LONG_PRESS → POST /upload_image with the newest file.
 
         We enqueue a sentinel so the *worker* (not the controller thread) does:
-          - find newest image in WATCH_DIR
-          - optionally resize to TARGET_HEIGHT if Pillow is available
+          - find newest image in the watched folder
+          - resize to the configured target height, unless resize_on_upload is off
           - base64 encode and POST {"image_data": "data:<mime>;base64,<...>"} to /upload_image
         """
         self._enqueue(_UploadLatestImage())
@@ -241,9 +241,10 @@ class RemyMapping(Mapping):
         Background worker that executes queued tasks.
 
         Guarantees:
-          - Uses a small timeout (HTTP_TIMEOUT_SEC).
+          - Uses the configured HTTP timeout.
           - Never raises back into the controller thread; all errors are logged and swallowed.
-          - Light retry: each failing request is retried up to MAX_RETRIES additional times.
+          - Light retry: a request that *raises* is retried up to max_retries more
+            times. A response is never retried, whatever its status.
 
         This isolates network variability from the input loop.  The worker is a daemon thread
         that terminates with the process.
@@ -308,7 +309,7 @@ class RemyMapping(Mapping):
         self._do_request(client, _HTTPRequest("POST", dest))
 
     def _do_upload_latest(self, client: httpx.Client) -> None:
-        """Find the newest image in WATCH_DIR and POST to /upload_image."""
+        """Find the newest image in the watched folder and POST to /upload_image."""
         latest = self._find_latest_image(self._watch_dir)
         if not latest:
             self.bridge.log.info("RemyMapping: no images found under %s", self._watch_dir)

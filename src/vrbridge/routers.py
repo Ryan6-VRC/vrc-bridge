@@ -18,7 +18,7 @@ class DefaultRouter(MappingRouter):
       - index_puppet       when /usercamera/Mode == 0
       - index_usercamera   when /usercamera/Mode != 0
 
-    MuteProxy remains always-on for convenience.
+    MuteProxy and VRCFT are both always-on.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -201,16 +201,17 @@ class CameraPrefabRouter(MappingRouter):
 
 class FullRouter(DefaultRouter):
     """
-    Extends DefaultRouter by registering RemyMapping, which is enabled
-    *only* when IndexPuppet is active.
+    Extends DefaultRouter by registering RemyMapping.
+
+    Only RemyMapping's *touchpad* callbacks follow IndexPuppet: they are bound
+    through _gate, so they go live on activate() and quiet on deactivate().
 
     - When index_puppet is active: RemyMapping.activate()
-      (touchpad press/release bound by _gate become live).
     - When index_usercamera is active: RemyMapping.deactivate()
-      (touchpad press/release gated off).
 
-    Note: RemyMapping thumbstick callbacks are registered without gating,
-    so they remain active regardless of .enabled state.
+    Its thumbstick callbacks and both of its OSC callbacks are registered
+    ungated and stay live regardless of .enabled -- so "enabled" here means
+    the touchpad half only, not the mapping.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)

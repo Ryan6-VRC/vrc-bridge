@@ -7,8 +7,6 @@ and still register as off-center. On TOUCHPAD_LIFT, values ease back to (0, 0).
 
 Supports OSCmooth-style boolean quantization alongside the original
 float parameters.
-
-Requires the vrbridge project to be importable.
 """
 from __future__ import annotations
 

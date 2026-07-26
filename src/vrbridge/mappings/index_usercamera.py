@@ -1,23 +1,21 @@
 """
 UserCamera controls via VRBridge (Index touchpads & presses)
 
-- TOUCHPAD_PRESS:
+- Touchpad short/long press:
     * LEFT  short -> Toggle /usercamera/AutoLevelRoll
     * LEFT  long  -> Toggle /usercamera/ShowFocus
     * RIGHT short -> Capture Photo via /usercamera/Capture
     * RIGHT long  -> Switch between Photo and Print Mode
 
-- TOUCHPAD_SCROLL (stepped):
+- Touchpad stepped scroll:
     * LEFT  VScroll -> Aperture +/- (discrete ladder in f-numbers)
     * LEFT  HScroll -> Exposure +/- (discrete ladder in EV)
     * RIGHT HScroll -> Zoom +/- (discrete ladder in millimeters)
 
-- TOUCHPAD_SCROLL_RAW:
+- Touchpad raw scroll:
     * RIGHT VScroll (raw dy) -> Smooth control:
         - When ShowFocus == 1: adjust FocalDistance
         - When ShowFocus == 0: adjust Zoom
-
-Requires the vrbridge project to be importable.
 """
 
 from __future__ import annotations
@@ -114,8 +112,11 @@ class UserCameraMapping(Mapping):
     # ---- callbacks ----
 
     # RAW smooth scroll:
-    # - ShowFocus == 1 => FocalDistance via shifted log(m) (invert sign to match Zoom feel; can reach 0.0 m)
+    # - ShowFocus == 1 => FocalDistance via shifted log(m + eps)
     # - ShowFocus == 0 => Zoom via log(mm)
+    # Both branches move the same direction for the same finger travel; there is
+    # no sign inversion between them. An earlier comment claimed one. Which
+    # direction focus *should* run is unverified -- it needs a headset, not a read.
     def smooth_scroll(self, ctx, evt: ControllerEvent):
         dy   = evt.dy
         when = evt.when
@@ -124,7 +125,9 @@ class UserCameraMapping(Mapping):
             return
 
         if self.showfocus_state.get():
-            # ---- Focus: shifted-log mapping ln(x + ε) so 0.0 m is reachable ----
+            # ---- Focus: shifted-log mapping ln(x + eps), reaching ~0.0 m ----
+            # The shift keeps the low end numerically stable; the bottom of the
+            # range comes out at ~1e-17 rather than a literal 0.0.
             eps   = self._tune.focaldist_log_eps
             lo_x  = self._tune.focaldist_min
             hi_x  = self._tune.focaldist_max
