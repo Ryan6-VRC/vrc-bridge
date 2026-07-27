@@ -101,11 +101,16 @@ class PuppetSettings:
 
 @dataclass(frozen=True)
 class UserCameraSettings:
-    """VRChat's built-in camera. The four ranges are VRChat's published slider
-    bounds, not taste; the exposure pair is this mapping's chosen working range
-    and is deliberately narrower than VRChat's -10..4."""
+    """VRChat's built-in camera. The four ranges are VRChat's slider bounds, not
+    taste; the exposure pair is this mapping's chosen working range and is
+    deliberately narrower than VRChat's -10..4.
+
+    `zoom_max_mm` is **measured, and disagrees with VRChat's published table**:
+    the in-client slider echoes `/usercamera/Zoom` up to 300 with the bridge
+    sending nothing. Re-check it that way only — driving zoom from the pad reads
+    back a ceiling of exactly `zoom_max_mm`, our own clamp echoed home."""
     zoom_min_mm: float = 20.0
-    zoom_max_mm: float = 150.0
+    zoom_max_mm: float = 300.0
     focaldist_min: float = 0.0
     focaldist_max: float = 10.0
     aperture_min_f: float = 1.4
@@ -113,7 +118,7 @@ class UserCameraSettings:
     exposure_min_ev: float = -3.0
     exposure_max_ev: float = 3.0
     focaldist_log_eps: float = 0.10      # metres; widens/narrows feel near zero
-    zoom_steps_mm: tuple[float, ...] = (20, 22, 26, 30, 35, 45, 55, 70, 85, 105, 135, 150)
+    zoom_steps_mm: tuple[float, ...] = (20, 22, 26, 30, 35, 45, 55, 70, 85, 105, 135, 200, 300)
     aperture_steps_f: tuple[float, ...] = (1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0, 32.0)
     exposure_step_ev: float = 1.0 / 3.0
     smooth_scroll: SmoothScrollSettings = SmoothScrollSettings()
