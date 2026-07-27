@@ -105,11 +105,10 @@ class UserCameraSettings:
     taste; the exposure pair is this mapping's chosen working range and is
     deliberately narrower than VRChat's -10..4.
 
-    `zoom_max_mm` is **measured, and disagrees with VRChat's published table** —
-    driving the in-client slider by hand with the bridge sending nothing echoes
-    `/usercamera/Zoom` up to 300.00003 over 288 samples. Measure this one the same
-    way if you ever re-check it: driving zoom from the pad reads back a "ceiling"
-    of exactly `zoom_max_mm`, because that is our own clamp echoed home."""
+    `zoom_max_mm` is **measured, and disagrees with VRChat's published table**:
+    the in-client slider echoes `/usercamera/Zoom` up to 300 with the bridge
+    sending nothing. Re-check it that way only — driving zoom from the pad reads
+    back a ceiling of exactly `zoom_max_mm`, our own clamp echoed home."""
     zoom_min_mm: float = 20.0
     zoom_max_mm: float = 300.0
     focaldist_min: float = 0.0

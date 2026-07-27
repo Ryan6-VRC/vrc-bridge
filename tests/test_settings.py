@@ -39,9 +39,7 @@ def test_defaults_are_the_shipped_values():
         assert ss.reset_sticky_on_step is True
 
     # index_usercamera.py -- zoom_max_mm is 300, measured against the live client
-    # (in-client slider, bridge sending nothing) rather than VRChat's published
-    # table, which reads 150 and is wrong. The ladder's top two rungs exist to
-    # reach it; a 150 ceiling silently discards the upper half of the range.
+    # rather than VRChat's published table, which reads 150 and is wrong.
     u = s.usercamera
     assert (u.zoom_min_mm, u.zoom_max_mm) == (20.0, 300.0)
     assert (u.exposure_min_ev, u.exposure_max_ev) == (-3.0, 3.0)
@@ -111,8 +109,7 @@ def test_a_present_file_overrides_only_what_it_names(tmp_path):
     ("[vrclens]\nzoom_steps = []\n", "zoom_steps"),
     ("[controller]\ninvert_vscroll = 0\n", "invert_vscroll"),
     ("[controller]\npoll_interval = 'fast'\n", "poll_interval"),
-    # Must exceed zoom_max_mm to be a range violation at all -- it was 200.0 while
-    # the ceiling was 150, and went quietly valid when the measured 300 landed.
+    # Must exceed zoom_max_mm, or it is not a range violation at all.
     ("[usercamera]\nzoom_min_mm = 400.0\n", "zoom_min_mm"),
     # All three below were added in response to review; none was pinned until now.
     ("[vrclens]\nzoom_steps = ['a']\n", "zoom_steps[0]"),
