@@ -72,9 +72,21 @@ So: **refactor where the code is the value; preserve where the fact is the value
 | `routers` | 4 addresses | Light: policy code with stale docstrings |
 | `config` | 124 JSON lines plus tuning | **Preserve every value**; relocate to the config file |
 | `controller_manager` | consumes `config`'s hardware contract | Preserve behavior; cover with tests |
-| `index_usercamera`, `index_virtuallens`, `index_vrclens` | 19 addresses | Audited (step 1); addresses pinned, logic questioned — findings folded into the steps below |
+| `index_usercamera`, `index_virtuallens`, `index_vrclens` | 19 addresses | Audited (step 1) and since **verified against the vendor packages** — see below; all 19 correct |
 | `osc_vrcft`, `osc_muteproxy` | 7 addresses | Small |
 | `index_remy` | 2 addresses | Keep, label, lazy-import; four defects below |
+
+## The camera facts, checked against the vendor packages
+
+Pinning is not verification: a wrong address stays wrong and stays pinned. These were read out of VirtualLens2's and VRCLens's own shipped assets, which is the only thing that licenses changing — or keeping — one of them. All 19 camera addresses are correct; VRChat's `/usercamera/*` nine are live-verified, the rest against the prefabs.
+
+- **A latched write and a pulsed write are both right, because the two products have opposite contracts.** VirtualLens2 fires on the *transition into* a `Control` value and its own state driver returns the parameter to 0, so the same command twice running is still an edge. VRCLens leaves its states on `!= code`, so there the host must clear the parameter. This is why `index_virtuallens` latches, `index_vrclens` pulses, and `VirtualLensSettings` has no `press_duration`.
+- **VL2 parameter names carry a space** (`VirtualLens2 Zoom`) and VRChat's OSC interface replaces spaces with underscores. The underscore form in the census is right; matching the prefab's spelling literally would break every one of them.
+- **VL2's encoders are not fits — they are that product's inverses.** Its zoom parameter reduces to log-unlerp over the focal range because its internal zoom factor is proportional to focal length; aperture is `ln(Fmax/F)/ln(Fmax/Fmin)`; exposure is linear in EV. The three optical ranges in `VirtualLensSettings` match VL2's shipped defaults, but they stay *per-install* on VL2's side — and VL2 publishes its configured values as parameters, so a mismatch is checkable at runtime rather than only in a prefab.
+- **VL2's aperture parameter has no Infinity sentinel.** `x == 0` is Fmax with the depth-of-field pass disabled, because the f-number and the blur-enable flag blend along the same 0..1 parameter. The ladder's floor still earns its keep — it separates "DoF on, minimum blur" from "DoF off" — and the 8-bit question is moot: aperture is unsynced by default, and the compression is on the remote replication path, not the locally driven value.
+- **A code that breaks its neighbours' pattern is not thereby wrong.** VRCLens's exposure pair is 108/110 because the value between them is Exposure Reset. Only the vendor's own table settles such a value; the pattern never does.
+
+**Pulse spacing is bounded at both ends, and the floor is one VRChat frame.** VRChat applies the latest value per parameter per frame rather than queueing — a queue would fall permanently behind under face-tracking volume — so two writes inside one frame collapse to the later, and a trailing 0 sharing a frame with the next value is lost silently. Driving a stepped scroll through a real socket into a timestamped receiver, the separation tracks the configured gap to within half a millisecond: **33.45–33.77 ms at `1/30`, 50.14–50.45 ms at `1/20`**. So `1/30` clears a 30 fps frame by under a millisecond and `1/20` clears it by half again, which is why `PULSE_GAP_SECS` is the latter. The ceiling is feel: a queued train drains at `press_duration` plus the gap.
 
 ## What the audit changed
 

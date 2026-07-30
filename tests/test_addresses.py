@@ -1,15 +1,18 @@
 """Every OSC address this repo sends or receives, pinned verbatim.
 
-These are externally-sourced facts: they come from VRChat's, VirtualLens2's and
-VRCLens's documentation, not from anything derivable here. The design record's
-warrant criterion says preserve where the fact is the value -- this file is what
-makes that checkable instead of aspirational. A refactor that renames, drops or
-typos an address fails here rather than in-headset.
+These are externally-sourced facts, read from VRChat's, VirtualLens2's and VRCLens's
+own surfaces rather than derived from anything here -- which is why the warrant
+criterion in `docs/design.md` says preserve them, and why this file exists to make
+that checkable. A refactor that renames, drops or typos an address fails here rather
+than in-headset.
 
-Pinning is not verification. A wrong address stays wrong and stays pinned; the
-test only asserts that it has not *changed*. The one address corrected during
-this arc (VRChat's Zoom range, not an address) was corrected against the vendor's
-published table, which is the only thing that licenses changing a pinned value.
+Pinning is not verification: these assert only that a value has not *changed*, so a
+wrong address stays wrong and stays pinned. Which of them have also been read out of
+the vendor's own assets is recorded in `docs/design.md`, not here.
+
+Only a vendor's own table, prefab or controller licenses changing a pinned value --
+never a pattern its neighbours appear to set, and never a correction that merely looks
+plausible. Both failure modes leave this suite green and surface only in a headset.
 """
 from vrbridge.mappings import index_puppet as puppet
 from vrbridge.mappings import index_remy as remy
@@ -34,7 +37,12 @@ def test_usercamera_addresses():
 
 
 def test_virtuallens_addresses():
-    """VirtualLens2's expression parameters, under VRChat's /avatar/parameters/ prefix."""
+    """VirtualLens2's expression parameters, under VRChat's /avatar/parameters/ prefix.
+
+    VL2 names these with a space -- `VirtualLens2 Zoom`. VRChat's OSC interface
+    replaces spaces with underscores, so the underscore form below is the address;
+    respelling these to match the prefab literally would break all of them.
+    """
     assert vl.VL2_ZOOM == "/avatar/parameters/VirtualLens2_Zoom"
     assert vl.VL2_SCROLL == "/avatar/parameters/VirtualLens2_Zoom"
     assert vl.VL2_APERTURE == "/avatar/parameters/VirtualLens2_Aperture"
@@ -47,6 +55,8 @@ def test_virtuallens_addresses():
 
 
 def test_virtuallens_control_codes():
+    """VL2's own API codes: 12 drives PositionControl to pickup, 13 to drop. VL2's FX
+    controller is the authority on both, and on why toggle_drop latches."""
     assert (vl.CMD_PICKUP, vl.CMD_DROP) == (12, 13)
 
 
@@ -59,11 +69,10 @@ def test_vrclens_addresses():
 def test_vrclens_feature_codes():
     """Opaque command identifiers from VRCLens.
 
-    FEATURE_EXPOSURE_PLUS = 110 breaks the pattern its neighbour sets: aperture
-    is the adjacent pair 192/193, exposure is 108/110 with 109 skipped. Operator
-    ruling is that this is tested, working code -- so it is pinned verbatim and
-    NOT "corrected" to 109. If 110 is ever shown to be wrong, the authority is
-    VRCLens's own table or the prefab's FX controller, not this pattern.
+    Exposure is 108/110 rather than the adjacent pair aperture uses, because 109 is
+    Exposure Reset: in VRCLens's menus and FX controller, 108 decrements, 109 resets,
+    110 increments. Closing that apparent gap would wire increase to reset. A vendor's
+    own table is the only authority on these; a pattern across neighbours is not.
     """
     assert vc.FEATURE_DROP == 251
     assert vc.FEATURE_AUTOFOCUS == 13

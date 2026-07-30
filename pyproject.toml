@@ -44,3 +44,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Test the checkout you are standing in. An editable install records one absolute
+# path, so a second checkout -- a git worktree -- imports the *first* one's src/ and
+# runs green while its own changes are never loaded. pytest puts these entries at the
+# front of sys.path, ahead of the editable install, so the tree holding this file is
+# the tree under test.
+pythonpath = ["src"]

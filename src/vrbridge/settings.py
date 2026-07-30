@@ -146,18 +146,21 @@ class UserCameraSettings:
 
 @dataclass(frozen=True)
 class VirtualLensSettings:
-    """VirtualLens2. The optical ranges must match the VL2 prefab's own
-    configuration -- they are the domain of its parameter encoding, so a
-    mismatch mis-encodes every value rather than merely feeling wrong."""
+    """VirtualLens2. The optical ranges must match the VL2 prefab's own configuration
+    -- they are the domain of its parameter encoding, so a mismatch mis-encodes every
+    value rather than merely feeling wrong. These match VL2's own defaults, but they
+    are per-install on its side: an avatar whose author widened a range needs them
+    changed to match. VL2 publishes its configured values as `VirtualLens2_Zoom_Min`,
+    `_Zoom_Max`, `_Aperture_Min`, `_Aperture_Max` and `_Exposure_Range`, so this is
+    checkable against a live avatar rather than only against a prefab."""
     focal_min_mm: float = 12.0
     focal_max_mm: float = 300.0
     fnumber_min: float = 1.0
     fnumber_max: float = 22.0
     exposure_range_ev: float = 3.0
-    aperture_min_x: float = 0.0001       # keeps the f-max rung clear of the x==0 Infinity sentinel
-    # No press_duration here on purpose: this mapping drives VirtualLens2_Control
-    # with a latched write, not a pulse. See index_virtuallens.toggle_drop -- the
-    # key belongs here only once that question is settled.
+    aperture_min_x: float = 0.0001       # holds the f-max rung off the x==0 no-blur rung
+    # No press_duration: VL2 clears its own command channel, so toggle_drop latches
+    # rather than pulsing. Its docstring carries the mechanism.
     zoom_steps_mm: tuple[float, ...] = (12, 16, 20, 24, 28, 35, 50, 70, 85, 105, 135, 200, 300)
     aperture_steps_f: tuple[float, ...] = (1.0, 1.4, 1.8, 2.2, 2.8, 4.0, 5.6, 8.0, 11.0, 16.0, 22.0)
     exposure_step_ev: float = 1.0 / 3.0

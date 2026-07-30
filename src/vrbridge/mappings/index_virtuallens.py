@@ -65,10 +65,13 @@ def ev_map_x(E: float, E_range: float) -> float:
 
 def aperture_f_to_x(F: float, Fmin: float, Fmax: float, min_x: float) -> float:
     """
-    VirtualLens2 aperture inverse mapping (empirical):
-      - x==0.0 => Infinity (special)
-      - For finite F in [Fmin, Fmax], x = ln(Fmax/F) / ln(Fmax/Fmin)
-    Floor at min_x so the Fmax rung doesn't collide with the Infinity sentinel.
+    Inverse of VirtualLens2's own encoding, which is linear in log(F):
+    x = ln(Fmax/F) / ln(Fmax/Fmin), for F in [Fmin, Fmax].
+
+    x == 0 is Fmax with VL2's depth-of-field pass disabled -- it blends the f-number
+    and the blur-enable flag along this one parameter and switches the pass off at the
+    Fmax end. So min_x is load-bearing: it keeps the Fmax rung, which is minimum blur,
+    off x == 0, which is no blur and the rung aperture_ladder appends.
 
     Descending by design: higher x is a wider aperture (more blur), so +1 step
     stops down, matching index_usercamera's ascending f-number ladder in the
@@ -84,7 +87,7 @@ def zoom_ladder(steps_mm, focal_min_mm, focal_max_mm) -> tuple[list[float], list
     return [zoom_mm_to_x(f, focal_min_mm, focal_max_mm) for f in kept], dropped
 
 def aperture_ladder(steps_f, fnumber_min, fnumber_max, min_x) -> tuple[list[float], list[float]]:
-    """Encoded aperture rungs with the Infinity sentinel appended, plus dropped f-numbers."""
+    """Encoded aperture rungs plus the x==0 no-blur rung, and the dropped f-numbers."""
     kept, dropped = filter_to_range(steps_f, fnumber_min, fnumber_max)
     return [aperture_f_to_x(F, fnumber_min, fnumber_max, min_x) for F in kept] + [0.0], dropped
 
@@ -196,20 +199,15 @@ class VirtualLensMapping(Mapping):
     def toggle_drop(self, ctx, evt):
         """Drop (13) if PositionMode==0 else Pickup (12).
 
-        UNSETTLED, and deliberately left as-is: this writes Control and leaves it
-        latched at the command value, where index_vrclens drives its structurally
-        identical command channel with press_pulse and returns it to 0. The two
-        cannot both be right.
+        Latched, not pulsed. VL2 acts on the transition *into* a Control value: its
+        per-command state is entered on `Control == code` and that state's own driver
+        writes both the target parameter and `Control = 0`. The channel self-clears, so
+        a repeat of the same command is still a fresh edge and the host never has to
+        return the parameter -- which is also why the optimistic ingest() below is safe.
 
-        Latching appears to work because the two commands alternate, so a press
-        always changes the value. It would stop working the moment the same command
-        is sent twice in a row -- which the optimistic position_state.ingest() below
-        makes reachable if the mirror ever desyncs from VL2's own echo.
-
-        Settle it against VirtualLens2's prefab (does its FX read a transition into
-        the value, or the value itself?), not by pattern-matching the sibling. Until
-        then there is no press_duration in VirtualLensSettings, because a config key
-        that exists only to serve an unmade change is a key that does nothing.
+        index_vrclens pulses the structurally identical channel because VRCLens holds
+        the opposite contract: its states leave on `!= code`, so there the host must
+        clear it. Do not unify the two, and do not add a press_duration here.
         """
         cur = self.position_state.get()
         if cur == 0:

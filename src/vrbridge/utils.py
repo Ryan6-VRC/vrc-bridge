@@ -170,10 +170,17 @@ class SmoothScroller:
 
 
 #: Quiet time after a pulse's trailing 0 before the next pulse on that address.
-#: The requirement is only "longer than one VRChat frame" -- 1/30 s clears one
-#: even at 30 fps. It used to default to the pulse duration, which at 0.1 s was
-#: ~9 frames and made a queued train drain at 5 Hz.
-PULSE_GAP_SECS: float = 1.0 / 30
+#:
+#: Floored by one VRChat frame: VRChat applies the latest value per parameter per
+#: frame rather than queueing, so two writes landing in the same frame collapse to
+#: the later one -- a trailing 0 sharing a frame with the next value is lost, and an
+#: edge-triggered consumer never sees the reset. Capped by feel: a queued train
+#: drains at press_duration plus this, so a generous gap turns a burst into a crawl.
+#:
+#: 1/20 s is ~1.5 frames at 30 fps, the lowest rate worth designing for. 1/30 s is
+#: exactly one frame there, which leaves nothing for jitter. `docs/design.md` holds
+#: the measurement behind both numbers.
+PULSE_GAP_SECS: float = 1.0 / 20
 
 #: Pending pulses held per address before new ones are dropped. A dropped
 #: increment is better than one landing a second late: the old synchronous
