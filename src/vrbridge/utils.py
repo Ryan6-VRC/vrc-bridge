@@ -170,10 +170,18 @@ class SmoothScroller:
 
 
 #: Quiet time after a pulse's trailing 0 before the next pulse on that address.
-#: The requirement is only "longer than one VRChat frame" -- 1/30 s clears one
-#: even at 30 fps. It used to default to the pulse duration, which at 0.1 s was
-#: ~9 frames and made a queued train drain at 5 Hz.
-PULSE_GAP_SECS: float = 1.0 / 30
+#: The requirement is "longer than one VRChat frame", because VRChat applies the
+#: latest value per parameter per frame rather than queueing: two writes inside one
+#: frame collapse to the later, so a trailing 0 sharing a frame with the next value
+#: is simply lost and the consumer never sees the edge.
+#:
+#: 1/20 s, not 1/30. Measured end to end (submit through a real OSC socket to a
+#: timestamped receiver), a stepped scroll separated its pulses by 33.45-33.77 ms:
+#: 1/30 s clears a 30 fps frame by well under a millisecond, which is not a margin.
+#: 1/20 s is ~1.5 frames at 30 fps and costs a queued train 150 ms per step rather
+#: than 133. It used to default to the pulse duration, which at 0.1 s was ~9 frames
+#: and made a train drain at 5 Hz.
+PULSE_GAP_SECS: float = 1.0 / 20
 
 #: Pending pulses held per address before new ones are dropped. A dropped
 #: increment is better than one landing a second late: the old synchronous
