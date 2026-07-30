@@ -77,13 +77,22 @@ class OSCManager:
         self._srv_thread.start()
         if self.log: self.log.info("OSC UDP server on %s:%d", self.host, self.osc_port)
 
-        # mDNS
-        self._zeroconf = Zeroconf()
+        # mDNS. Pin the announcement to the one interface we actually serve on.
+        #
+        # A bare Zeroconf() means InterfaceChoice.All, which opens one announce
+        # socket per interface that comes up -- measured 4 on a host with
+        # loopback, a Hyper-V switch, Ethernet and Tailscale up, and 1 when
+        # pinned. Every one of those announcements carries the same
+        # loopback-only address record, so the extra copies advertise an
+        # endpoint the receiving LAN cannot reach, and a client that opens a UDP
+        # sender per announcement then sends us each message once per interface.
+        # That is the leading explanation for the doubled inbound in docs/design.md.
+        self._zeroconf = Zeroconf(interfaces=[self.host])
         if self._advertise:
             self._service_info = ServiceInfo(
                 "_oscjson._tcp.local.",
                 "VRBridge._oscjson._tcp.local.",
-                addresses=[socket.inet_aton("127.0.0.1")],
+                addresses=[socket.inet_aton(self.host)],
                 port=self.http_port,
                 properties={},
                 server="VRBridge.local."
