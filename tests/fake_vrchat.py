@@ -17,6 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from pythonosc import dispatcher, osc_server
 
+# Matches osc_manager._SERVE_POLL_SECS, and for the same measured reason: at the
+# 0.5s default these two servers cost about 1.0s of every fixture teardown, on top
+# of the manager's own. Six round-trip tests paid it, which was most of the suite.
+_SERVE_POLL_SECS = 0.05
+
 
 class FakeVRChat:
     """Context manager exposing .osc_port, .http_port and the received messages."""
@@ -35,7 +40,8 @@ class FakeVRChat:
         disp.set_default_handler(self._record, needs_reply_address=False)
         self._osc = osc_server.ThreadingOSCUDPServer((self.host, 0), disp)
         self.osc_port = self._osc.server_address[1]
-        self._osc_thread = threading.Thread(target=self._osc.serve_forever, daemon=True,
+        self._osc_thread = threading.Thread(target=self._osc.serve_forever,
+                                            args=(_SERVE_POLL_SECS,), daemon=True,
                                             name="FakeVRChatOSC")
         self._osc_thread.start()
 
@@ -62,7 +68,8 @@ class FakeVRChat:
 
         self._http = ThreadingHTTPServer((self.host, 0), Handler)
         self.http_port = self._http.server_address[1]
-        self._http_thread = threading.Thread(target=self._http.serve_forever, daemon=True,
+        self._http_thread = threading.Thread(target=self._http.serve_forever,
+                                             args=(_SERVE_POLL_SECS,), daemon=True,
                                              name="FakeVRChatHTTP")
         self._http_thread.start()
         return self

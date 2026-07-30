@@ -11,6 +11,18 @@ from pythonosc import dispatcher, osc_server, udp_client
 from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 
+# serve_forever() only notices shutdown() between polls, so this interval *is* the
+# teardown cost of each server it runs. Measured non-advertising at the 0.5s default:
+# 0.310s HTTP plus 0.513s OSC, a 0.824s stop() against 0.106s here, and the full suite
+# from 19.6s to 7.6s. An advertising stop() -- what an embedder pays -- adds ~0.27s in
+# zeroconf.close() on top, which this lever does not touch. The thread joins after
+# shutdown() cost 0.000s in every configuration, because shutdown() already blocks
+# until the loop exits.
+# Not a settings.py value: that file holds user-tunable mapping and hardware feel,
+# and nothing about this number is a matter of taste.
+_SERVE_POLL_SECS = 0.05
+
+
 def _addr_to_ip(addr_bytes):
     try:
         return str(ipaddress.ip_address(addr_bytes))
@@ -51,6 +63,11 @@ class OSCManager:
         self._browser: Optional[ServiceBrowser] = None
         self._service_info: Optional[ServiceInfo] = None
         self._current_service_name: Optional[str] = None
+        # The rank the current target scored when it was chosen. Kept rather than
+        # recomputed, because _service_rank also reads the mDNS server string and
+        # that is not retained -- re-ranking from the name alone can score the
+        # incumbent below the value that won it the slot.
+        self._current_rank: int = -1
         self._httpd: Optional[http.server.ThreadingHTTPServer] = None
         self._http_thread: Optional[threading.Thread] = None
         self.http_port: Optional[int] = None
@@ -66,14 +83,18 @@ class OSCManager:
         # Start HTTP first on a free port so we can advertise the correct port
         self._httpd = http.server.ThreadingHTTPServer((self.host, 0), self._make_http_handler())
         self.http_port = self._httpd.server_address[1]
-        self._http_thread = threading.Thread(target=self._httpd.serve_forever, daemon=True, name="OSCQueryHTTP")
+        self._http_thread = threading.Thread(target=self._httpd.serve_forever,
+                                             args=(_SERVE_POLL_SECS,),
+                                             daemon=True, name="OSCQueryHTTP")
         self._http_thread.start()
         if self.log: self.log.info("OSCQuery HTTP on %s:%d", self.host, self.http_port)
 
         # Start OSC on a free port
         self._srv = osc_server.ThreadingOSCUDPServer((self.host, 0), self._disp)
         self.osc_port = self._srv.server_address[1]
-        self._srv_thread = threading.Thread(target=self._srv.serve_forever, daemon=True, name="OSCServer")
+        self._srv_thread = threading.Thread(target=self._srv.serve_forever,
+                                            args=(_SERVE_POLL_SECS,),
+                                            daemon=True, name="OSCServer")
         self._srv_thread.start()
         if self.log: self.log.info("OSC UDP server on %s:%d", self.host, self.osc_port)
 
@@ -136,7 +157,14 @@ class OSCManager:
             self._srv_thread = None
 
     def watch(self, address: str):
-        """Start tracking an OSC address and surface it via OSCQuery CONTENTS."""
+        """Track an OSC address: cache each value, and fire the listener on a change.
+
+        This does **not** reach the served OSCQuery tree, whatever the address.
+        That tree is the hardcoded two-node constant in _make_http_handler, and
+        VRChat -- its only consumer -- does not read it to decide what to send us,
+        so nothing turns on the difference. docs/design.md §OSCQuery interop gaps
+        holds the measurement and the ruling that closing it buys nothing.
+        """
         self._watched.add(address)
         def _handler(addr, *args):
             val = args[0] if args else None
@@ -222,6 +250,10 @@ class OSCManager:
                     self.outer._client = None
                     self.outer._client_target = None
                     self.outer._current_service_name = None
+                    # Kept consistent with the fields it describes rather than
+                    # load-bearing: _consider_service reads the rank only while a
+                    # client exists, so a stale value here is currently unreachable.
+                    self.outer._current_rank = -1
                     if self.outer.log: self.outer.log.warning("Target %s removed; awaiting replacement...", name)
 
     def _service_rank(self, name: str, server: str | None) -> int:
@@ -240,10 +272,18 @@ class OSCManager:
             return
         rank = self._service_rank(name, getattr(info, 'server', None))
         with self._client_lock:
-            current_rank = self._service_rank(self._current_service_name or "", None) if self._current_service_name else -1
-        # Only upgrade if strictly better rank, or if nothing set yet
-        if self._client is not None and current_rank >= rank:
-            return
+            # News about the service we are already pointing at is an *update*, not
+            # a rival bid, and must never be rank-compared: VRChat keeps its service
+            # name across a restart and comes back on a fresh OSC port, so the ranks
+            # tie, the tie is refused, and we go on sending into the dead port until
+            # a remove_service happens to fire first. Following it is the whole
+            # point of watching for updates.
+            is_current = (self._current_service_name is not None
+                          and name == self._current_service_name)
+            # Only a strictly better rank unseats an incumbent, so VRCFT cannot take
+            # the slot off VRChat.
+            if self._client is not None and not is_current and self._current_rank >= rank:
+                return
         # Query HOST_INFO
         host = _addr_to_ip(info.addresses[0]) if info.addresses else "127.0.0.1"
         hi = self._host_info(host, info.port)
@@ -254,9 +294,23 @@ class OSCManager:
         except Exception:
             return
         with self._client_lock:
+            # mDNS republishes on its own refresh schedule, and following the incumbent
+            # means every refresh re-resolves it, so an unchanged one has to be caught
+            # here or each would rebuild the socket and re-log. This check sits after
+            # the query rather than before it because the OSC port is not knowable
+            # without asking -- so an incumbent's refresh now costs a blocking
+            # _host_info on zeroconf's single dispatch thread, stalling every service
+            # callback for its duration. Bounded at a few refreshes per record TTL, and
+            # accepted rather than resolved off-thread: concurrent callbacks would make
+            # the two-phase read here racy, and their serialisation is exactly what
+            # lets it skip holding the lock across the query.
+            if self._client is not None and self._client_target == (host, osc_port) \
+                    and self._current_service_name == name:
+                return
             self._client = udp_client.SimpleUDPClient(host, osc_port)
             self._client_target = (host, osc_port)
             self._current_service_name = name
+            self._current_rank = rank
         if self.log: self.log.info("VRChat target set to %s:%d (via %s)", host, osc_port, name)
 
     def _make_http_handler(self):
