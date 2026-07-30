@@ -1,15 +1,18 @@
 """Every OSC address this repo sends or receives, pinned verbatim.
 
-These are externally-sourced facts: they come from VRChat's, VirtualLens2's and
-VRCLens's documentation, not from anything derivable here. The design record's
-warrant criterion says preserve where the fact is the value -- this file is what
-makes that checkable instead of aspirational. A refactor that renames, drops or
-typos an address fails here rather than in-headset.
+These are externally-sourced facts, read from VRChat's, VirtualLens2's and VRCLens's
+own surfaces rather than derived from anything here -- which is why the warrant
+criterion in `docs/design.md` says preserve them, and why this file exists to make
+that checkable. A refactor that renames, drops or typos an address fails here rather
+than in-headset.
 
-Pinning is not verification. A wrong address stays wrong and stays pinned; the
-test only asserts that it has not *changed*. The one address corrected during
-this arc (VRChat's Zoom range, not an address) was corrected against the vendor's
-published table, which is the only thing that licenses changing a pinned value.
+Pinning is not verification: these assert only that a value has not *changed*, so a
+wrong address stays wrong and stays pinned. Which of them have also been read out of
+the vendor's own assets is recorded in `docs/design.md`, not here.
+
+Only a vendor's own table, prefab or controller licenses changing a pinned value --
+never a pattern its neighbours appear to set, and never a correction that merely looks
+plausible. Both failure modes leave this suite green and surface only in a headset.
 """
 from vrbridge.mappings import index_puppet as puppet
 from vrbridge.mappings import index_remy as remy
