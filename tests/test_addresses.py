@@ -36,9 +36,9 @@ def test_usercamera_addresses():
 def test_virtuallens_addresses():
     """VirtualLens2's expression parameters, under VRChat's /avatar/parameters/ prefix.
 
-    VL2 names these with a space -- `VirtualLens2 Zoom` -- and VRChat's OSC interface
-    replaces spaces in a parameter name with underscores, which is why the underscore
-    form here is right and matching the prefab's spelling literally would be wrong.
+    VL2 names these with a space -- `VirtualLens2 Zoom`. VRChat's OSC interface
+    replaces spaces with underscores, so the underscore form below is the address;
+    respelling these to match the prefab literally would break all of them.
     """
     assert vl.VL2_ZOOM == "/avatar/parameters/VirtualLens2_Zoom"
     assert vl.VL2_SCROLL == "/avatar/parameters/VirtualLens2_Zoom"
@@ -52,10 +52,8 @@ def test_virtuallens_addresses():
 
 
 def test_virtuallens_control_codes():
-    """Checked against VL2's FX controller: its API state for each code drives the
-    target parameter and `Control = 0` on entry, so these fire on the transition into
-    the value and the channel self-clears. 12 sets PositionControl to pickup, 13 to
-    drop -- which is why toggle_drop latches rather than pulsing."""
+    """VL2's own API codes: 12 drives PositionControl to pickup, 13 to drop. VL2's FX
+    controller is the authority on both, and on why toggle_drop latches."""
     assert (vl.CMD_PICKUP, vl.CMD_DROP) == (12, 13)
 
 
@@ -68,12 +66,10 @@ def test_vrclens_addresses():
 def test_vrclens_feature_codes():
     """Opaque command identifiers from VRCLens.
 
-    FEATURE_EXPOSURE_PLUS = 110 looks like it breaks the pattern its neighbour sets --
-    aperture is the adjacent pair 192/193, so exposure "should" be 108/109. It is not:
-    109 is Exposure Reset. Checked against VRCLens's own expression menus and its FX
-    controller, where 108 decrements, 109 resets and 110 increments; "correcting" 110
-    to 109 would have wired exposure-increase to exposure-reset. The gap was never a
-    gap, and the pattern was never the authority.
+    Exposure is 108/110 rather than the adjacent pair aperture uses, because 109 is
+    Exposure Reset: in VRCLens's menus and FX controller, 108 decrements, 109 resets,
+    110 increments. Closing that apparent gap would wire increase to reset. A vendor's
+    own table is the only authority on these; a pattern across neighbours is not.
     """
     assert vc.FEATURE_DROP == 251
     assert vc.FEATURE_AUTOFOCUS == 13

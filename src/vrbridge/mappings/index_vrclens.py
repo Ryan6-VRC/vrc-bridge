@@ -30,10 +30,9 @@ VRCL_ZOOM   = "/avatar/parameters/VRCLZoomRadial"
 VRCL_SCROLL = "/avatar/parameters/VRCLZoomRadial" # Or use VRCLFocusRadial for manual focus
 VRCL_TOGGLE = "/avatar/parameters/VRCLFeatureToggle"
 
-# VRCL feature codes. Opaque command identifiers from VRCLens, not tuning:
-# they name features, so they stay in source rather than in the settings file.
-# Each was checked against VRCLens's own expression menus; test_addresses.py pins
-# them and records what the one surprising value means.
+# VRCL feature codes. Opaque command identifiers from VRCLens, not tuning: they name
+# features, so they stay in source rather than in the settings file. Only VRCLens's own
+# expression menus or its FX controller license changing one.
 FEATURE_DROP:      int = 251
 FEATURE_AUTOFOCUS: int = 13   # avatar-tracking AF, not the plain AF entry
 FEATURE_STABILIZE: int = 14

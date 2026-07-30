@@ -28,8 +28,7 @@ from vrbridge.utils import ParamState, SmoothScroller, clamp01, step_param
 # Tuning -- the optical ranges, the step ladders and the smooth-scroll feel --
 # lives in settings.VirtualLensSettings. The ranges must match the VL2 prefab's
 # own configuration: they are the domain of its parameter encoding, so a mismatch
-# mis-encodes every value rather than merely feeling wrong. The shipped defaults
-# were checked against VirtualLens2's own -- see the note in VirtualLensSettings.
+# mis-encodes every value rather than merely feeling wrong.
 #
 # The ladders are derived at construction, not at import. Deriving them at import
 # meant a bad range raised from inside math.log while the package was still being
@@ -66,15 +65,13 @@ def ev_map_x(E: float, E_range: float) -> float:
 
 def aperture_f_to_x(F: float, Fmin: float, Fmax: float, min_x: float) -> float:
     """
-    Inverse of VirtualLens2's own aperture encoding, which is linear in log(F):
+    Inverse of VirtualLens2's own encoding, which is linear in log(F):
     x = ln(Fmax/F) / ln(Fmax/Fmin), for F in [Fmin, Fmax].
 
-    x == 0 is not a sentinel for anything. It is Fmax with VL2's depth-of-field
-    pass switched off -- pan focus -- because VL2 blends its shader's f-number and
-    its blur-enable flag along the same 0..1 parameter, and disables the pass at
-    the Fmax end. Flooring at min_x therefore still earns its keep: it separates
-    "DoF on, minimum blur" (the Fmax rung) from "DoF off" (the extra rung
-    aperture_ladder appends), which are different states rather than the same one.
+    x == 0 is Fmax with VL2's depth-of-field pass disabled -- it blends the f-number
+    and the blur-enable flag along this one parameter and switches the pass off at the
+    Fmax end. So min_x is load-bearing: it keeps the Fmax rung, which is minimum blur,
+    off x == 0, which is no blur and the rung aperture_ladder appends.
 
     Descending by design: higher x is a wider aperture (more blur), so +1 step
     stops down, matching index_usercamera's ascending f-number ladder in the
@@ -90,8 +87,7 @@ def zoom_ladder(steps_mm, focal_min_mm, focal_max_mm) -> tuple[list[float], list
     return [zoom_mm_to_x(f, focal_min_mm, focal_max_mm) for f in kept], dropped
 
 def aperture_ladder(steps_f, fnumber_min, fnumber_max, min_x) -> tuple[list[float], list[float]]:
-    """Encoded aperture rungs with the pan-focus rung (x==0, DoF off) appended, plus
-    dropped f-numbers."""
+    """Encoded aperture rungs plus the x==0 no-blur rung, and the dropped f-numbers."""
     kept, dropped = filter_to_range(steps_f, fnumber_min, fnumber_max)
     return [aperture_f_to_x(F, fnumber_min, fnumber_max, min_x) for F in kept] + [0.0], dropped
 
@@ -203,20 +199,15 @@ class VirtualLensMapping(Mapping):
     def toggle_drop(self, ctx, evt):
         """Drop (13) if PositionMode==0 else Pickup (12).
 
-        A latched write is right here, and index_vrclens pulsing its structurally
-        identical channel is also right -- the two products have opposite contracts.
+        Latched, not pulsed. VL2 acts on the transition *into* a Control value: its
+        per-command state is entered on `Control == code` and that state's own driver
+        writes both the target parameter and `Control = 0`. The channel self-clears, so
+        a repeat of the same command is still a fresh edge and the host never has to
+        return the parameter -- which is also why the optimistic ingest() below is safe.
 
-        VL2's FX fires on the *transition into* the command value and clears the
-        channel itself. Its per-command API state is entered on `Control == code`,
-        and that state's parameter driver writes both the target parameter and
-        `Control = 0`. So a repeat of the same command is again a 0 -> code edge:
-        the same-command-twice failure this docstring used to warn about cannot
-        happen, and the optimistic position_state.ingest() below cannot cause it.
-
-        VRCLens is the mirror image -- its states leave on `VRCLFeatureToggle !=
-        code`, so there the host must return the parameter to something else, which
-        is what press_pulse is for. Hence still no press_duration in
-        VirtualLensSettings: nothing here needs one.
+        index_vrclens pulses the structurally identical channel because VRCLens holds
+        the opposite contract: its states leave on `!= code`, so there the host must
+        clear it. Do not unify the two, and do not add a press_duration here.
         """
         cur = self.position_state.get()
         if cur == 0:
