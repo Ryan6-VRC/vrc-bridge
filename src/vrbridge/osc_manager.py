@@ -12,11 +12,12 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 
 
 # serve_forever() only notices shutdown() between polls, so this interval *is* the
-# teardown cost of each server it runs. Measured on one stop(): 0.437s HTTP plus
-# 0.514s OSC at the 0.5s default, against 0.046s and 0.063s here -- 0.824s down to
-# 0.106s for an embedder, and the round-trip suite from 19.6s to about 8s. The
-# thread joins after shutdown() cost 0.000s either way, because shutdown() already
-# blocks until the loop exits.
+# teardown cost of each server it runs. Measured non-advertising at the 0.5s default:
+# 0.310s HTTP plus 0.513s OSC, a 0.824s stop() against 0.106s here, and the full suite
+# from 19.6s to 7.6s. An advertising stop() -- what an embedder pays -- adds ~0.27s in
+# zeroconf.close() on top, which this lever does not touch. The thread joins after
+# shutdown() cost 0.000s in every configuration, because shutdown() already blocks
+# until the loop exits.
 # Not a settings.py value: that file holds user-tunable mapping and hardware feel,
 # and nothing about this number is a matter of taste.
 _SERVE_POLL_SECS = 0.05
@@ -293,10 +294,16 @@ class OSCManager:
         except Exception:
             return
         with self._client_lock:
-            # mDNS republishes a service on its own refresh schedule, and now that
-            # every such refresh re-resolves the current target, an unchanged one
-            # would otherwise rebuild the socket and re-log on each. The HTTP query
-            # above is unavoidable -- the port is not knowable without asking.
+            # mDNS republishes on its own refresh schedule, and following the incumbent
+            # means every refresh re-resolves it, so an unchanged one has to be caught
+            # here or each would rebuild the socket and re-log. This check sits after
+            # the query rather than before it because the OSC port is not knowable
+            # without asking -- so an incumbent's refresh now costs a blocking
+            # _host_info on zeroconf's single dispatch thread, stalling every service
+            # callback for its duration. Bounded at a few refreshes per record TTL, and
+            # accepted rather than resolved off-thread: concurrent callbacks would make
+            # the two-phase read here racy, and their serialisation is exactly what
+            # lets it skip holding the lock across the query.
             if self._client is not None and self._client_target == (host, osc_port) \
                     and self._current_service_name == name:
                 return

@@ -133,18 +133,62 @@ def test_our_own_advertisement_is_never_targeted():
         assert mgr._client_target is None
 
 
-def test_a_service_that_answers_nothing_is_skipped_not_fatal():
-    """Intended: a discovered service whose HOST_INFO does not resolve leaves the
-    current target alone rather than clearing it or raising."""
-    import socket as _socket
+# A service whose HOST_INFO does not yield an OSC port must leave the current target
+# standing. Reaching that guard needs a candidate that gets *past* the rank gate --
+# either the incumbent itself, or a strictly better rival. A lower-ranked stranger
+# never reaches it, so pointing one at a dead port tests nothing.
+
+
+def test_an_incumbent_that_republishes_without_an_osc_port_is_kept():
+    """Intended: a republication we cannot resolve leaves the target we already hold.
+
+    Following the incumbent means re-querying it, so its answer is now on a path that
+    can fail. Clearing the target on a bad answer would be worse than the tie bug this
+    replaced: a live client would be dropped over one malformed reply.
+    """
+    with FakeVRChat() as vrc, FakeVRChat(host_info={"NAME": "no port here"}) as broken:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        mgr._consider_service(VRCHAT, service(VRCHAT, broken.http_port))
+
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+        assert mgr.send("/input/Voice", 1) is True
+        assert vrc.wait_for_count(1), "the surviving target stopped receiving"
+
+
+def test_an_incumbent_whose_oscquery_is_unreachable_is_kept(monkeypatch):
+    """Intended: same, for the answer that never arrives rather than the wrong answer.
+
+    This is the restart window itself -- VRChat's mDNS record can republish before its
+    OSCQuery HTTP is accepting, and dropping the target there would blank output at the
+    exact moment this whole mechanism exists to cover.
+
+    `_host_info` is patched rather than pointed at a closed port because that costs its
+    full 2s timeout on Windows, which drops rather than refuses; that path is already
+    exercised in test_osc_roundtrip.py.
+    """
     with FakeVRChat() as vrc:
         mgr = OSCManager(advertise=False)
         mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
 
-        with _socket.socket() as s:      # bind then release, so the port is known-closed
-            s.bind(("127.0.0.1", 0))
-            dead_port = s.getsockname()[1]
-        mgr._consider_service("Ghost._oscjson._tcp.local.",
-                              service("Ghost._oscjson._tcp.local.", dead_port))
+        monkeypatch.setattr(OSCManager, "_host_info", staticmethod(lambda host, port: None))
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port + 1))
 
         assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+        assert mgr.send("/input/Voice", 1) is True
+        assert vrc.wait_for_count(1), "the surviving target stopped receiving"
+
+
+def test_a_better_ranked_candidate_that_does_not_resolve_does_not_displace():
+    """Intended: the guard holds from the rival direction too -- outranking the
+    incumbent wins the right to be queried, not the target itself."""
+    other = "SomeOtherApp._oscjson._tcp.local."
+    with FakeVRChat() as app, FakeVRChat(host_info={"NAME": "no port here"}) as broken:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(other, service(other, app.http_port))
+        assert mgr._client_target == ("127.0.0.1", app.osc_port)
+
+        mgr._consider_service(VRCHAT, service(VRCHAT, broken.http_port))
+
+        assert mgr._client_target == ("127.0.0.1", app.osc_port)
+        assert mgr._current_service_name == other
