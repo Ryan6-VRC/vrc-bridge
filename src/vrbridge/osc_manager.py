@@ -117,7 +117,9 @@ class OSCManager:
         # is the only way a peer that cannot read our /?HOST_INFO can reach us, and it
         # introduces the one failure the floating bind never had: the port is occupied.
         # Say which port and which option asked for it -- a bare WinError 10048 names
-        # neither.
+        # neither. The HTTP server above is already running when this raises; an embedder
+        # retrying a different port calls stop(), which walks each block independently
+        # and takes it down, so unwinding it here would only duplicate stop().
         try:
             self._srv = osc_server.ThreadingOSCUDPServer((self.host, self._bind_port), self._disp)
         except OSError as e:

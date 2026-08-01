@@ -245,17 +245,20 @@ def test_a_live_vrchat_does_not_take_the_slot_from_a_pinned_target():
         assert vrc.messages == [], "a datagram reached the discovered client"
 
 
-def test_a_pinned_target_survives_the_removal_of_every_service():
+def test_a_pinned_target_survives_a_service_removal():
     """Intended: nothing on the discovery side clears a target discovery never set.
 
-    A pin leaves `_current_service_name` None, so `remove_service`'s name match cannot
-    fire. Asserted rather than left to be re-derived: a later change that starts naming
-    the pin would break this without touching `remove_service` at all.
+    `remove_service`'s only condition is `_current_service_name == name`, so what keeps
+    a pin safe is that a pin never names itself there. That nameless-ness is asserted
+    directly: without it this test passes for any pin name but the one literal it
+    removes, and a later change that starts naming the pin would go unnoticed.
     """
     with FakeVRChat() as peer:
         mgr = OSCManager(advertise=False, target=("127.0.0.1", peer.osc_port))
         listener = OSCManager._BrowserListener(mgr)
 
+        assert mgr._current_service_name is None, \
+            "a pin that names itself is reachable by remove_service"
         listener.remove_service(None, "_oscjson._tcp.local.", VRCHAT)
 
         assert mgr._client_target == ("127.0.0.1", peer.osc_port)

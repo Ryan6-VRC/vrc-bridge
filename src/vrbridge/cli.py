@@ -39,6 +39,10 @@ ROUTERS: Dict[str, Type[MappingRouter]] = {
 
 DEFAULT_ROUTER = "default"
 
+#: Where --osc-port sends when --osc-host is not given. Not argparse's default for that
+#: flag: osc_target needs to tell "not given" from "given this value".
+DEFAULT_OSC_HOST = "127.0.0.1"
+
 
 def discover_routers() -> Dict[str, Type[MappingRouter]]:
     """The built-in routers plus any an installed package advertises.
@@ -70,10 +74,10 @@ def discover_routers() -> Dict[str, Type[MappingRouter]]:
 
 
 def _port(value: str) -> int:
-    """An argparse type rejecting a port the socket layer would reject only later.
+    """An argparse type rejecting a port nothing downstream will.
 
-    A mistyped *send* port is not an error anywhere downstream -- UDP has nobody to
-    refuse it -- so it is either caught here or it is silence for the whole run.
+    A mistyped *send* port raises nowhere -- UDP has nobody to refuse it -- so it is
+    either caught here or it is silence for the whole run.
     """
     try:
         n = int(value)
@@ -153,9 +157,13 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
 
     parser.add_argument(
         "--osc-host",
-        default="127.0.0.1",
+        default=None,
         metavar="HOST",
-        help="Host for --osc-port. Default: 127.0.0.1",
+        help=(
+            f"Host for --osc-port. Sends only: the listener and the served tree stay on "
+            f"loopback, so a peer off this machine can be sent to and cannot answer. "
+            f"Default: {DEFAULT_OSC_HOST}"
+        ),
     )
 
     parser.add_argument(
@@ -178,14 +186,18 @@ def osc_target(args, parser: argparse.ArgumentParser) -> tuple[str, int] | None:
 
     --osc-host alone is refused rather than ignored: it reads like it aimed the bridge
     somewhere, and silently discovering a different target instead is the failure that
-    would take longest to see.
+    would take longest to see. The flag defaults to None and not to the host it resolves
+    to, so that "given" is what is tested -- comparing against the default instead made
+    `--osc-host 127.0.0.1` the one spelling that slipped through.
     """
     if args.osc_port is None:
-        if args.osc_host != parser.get_default("osc_host"):
+        if args.osc_host is not None:
             parser.error("--osc-host sets the host for --osc-port, which was not given; "
-                         "without it the send target is discovered and both are ignored.")
+                         "without --osc-port the send target is discovered and "
+                         "--osc-host has no effect.")
         return None
-    return (args.osc_host, args.osc_port)
+    host = DEFAULT_OSC_HOST if args.osc_host is None else args.osc_host
+    return (host, args.osc_port)
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -39,11 +39,17 @@ def test_a_host_and_port_pin_that_peer(parser):
     assert osc_target(args, parser) == ("192.168.1.5", 9000)
 
 
-def test_a_host_without_a_port_is_refused_rather_than_ignored(parser):
+@pytest.mark.parametrize("host", ["192.168.1.5", "127.0.0.1"])
+def test_a_host_without_a_port_is_refused_rather_than_ignored(parser, host):
     """Intended: fail loud. `--osc-host` alone reads like the bridge was aimed
     somewhere; discovering a different target instead would be the slowest possible
-    failure to see, because everything keeps working against the wrong peer."""
-    args = parser.parse_args(["--osc-host", "192.168.1.5"])
+    failure to see, because everything keeps working against the wrong peer.
+
+    Loopback is in the parametrization because it is the spelling that hid the bug: a
+    guard comparing the value against the default cannot see the flag that was given
+    the default, and every host a test would reach for is the one kind that works.
+    """
+    args = parser.parse_args(["--osc-host", host])
     with pytest.raises(SystemExit):
         osc_target(args, parser)
 
@@ -70,11 +76,13 @@ def test_an_impossible_bind_port_is_refused_at_parse(parser, value):
 
 
 def test_the_options_reach_the_osc_manager_through_vrbridge():
-    """Intended: the last link of the chain the flags travel.
+    """Intended: the `VRBridge` -> `OSCManager` link, which is pure delegation.
 
-    Everything else here tests the parse and `tests/test_target_selection.py` tests the
-    behavior; between them sits a delegation that a keyword rename would break with both
-    ends still green.
+    Named narrowly on purpose. Everything above tests the parse and
+    `tests/test_target_selection.py` tests the behavior; the remaining link, `main()`
+    handing its parsed args to `VRBridge`, is *not* covered here -- reaching it means
+    driving `main()`, which ends in `router.run_forever()`, and the harness to stop that
+    costs more than the two keyword arguments it would guard.
     """
     from vrbridge import VRBridge
 
