@@ -47,12 +47,17 @@ class CallbackContext:
 class VRBridge:
     """Orchestrates OSC I/O and SteamVR controller events.
     Users register all callbacks up-front with `on_osc`/`on_controller` and then call `start()`.
+
+    `target=` and `bind_port=` pass straight to OSCManager, and are how a peer that
+    advertises nothing -- the Av3Emulator -- is addressed; its docstring holds the rules.
     """
     def __init__(self, *, log_level: str = "INFO", vr_background=True, enable_steamvr: bool = True,
-                 advertise=True, log_callbacks: bool = False):
+                 advertise=True, log_callbacks: bool = False,
+                 target: tuple[str, int] | None = None, bind_port: int = 0):
         import logging as _logging
         self.log = setup_logging(level=getattr(_logging, log_level))
-        self.osc = OSCManager(logger=self.log, advertise=advertise)
+        self.osc = OSCManager(logger=self.log, advertise=advertise,
+                              target=target, bind_port=bind_port)
 
         self.controllers: Optional[ControllerManager] = None
         if enable_steamvr:

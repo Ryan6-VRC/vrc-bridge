@@ -36,6 +36,8 @@ vrbridge --help           # all options
 
 Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/` in a source checkout, or under your per-user data directory for an installed package. Set `VRBRIDGE_FILES_DIR` to put them somewhere else.
 
+By default the bridge discovers VRChat over OSCQuery and sends to the port it advertises. To drive something that announces nothing — Lyuma's Av3Emulator in Unity play mode, for instance — name its ports instead. `--osc-port 9000` sends there and stops discovery from ever taking the target back; `--osc-bind-port 9001` listens on the port such a peer already sends to, since it has no way to learn the free port the bridge would otherwise pick. `--osc-host` sets the host for `--osc-port` and defaults to loopback; it aims sends only, since the bridge always listens on loopback, so a peer named on another machine can be sent to but cannot answer. Use both port flags together: a peer that cannot discover you needs to be told where to send as much as it needs to be sent to. Note that a pinned run still advertises itself, so a running VRChat can still find the bridge and push avatar parameters into it.
+
 ## Routers and mappings
 
 A **router** decides which mapping is active at any moment.

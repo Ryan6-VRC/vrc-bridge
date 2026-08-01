@@ -31,6 +31,83 @@ def test_host_info_returns_none_when_nothing_is_listening():
     assert OSCManager._host_info("127.0.0.1", closed_port) is None
 
 
+def test_the_listener_binds_the_port_it_was_given():
+    """Intended: a peer that cannot read our /?HOST_INFO cannot learn a floating port,
+    so we take the one it already sends to -- the emulator's fixed 9001.
+
+    A free port is asked for here rather than 9001 itself: the test must not fail
+    because something on the machine holds VRChat's conventional port.
+    """
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(("127.0.0.1", 0))
+        wanted = s.getsockname()[1]
+
+    mgr = OSCManager(advertise=False, bind_port=wanted)
+    try:
+        mgr.start()
+        assert mgr.osc_port == wanted
+    finally:
+        mgr.stop()
+
+
+def test_an_unavailable_bind_port_names_itself_and_the_option():
+    """Intended: fail loud. Requesting a port is the one way this bind can fail, and
+    the OSError the socket layer raises names neither the port nor who asked for it."""
+    holder = OSCManager(advertise=False, bind_port=0)
+    holder.start()
+    try:
+        blocked = OSCManager(advertise=False, bind_port=holder.osc_port)
+        with pytest.raises(OSError) as exc:
+            blocked.start()
+        assert str(holder.osc_port) in str(exc.value)
+        assert "--osc-bind-port" in str(exc.value)
+        blocked.stop()
+    finally:
+        holder.stop()
+
+
+def test_a_pinned_target_and_a_fixed_bind_close_the_loop_both_ways():
+    """Intended: the two options together are an end-to-end loop with a peer that
+    neither advertises nor discovers -- our sends reach it, its sends reach us.
+
+    Half of this is what the emulator needs and half is what it already does: it
+    listens on a port it is told about, and sends to a fixed 127.0.0.1:9001 that it
+    will never be talked out of.
+    """
+    import socket
+    import time
+    from pythonosc import udp_client
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(("127.0.0.1", 0))
+        inbound = s.getsockname()[1]
+
+    with FakeVRChat() as peer:
+        mgr = OSCManager(advertise=False,
+                         target=("127.0.0.1", peer.osc_port),
+                         bind_port=inbound)
+        mgr.start()
+        try:
+            seen = []
+            mgr.set_listener(lambda addr, val: seen.append((addr, val)))
+            mgr.watch("/avatar/parameters/Thing")
+
+            assert mgr.send("/avatar/parameters/Thing", 1.0) is True
+            assert peer.wait_for_count(1), "outbound never reached the peer"
+
+            # The peer replies to the fixed port it was told about, not to one we
+            # advertised -- there is nothing to advertise to.
+            udp_client.SimpleUDPClient("127.0.0.1", inbound).send_message(
+                "/avatar/parameters/Thing", 0.25)
+            deadline = time.monotonic() + 2.0
+            while not seen and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert seen == [("/avatar/parameters/Thing", pytest.approx(0.25))]
+        finally:
+            mgr.stop()
+
+
 @pytest.fixture
 def wired():
     """An OSCManager pointed at a fake VRChat, without going through mDNS."""

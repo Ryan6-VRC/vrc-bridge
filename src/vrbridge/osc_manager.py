@@ -38,8 +38,16 @@ class OSCManager:
     - Advertises OSCQuery so VRChat can auto-send avatar params; CONTENTS contains
       only '/avatar' and '/usercamera'
     - Browses for VRChat's OSCQuery and selects VRChat as send target; ignores our own service.
+
+    Both halves of that handshake assume a peer that advertises itself and that reads
+    our /?HOST_INFO. A peer doing neither -- the Av3Emulator, which carries OSC and no
+    service discovery at all -- is addressed by naming its ports instead:
+    `target=(host, port)` for the send side, `bind_port=` for the receive side. The two
+    are independent, but an emulator loop wants both: it listens on 9000 and sends to a
+    fixed 127.0.0.1:9001, which no floating port can satisfy.
     """
-    def __init__(self, host: str = "127.0.0.1", logger=None, advertise: bool = True):
+    def __init__(self, host: str = "127.0.0.1", logger=None, advertise: bool = True,
+                 target: Optional[tuple[str, int]] = None, bind_port: int = 0):
         self.host = host
         self.log = logger
         self._disp = dispatcher.Dispatcher()
@@ -52,6 +60,22 @@ class OSCManager:
         self._cache: Dict[str, Any] = {}
         self._watched: Set[str] = set()
         self._cache_lock = threading.Lock()
+
+        # A target we were told to use rather than one we found. Held so
+        # _consider_service can refuse to revise it -- see the guard there.
+        self._pinned_target = target
+        self._bind_port = bind_port
+        if target is not None:
+            # Built here and not in start(), so that no window exists in which the
+            # browser could fill the slot first: a SimpleUDPClient is a connectionless
+            # sender and needs no server of ours running. _current_service_name stays
+            # None, which is also what stops remove_service from ever clearing a
+            # target no discovered service backs.
+            self._client = udp_client.SimpleUDPClient(target[0], target[1])
+            self._client_target = (target[0], target[1])
+            if self.log:
+                self.log.info("OSC target pinned to %s:%d; discovery will not revise it",
+                              target[0], target[1])
 
         # All discovered services on the network
         self._discovered_services: Dict[str, ServiceInfo] = {}
@@ -89,8 +113,21 @@ class OSCManager:
         self._http_thread.start()
         if self.log: self.log.info("OSCQuery HTTP on %s:%d", self.host, self.http_port)
 
-        # Start OSC on a free port
-        self._srv = osc_server.ThreadingOSCUDPServer((self.host, 0), self._disp)
+        # Start OSC on a free port, or on the one we were told to take. Naming a port
+        # is the only way a peer that cannot read our /?HOST_INFO can reach us, and it
+        # introduces the one failure the floating bind never had: the port is occupied.
+        # Say which port and which option asked for it -- a bare WinError 10048 names
+        # neither. The HTTP server above is already running when this raises; an embedder
+        # retrying a different port calls stop(), which walks each block independently
+        # and takes it down, so unwinding it here would only duplicate stop().
+        try:
+            self._srv = osc_server.ThreadingOSCUDPServer((self.host, self._bind_port), self._disp)
+        except OSError as e:
+            if self._bind_port:
+                raise OSError(
+                    f"cannot bind the OSC listener to {self.host}:{self._bind_port} "
+                    f"(asked for by bind_port= / --osc-bind-port): {e}") from e
+            raise
         self.osc_port = self._srv.server_address[1]
         self._srv_thread = threading.Thread(target=self._srv.serve_forever,
                                             args=(_SERVE_POLL_SECS,),
@@ -267,6 +304,18 @@ class OSCManager:
         return 1       # generic other OSC apps
 
     def _consider_service(self, name, info):
+        # A pinned target is an instruction, not a bid. Ranking exists to choose among
+        # peers we did not name, so nothing discovered may revise one we did -- not even
+        # a rank-3 VRChat, which is exactly the case that makes this load-bearing: the
+        # emulator sits on 127.0.0.1:9000 and a live client outranks it, so under a
+        # rankable pin a run aimed at the emulator would retarget onto the real avatar
+        # mid-session, on mDNS callback timing.
+        #
+        # Returning here rather than earlier leaves discovery *observing* while it stops
+        # *deciding*: _BrowserListener has already recorded the service, so
+        # is_service_running -- which osc_vrcft depends on -- answers as it always did.
+        if self._pinned_target is not None:
+            return
         # Skip ourselves
         if self._service_info and name == self._service_info.name:
             return
