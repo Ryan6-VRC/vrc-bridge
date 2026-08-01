@@ -192,3 +192,89 @@ def test_a_better_ranked_candidate_that_does_not_resolve_does_not_displace():
 
         assert mgr._client_target == ("127.0.0.1", app.osc_port)
         assert mgr._current_service_name == other
+
+
+# A pinned target -- every rule above, refused. Kept in this file and not beside the
+# emulator wiring, because the thing that would break the pin is a change to
+# _consider_service, and its tests are here.
+
+
+class _ZcStub:
+    """Stands in for the Zeroconf handed to _BrowserListener, which only ever asks it to
+    resolve the service it has just announced."""
+
+    def __init__(self, info):
+        self._info = info
+
+    def get_service_info(self, stype, name, timeout=None):
+        return self._info
+
+
+def test_a_pinned_target_is_the_target_without_any_discovery():
+    """Intended: naming a peer's port is enough to send to it.
+
+    That is the whole capability. The Av3Emulator advertises nothing whatsoever, so no
+    amount of browsing ever yields a candidate for it, and every send before this was
+    dropped for want of a target.
+    """
+    with FakeVRChat() as peer:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", peer.osc_port))
+
+        assert mgr._client_target == ("127.0.0.1", peer.osc_port)
+        assert mgr.send("/avatar/parameters/Thing", 1.0) is True
+        assert peer.wait_for_count(1), "nothing arrived at the pinned peer"
+        assert peer.messages[0] == ("/avatar/parameters/Thing", 1.0)
+
+
+def test_a_live_vrchat_does_not_take_the_slot_from_a_pinned_target():
+    """Intended: an explicit target outranks the ranking.
+
+    This is the case the rule exists for. VRChat scores 3, above anything a pin could be
+    scored as, and on a machine where a live client and the emulator are both plausibly
+    up, a rankable pin would move a run aimed at the emulator onto the real avatar --
+    silently, on mDNS callback timing.
+    """
+    with FakeVRChat() as emulator, FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", emulator.osc_port))
+
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+
+        assert mgr._client_target == ("127.0.0.1", emulator.osc_port)
+        assert mgr.send("/input/Voice", 1) is True
+        assert emulator.wait_for_count(1)
+        assert vrc.messages == [], "a datagram reached the discovered client"
+
+
+def test_a_pinned_target_survives_the_removal_of_every_service():
+    """Intended: nothing on the discovery side clears a target discovery never set.
+
+    A pin leaves `_current_service_name` None, so `remove_service`'s name match cannot
+    fire. Asserted rather than left to be re-derived: a later change that starts naming
+    the pin would break this without touching `remove_service` at all.
+    """
+    with FakeVRChat() as peer:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", peer.osc_port))
+        listener = OSCManager._BrowserListener(mgr)
+
+        listener.remove_service(None, "_oscjson._tcp.local.", VRCHAT)
+
+        assert mgr._client_target == ("127.0.0.1", peer.osc_port)
+        assert mgr._client is not None
+
+
+def test_discovery_still_observes_while_pinned():
+    """Intended: the pin stops discovery *deciding*, not *observing*.
+
+    `osc_vrcft` asks `is_service_running` whether VRCFaceTracking is up, which reads the
+    browser's record of the network and has nothing to do with who receives our sends.
+    Suppressing the browser rather than the choice would have broken it.
+    """
+    with FakeVRChat() as peer, FakeVRChat() as vrcft:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", peer.osc_port))
+        listener = OSCManager._BrowserListener(mgr)
+
+        listener.add_service(_ZcStub(service(VRCFT, vrcft.http_port)),
+                             "_oscjson._tcp.local.", VRCFT)
+
+        assert mgr.is_service_running("VRCFT")
+        assert mgr._client_target == ("127.0.0.1", peer.osc_port)
