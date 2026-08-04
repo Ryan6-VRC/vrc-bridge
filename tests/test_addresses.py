@@ -134,6 +134,18 @@ def test_remy_addresses():
     assert remy.GAMEAUDIO_GRAB_ADDR == "/avatar/parameters/GrabSync/GameAudio_IsGrabbed"
 
 
+def test_wardrobe_addresses():
+    """The wardrobe's two parameters are a contract with the `osc-wardrobe` vrc-patterns
+    entry, which declares them on the avatar. Renaming one here without renaming it in that
+    prefab leaves the marker unreadable and every button dead, with nothing logged -- the
+    same class of silent break this file catches for a vendor's addresses."""
+    from vrbridge.mappings import osc_wardrobe as wd
+    assert wd.SLOT_ADDR == "/avatar/parameters/OscWardrobe/Slot"
+    assert wd.MARKER_ADDR == "/avatar/parameters/OscWardrobe/Manifest"
+    assert wd.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert wd.REST_SLOT == 0
+
+
 def test_router_selector_addresses():
     """The parameters the routers switch on. Two of these duplicate a mapping's
     own constant; the pin catches an edit that moves one copy and not the other."""

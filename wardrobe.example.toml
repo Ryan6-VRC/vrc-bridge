@@ -1,0 +1,23 @@
+# Example wardrobe manifest. Copy into the wardrobe manifest directory -- by default
+# `wardrobe/` beside this file, overridable with [wardrobe] manifest_dir in vrbridge.toml
+# -- and replace the ids with your own. That directory is gitignored: an avatar id
+# identifies a real account's content, so it is yours and is not committed here.
+#
+# One manifest describes one wardrobe menu. `id` is how the worn avatar selects it: the
+# `osc-wardrobe` prefab declares an Int parameter whose *default value* is this number, and
+# the bridge reads that off the worn avatar to decide which table applies. Two avatars may
+# carry the same id to share one wardrobe; two manifests may not.
+#
+# Valid ids are 1-255. Modular Avatar's inspector clamps an Int default to that range, so a
+# larger number cannot be authored onto the avatar that would have to carry it.
+id = 1
+
+# One entry per menu button. `slot` is the value that button sends (1-8, matching the eight
+# buttons the prefab ships); `label` appears in the bridge's log and nowhere else. Gaps are
+# fine -- a button with no entry warns when pressed and changes nothing.
+#
+# The id below is VRChat's own published example and is not a real avatar.
+[[slots]]
+slot  = 1
+label = "example"
+id    = "avtr_26187637-0c30-4a09-86e1-bc928c07309e"

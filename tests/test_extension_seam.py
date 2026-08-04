@@ -42,7 +42,7 @@ def test_every_shipped_mapping_uses_the_attach_hook():
     # __all__ + LAZY, so a mapping moved behind the lazy hook stays covered.
     names = [n for n in list(pkg.__all__) + list(pkg.LAZY)
              if n.endswith("Mapping") and n != "Mapping"]
-    assert len(names) == 7, f"expected all seven shipped mappings, got {names}"
+    assert len(names) == 8, f"expected all eight shipped mappings, got {names}"
     for name in names:
         cls = getattr(pkg, name)  # RemyMapping resolves through the lazy __getattr__
         assert issubclass(cls, Mapping)

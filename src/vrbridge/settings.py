@@ -229,6 +229,41 @@ class VRCFTSettings:
 
 
 @dataclass(frozen=True)
+class WardrobeSettings:
+    """Timing for reading the worn avatar's wardrobe marker. The slot table is not here --
+    it is user data in its own file (`wardrobe.py`), and this loader cannot hold a list of
+    strings anyway."""
+    manifest_dir: str = ""               # empty -> app_base_dir()/wardrobe
+    # After an avatar change the client needs a moment before it serves the new avatar's
+    # node; one measurement put it within 0.14 s. This sits well past that rather than at
+    # it, because reading too early costs a whole re-read cycle and buys nothing.
+    settle_delay_secs: float = 0.5
+    # The gap between the two agreeing reads that let a marker be adopted after a change.
+    # It is the defence against reading the *outgoing* avatar's marker: the client's
+    # OSCQuery tree 404s an address no worn avatar declares, but where both avatars declare
+    # the marker, a read during the transition can return the old value and look correct.
+    # PROVISIONAL -- no measurement bounds how long a stale value can be served, so this is
+    # deliberately generous and the live probe replaces it.
+    stable_gap_secs: float = 1.0
+    max_reads: int = 6                   # give up after this many, and wait for the next change
+    fetch_timeout_secs: float = 2.0
+
+    def validate(self, at: str) -> None:
+        _non_negative(self.settle_delay_secs, f"{at}.settle_delay_secs")
+        _positive(self.stable_gap_secs, f"{at}.stable_gap_secs")
+        if self.max_reads < 2:
+            raise ConfigError(
+                f"{at}.max_reads is {self.max_reads}; expected 2 or more. Adopting a marker "
+                f"after a change needs two agreeing reads, so one read can never succeed.")
+        _positive(self.fetch_timeout_secs, f"{at}.fetch_timeout_secs")
+
+    def resolved_manifest_dir(self) -> Path:
+        if self.manifest_dir:
+            return Path(self.manifest_dir).expanduser()
+        return app_base_dir() / "wardrobe"
+
+
+@dataclass(frozen=True)
 class RemySettings:
     base_url: str = "http://127.0.0.1:8000"
     http_timeout_sec: float = 1.0
@@ -261,6 +296,7 @@ class Settings:
     vrclens: VRCLensSettings = VRCLensSettings()
     muteproxy: MuteProxySettings = MuteProxySettings()
     vrcft: VRCFTSettings = VRCFTSettings()
+    wardrobe: WardrobeSettings = WardrobeSettings()
     remy: RemySettings = RemySettings()
 
     def validate(self) -> None:

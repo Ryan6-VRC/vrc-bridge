@@ -5,6 +5,7 @@ import ipaddress
 import json
 import socket
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Set
 
 from pythonosc import dispatcher, osc_server, udp_client
@@ -21,6 +22,31 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 # Not a settings.py value: that file holds user-tunable mapping and hardware feel,
 # and nothing about this number is a matter of taste.
 _SERVE_POLL_SECS = 0.05
+
+
+#: Why every fetch() outcome is named rather than collapsed to None: the caller has to
+#: act differently on each. A 404 means the worn avatar does not declare the node, which
+#: is a normal state and not an error; a transport failure means we learned nothing and
+#: should ask again; malformed means the peer answered something we cannot use, which is
+#: worth reporting once rather than retrying. _host_info swallows all three into None,
+#: and a caller inheriting that cannot keep CLAUDE.md rule 7's named-offender promise.
+FETCH_OK = "ok"
+FETCH_NO_PEER = "no-peer"        # no discovered OSCQuery peer to ask (a pinned target has none)
+FETCH_NOT_FOUND = "not-found"    # 404: the peer serves no such node
+FETCH_TRANSPORT = "transport"    # timeout, refused, or a non-404 HTTP status
+FETCH_MALFORMED = "malformed"    # answered 200, but not a JSON node carrying VALUE
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """One OSCQuery single-node read. `reason` is one of the FETCH_* constants above."""
+    reason: str
+    value: Any = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.reason == FETCH_OK
 
 
 def _addr_to_ip(addr_bytes):
@@ -57,6 +83,14 @@ class OSCManager:
         self._client_lock = threading.Lock()
         self._client: Optional[udp_client.SimpleUDPClient] = None
         self._client_target: Optional[tuple[str,int]] = None
+        # The peer's OSCQuery *HTTP* endpoint, which is a different port from the OSC one
+        # in _client_target and the only thing fetch() can ask. _consider_service already
+        # learns it as info.port to read OSC_PORT and used to discard it afterwards.
+        # Stays None under a pinned target, which advertises nothing and serves no tree --
+        # so fetch() answers FETCH_NO_PEER there rather than appearing to work.
+        self._peer_http: Optional[tuple[str, int]] = None
+        # Fired once a discovered send target is chosen. Set by set_target_listener.
+        self._target_listener: Optional[Callable[[tuple[str, int]], None]] = None
         self._cache: Dict[str, Any] = {}
         self._watched: Set[str] = set()
         self._cache_lock = threading.Lock()
@@ -102,6 +136,26 @@ class OSCManager:
 
     # public API
     def set_listener(self, fn: Callable[[str, Any], None]): self._listener = fn
+
+    def set_target_listener(self, fn: Callable[[tuple[str, int]], None]):
+        """Call `fn(target)` each time discovery selects or re-resolves a send target.
+
+        Exists because nothing else announces it: _consider_service sets the target under
+        the client lock and only logs, so a consumer that must act *when VRChat appears*
+        -- read a sentinel node, prime a cache -- had no event to hang on and would have
+        to poll a private field.
+
+        Two things the callback must respect. It runs on **zeroconf's single dispatch
+        thread**, which serialises every service callback, and docs/design.md accepts one
+        blocking _host_info there as a deliberate cost -- so do slow work on your own
+        thread and return. And it fires on a *re-resolve* too (VRChat restarting onto a
+        fresh OSC port is the case that exists for), so it is not once-per-process and the
+        handler has to be idempotent.
+
+        A pinned target never fires it: nothing was discovered, and per docs/design.md
+        naming a target takes the question away rather than entering it as a bid.
+        """
+        self._target_listener = fn
 
     def start(self):
         # Start HTTP first on a free port so we can advertise the correct port
@@ -286,6 +340,10 @@ class OSCManager:
                 if self.outer._current_service_name == name:
                     self.outer._client = None
                     self.outer._client_target = None
+                    # Cleared with the client, or fetch() would keep querying the HTTP
+                    # endpoint of a peer we have stopped sending to and report its answers
+                    # as current.
+                    self.outer._peer_http = None
                     self.outer._current_service_name = None
                     # Kept consistent with the fields it describes rather than
                     # load-bearing: _consider_service reads the rank only while a
@@ -358,9 +416,22 @@ class OSCManager:
                 return
             self._client = udp_client.SimpleUDPClient(host, osc_port)
             self._client_target = (host, osc_port)
+            self._peer_http = (host, info.port)
             self._current_service_name = name
             self._current_rank = rank
         if self.log: self.log.info("VRChat target set to %s:%d (via %s)", host, osc_port, name)
+        # Outside the lock deliberately: a listener that reaches back into OSCManager --
+        # fetch() takes the same lock to read _peer_http -- would deadlock on a
+        # non-reentrant Lock. The early-return above means this fires only on a real
+        # change, so a listener sees one event per selection rather than per mDNS refresh.
+        if self._target_listener:
+            try:
+                self._target_listener((host, osc_port))
+            except Exception:
+                # A throwing listener must not cost us the target we just resolved, nor
+                # kill zeroconf's dispatch thread and with it every later callback.
+                if self.log:
+                    self.log.exception("Target listener raised for %s:%d", host, osc_port)
 
     def _make_http_handler(self):
         outer = self
@@ -388,6 +459,60 @@ class OSCManager:
                 self.end_headers()
                 self.wfile.write(body)
         return Handler
+
+    def fetch(self, address: str, timeout: float = 2.0) -> FetchResult:
+        """Read one parameter node's live VALUE from the peer's OSCQuery server.
+
+        A targeted single-node GET, never a tree walk: docs/design.md descopes parameter
+        discovery, and this exists for the opposite case -- a consumer that already knows
+        the address and wants the value the *worn avatar* currently holds. VRChat serves
+        unsynced parameters here at full local precision, and 404s an address no worn
+        avatar declares, so a 404 is a legitimate answer about the avatar rather than a
+        failure. Every outcome is named; see the FETCH_* constants.
+
+        Blocking, and the caller owns the thread choice. docs/design.md: the OSC datagram
+        path tolerates a block, the controller path does not -- and a target-listener
+        callback is on zeroconf's dispatch thread, which is a third case that already pays
+        for one blocking query per record refresh.
+        """
+        with self._client_lock:
+            peer = self._peer_http
+        if peer is None:
+            return FetchResult(FETCH_NO_PEER,
+                               detail="no discovered OSCQuery peer (a pinned target serves none)")
+
+        import urllib.error
+        import urllib.request
+        host, http_port = peer
+        # Bracket an IPv6 literal, as _host_info does; a bare colon parses as a port.
+        base = f"http://[{host}]:{http_port}" if ":" in host else f"http://{host}:{http_port}"
+        url = base + address
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            # HTTPError subclasses URLError, so it has to be caught first or a 404 would
+            # read as a transport failure and the caller would retry a settled answer.
+            if e.code == 404:
+                return FetchResult(FETCH_NOT_FOUND, detail=f"{url} -> 404")
+            return FetchResult(FETCH_TRANSPORT, detail=f"{url} -> HTTP {e.code}")
+        except Exception as e:
+            return FetchResult(FETCH_TRANSPORT, detail=f"{url} -> {type(e).__name__}: {e}")
+
+        try:
+            node = json.loads(body)
+        except Exception as e:
+            return FetchResult(FETCH_MALFORMED, detail=f"{url} -> not JSON: {e}")
+        if not isinstance(node, dict) or "VALUE" not in node:
+            return FetchResult(FETCH_MALFORMED, detail=f"{url} -> no VALUE attribute")
+        value = node["VALUE"]
+        # OSCQuery types VALUE as an array -- one entry per type tag -- and VRChat's
+        # parameter nodes carry exactly one. Unwrap a single-element list so callers
+        # compare against a scalar; leave anything else alone rather than guessing, since
+        # a multi-tag node is not a parameter and the caller should see that it isn't.
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        return FetchResult(FETCH_OK, value=value)
 
     @staticmethod
     def _host_info(host: str, http_port: int):

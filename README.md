@@ -54,6 +54,7 @@ A **router** decides which mapping is active at any moment.
 - **User Camera** — full VRChat User Camera control (aperture, exposure, zoom, capture, modes).
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
+- **Wardrobe** — changes your worn avatar from a button on your own expression menu. Needs the [`osc-wardrobe`](#wardrobe) prefab on the avatar and a manifest listing the avatars each button means; it is opt-in, so register it from your own router. VRChat only accepts avatars in your favorites, recents, uploads or purchases.
 - **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
 ## Extending vrc-bridge
@@ -84,6 +85,47 @@ myrouter = "mypackage.routers:MyRouter"
 A plugin that fails to import, is not a `MappingRouter`, or reuses a built-in name is skipped with a warning naming it — it is never silently missing.
 
 Settings work the same way for both: `vrbridge.settings.settings()` returns the resolved configuration, and any mapping accepts a `tuning=` argument if you would rather pass your own.
+
+## Wardrobe
+
+Change your worn avatar from your own expression menu. Press a button, the bridge sends `/avatar/change`, VRChat swaps.
+
+You need two things: the `osc-wardrobe` prefab on the avatar (from [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns) — drop it in, no animator work), and a **manifest** saying which avatar each button means.
+
+Manifests live in `wardrobe/` next to your `vrbridge.toml`, one `.toml` per wardrobe menu. That directory is gitignored, because an avatar id identifies real account content. Copy `wardrobe.example.toml` to start:
+
+```toml
+id = 1                    # must match the prefab's Manifest parameter default on the avatar
+
+[[slots]]
+slot  = 1                 # which button (1-8)
+label = "streaming"       # appears in the log, nowhere else
+id    = "avtr_26187637-0c30-4a09-86e1-bc928c07309e"
+```
+
+The `id` at the top is how one avatar picks its own wardrobe: the prefab declares a parameter whose default value is that number, the bridge reads it off whatever you are wearing, and looks up the matching manifest. So different avatars can carry different menus — give each its own manifest and set the prefab's default to match. Two avatars may share one manifest id if you want them to share a wardrobe; two manifests may not.
+
+Valid ids are 1–255, because Modular Avatar's inspector clamps an Int parameter default to that range.
+
+Three things worth knowing before you file a bug:
+
+- **VRChat only accepts avatars in your favorites, recents, uploads, or purchases**, and ignores anything else without complaint. If a button does nothing, check that first.
+- **The wardrobe goes quiet on an avatar without the prefab.** That is normal — there is no menu there to press. Swap back the usual way and it re-arms on the next avatar that has one.
+- **Buttons, not toggles.** The mapping swaps on the press and ignores the release, so a toggle left switched on would swap again on your next avatar load.
+
+The mapping is opt-in: no shipped router registers it, so add it to your own.
+
+```python
+from vrbridge import VRBridge
+from vrbridge.mappings import WardrobeMapping
+
+bridge = VRBridge()
+wardrobe = WardrobeMapping.load_from_settings(bridge)   # or pass manifests= yourself
+wardrobe.register()
+bridge.start()
+```
+
+`vrbridge.wardrobe` is the manifest loader if you would rather build the table in code: `load_manifest(path)`, `load_manifests(paths)` and `discover_manifests(dir)` all return validated `Manifest` objects and raise `ConfigError` naming the offending key and file.
 
 ## Interoperates with
 
