@@ -96,8 +96,8 @@ class OSCManager:
         # Stays None under a pinned target, which advertises nothing and serves no tree --
         # so fetch() answers FETCH_NO_PEER there rather than appearing to work.
         self._peer_http: Optional[tuple[str, int]] = None
-        # Fired once a discovered send target is chosen. Set by set_target_listener.
-        self._target_listener: Optional[Callable[[tuple[str, int]], None]] = None
+        # Fired once a discovered send target is chosen. See add_target_listener.
+        self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
         self._cache: Dict[str, Any] = {}
         self._watched: Set[str] = set()
         self._cache_lock = threading.Lock()
@@ -147,13 +147,20 @@ class OSCManager:
     # public API
     def set_listener(self, fn: Callable[[str, Any], None]): self._listener = fn
 
-    def set_target_listener(self, fn: Callable[[tuple[str, int]], None]):
+    def add_target_listener(self, fn: Callable[[tuple[str, int]], None]):
         """Call `fn(target)` each time discovery selects or re-resolves a send target.
 
         Exists because nothing else announces it: _consider_service sets the target under
         the client lock and only logs, so a consumer that must act *when VRChat appears*
         -- read a sentinel node, prime a cache -- had no event to hang on and would have
         to poll a private field.
+
+        Additive, and that is the point: `VRBridge.__init__` registers its own multiplexer
+        here, so a single settable slot would let any embedder's direct call silently
+        unregister every mapping's target callback -- including the wardrobe's invalidate --
+        with nothing logged and no symptom until an avatar change went unnoticed. Embedders
+        should still prefer `VRBridge.on_target_selected`, which delivers a CallbackContext;
+        this is the layer beneath it.
 
         Two things the callback must respect. It runs on **zeroconf's single dispatch
         thread**, which serialises every service callback, and docs/design.md accepts one
@@ -165,7 +172,7 @@ class OSCManager:
         A pinned target never fires it: nothing was discovered, and per docs/design.md
         naming a target takes the question away rather than entering it as a bid.
         """
-        self._target_listener = fn
+        self._target_listeners.append(fn)
 
     def start(self):
         # Start HTTP first on a free port so we can advertise the correct port
@@ -475,12 +482,13 @@ class OSCManager:
         # fetch() takes the same lock to read _peer_http -- would deadlock on a
         # non-reentrant Lock. The early-return above means this fires only on a real
         # change, so a listener sees one event per selection rather than per mDNS refresh.
-        if self._target_listener:
+        for fn in list(self._target_listeners):
             try:
-                self._target_listener((host, osc_port))
+                fn((host, osc_port))
             except Exception:
-                # A throwing listener must not cost us the target we just resolved, nor
-                # kill zeroconf's dispatch thread and with it every later callback.
+                # Caught per listener, not around the loop: one throwing consumer must not
+                # cost us the target we just resolved, nor deprive the *other* listeners of
+                # the event, nor kill zeroconf's dispatch thread and every later callback.
                 if self.log:
                     self.log.exception("Target listener raised for %s:%d", host, osc_port)
 

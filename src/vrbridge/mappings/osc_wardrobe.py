@@ -121,10 +121,6 @@ class WardrobeMapping(Mapping):
         # never held across a fetch. A plain Lock deadlocks loudly the first time someone
         # breaks that; an RLock would quietly permit it.
         self._lock = threading.Lock()
-        # The last manifest a read produced. **Not a cache** -- it is never consulted to
-        # skip a read, only to keep the log from repeating itself. Caching it was a real
-        # defect: see the module docstring on the download window.
-        self._last_manifest: Optional[Manifest] = None
         # What the last read reported, so an unchanged outcome is not re-logged per press.
         self._reported: Optional[tuple] = None
         # The last slot acted on and when, for REPEAT_GUARD_SECS.
@@ -153,28 +149,37 @@ class WardrobeMapping(Mapping):
         # Gated: a router that disabled this mapping must not have it swapping avatars.
         self.bridge.on_osc(SLOT_ADDR, self._gate(self._on_slot))
 
-        # UNGATED, and that is load-bearing: this is what drops a manifest that no longer
-        # describes the worn avatar. Gated, a router-disabled wardrobe would keep a stale
-        # table across every avatar change and act on it the moment it was re-enabled. It
-        # only ever invalidates -- it never enables anything, so an ungated handler cannot
-        # resurrect a mapping its router switched off.
+        # UNGATED, and the reason is narrower than it used to be. There is no cached table to
+        # drop -- the marker is read on every press -- so all this resets is the once-per-
+        # condition report dedupe, which is what lets a new avatar state its own problem
+        # instead of inheriting the previous one's silence. Ungated because a router-disabled
+        # wardrobe still passes through avatar changes, and re-enabling it should not begin
+        # in stale silence. It only ever clears, so it cannot resurrect a mapping its router
+        # switched off.
+        #
+        # Do not read a caching contract back into this. An earlier version of this comment
+        # promised one, and the state behind the promise had already been deleted.
         self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_invalidate)
 
         # A different client means a different worn avatar. Same reasoning; also runs on
-        # zeroconf's dispatch thread, so it must stay cheap -- invalidating is one field.
+        # zeroconf's dispatch thread, so it must stay cheap -- clearing is one field.
         self.bridge.on_target_selected(lambda ctx, target: self._on_invalidate(ctx, "", None))
 
     # ---- events ----------------------------------------------------------
 
     def _on_invalidate(self, ctx, address: str, value) -> None:
-        """The worn avatar (or the client) changed, so the active manifest is stale.
+        """The worn avatar (or the client) changed, so let the next press speak for itself.
+
+        Nothing is invalidated in the caching sense, because nothing is cached: this resets
+        the report dedupe so the next press reports its own outcome rather than being
+        suppressed as a repeat of the previous avatar's.
 
         The echoed avatar id is deliberately not retained: it acknowledges whatever was last
         requested rather than stating what is worn (see the module docstring), so keeping it
-        would only invite a caller to trust it.
+        would only invite a caller to trust it. The same is true of VRChat's OSCQuery node of
+        this name, measured -- it adopts an id no avatar owns, so it reports the request too.
         """
         with self._lock:
-            self._last_manifest = None
             self._reported = None
             # `_last_slot` is deliberately NOT cleared here. This handler is bound to
             # /avatar/change, and the echo of our own swap arrives within 5 ms (measured) --
@@ -314,8 +319,6 @@ class WardrobeMapping(Mapping):
                          "claims (loaded: %s). Give a manifest id %d, or correct the "
                          "avatar's %s default.", marker, known, marker, MARKER_ADDR)
             return None
-        with self._lock:
-            self._last_manifest = manifest
         self._report(("active", manifest.id), "info",
                      "Wardrobe manifest %d active (%d slot(s), from %s) -- %s.",
                      manifest.id, len(manifest.slots), manifest.source, how)

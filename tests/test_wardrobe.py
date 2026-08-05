@@ -245,7 +245,7 @@ def test_target_selection_fires_the_hook():
     with FakeVRChat() as vrc:
         mgr = OSCManager(advertise=False)
         seen = []
-        mgr.set_target_listener(seen.append)
+        mgr.add_target_listener(seen.append)
         name = "VRChat-Client-1._oscjson._tcp.local."
         info = ServiceInfo("_oscjson._tcp.local.", name,
                            addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
@@ -259,12 +259,50 @@ def test_target_selection_fires_the_hook():
         assert len(seen) == 1
 
 
+def test_a_second_target_listener_does_not_displace_the_first():
+    """Intended: registering is additive, because `VRBridge.__init__` has already claimed
+    this hook for its own multiplexer.
+
+    With a single settable slot, an embedder calling the manager directly silently
+    unregistered every mapping's target callback -- the wardrobe's invalidate among them --
+    with nothing logged and no symptom until an avatar change went unnoticed.
+    """
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        first, second = [], []
+        mgr.add_target_listener(first.append)
+        mgr.add_target_listener(second.append)
+        name = "VRChat-Client-1._oscjson._tcp.local."
+        info = ServiceInfo("_oscjson._tcp.local.", name,
+                           addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                           properties={}, server="h.local.")
+        mgr._consider_service(name, info)
+        assert first == [("127.0.0.1", vrc.osc_port)], "the first listener was displaced"
+        assert second == [("127.0.0.1", vrc.osc_port)]
+
+
+def test_one_throwing_target_listener_still_lets_the_others_hear():
+    """Intended: the per-listener catch is inside the loop, not around it. Around it, the
+    first consumer to raise would silently deprive every later one of the event."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        heard = []
+        mgr.add_target_listener(lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        mgr.add_target_listener(heard.append)
+        name = "VRChat-Client-1._oscjson._tcp.local."
+        info = ServiceInfo("_oscjson._tcp.local.", name,
+                           addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                           properties={}, server="h.local.")
+        mgr._consider_service(name, info)
+        assert heard == [("127.0.0.1", vrc.osc_port)], "a throwing listener ate the event"
+
+
 def test_a_throwing_target_listener_costs_neither_the_target_nor_the_thread():
     """Intended: this fires on zeroconf's single dispatch thread, where an escape would
     take out every later service callback."""
     with FakeVRChat() as vrc:
         mgr = OSCManager(advertise=False)
-        mgr.set_target_listener(lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+        mgr.add_target_listener(lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
         name = "VRChat-Client-1._oscjson._tcp.local."
         info = ServiceInfo("_oscjson._tcp.local.", name,
                            addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
@@ -309,16 +347,6 @@ class Harness:
     def change(self, avatar_id):
         self.bridge._on_osc_event(AVATAR_CHANGE_ADDR, avatar_id)
 
-    def read_ok(self):
-        """Whether the last marker read produced a manifest. Not an arm *state*: the mapping
-        keeps no cache, so this only reports what the most recent read found."""
-        with self.m._lock:
-            return self.m._last_manifest is not None
-
-    def read_id(self):
-        with self.m._lock:
-            return None if self.m._last_manifest is None else self.m._last_manifest.id
-
     def deliver(self, address, value):
         """Deliver through the manager's change-filter, as a real datagram would.
 
@@ -354,13 +382,11 @@ def test_the_marker_is_read_on_the_first_press_not_before(tmp_path):
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path)
         try:
-            assert not h.read_ok(), "nothing should be read before a press"
             assert vrc.node_gets == [], "the marker must not be polled ahead of a press"
 
             h.slot(1)
             assert vrc.wait_for_count(1)
-            assert h.sent() == [A_ID]
-            assert h.read_id() == 7
+            assert h.sent() == [A_ID], "the swap must use manifest 7's slot-1 avatar"
             assert len(vrc.node_gets) == 1, "exactly one marker read, at the press"
         finally:
             h.close()
@@ -394,10 +420,8 @@ def test_an_avatar_change_forces_the_next_press_to_re_read(tmp_path):
         try:
             h.slot(1)
             assert vrc.wait_for_count(1)
-            assert h.read_ok()
 
             h.change(B_ID)
-            assert not h.read_ok(), "an avatar change must drop the last read"
             assert len(vrc.node_gets) == 1, "the change itself must not read anything"
 
             # Past the duplicate window before pressing the same slot again. The guard now
@@ -424,7 +448,6 @@ def test_a_cold_avatar_that_loads_slowly_still_arms(tmp_path):
             vrc.set_node(MARKER_ADDR, 7)
             h.slot(1)
             assert vrc.wait_for_count(1)
-            assert h.read_id() == 7
         finally:
             h.close()
 
@@ -579,9 +602,8 @@ def test_a_slot_with_no_entry_warns_and_leaves_the_wardrobe_working(tmp_path, ca
                 h.slot(2)
             assert "no entry" in caplog.text
             assert h.sent() == []
-            assert h.read_ok(), "one dead button must not disarm the wardrobe"
             h.slot(1)
-            assert vrc.wait_for_count(1)
+            assert vrc.wait_for_count(1), "one dead button disarmed the whole wardrobe"
         finally:
             h.close()
 
@@ -621,7 +643,6 @@ def test_a_transport_failure_is_retried_on_the_next_press(tmp_path, caplog):
             vrc.node_fault = False
             h.slot(1)
             assert vrc.wait_for_count(1), "the retry press should have armed and swapped"
-            assert h.read_id() == 7
         finally:
             h.close()
 
@@ -634,7 +655,7 @@ def test_a_marker_no_manifest_claims_names_the_id(tmp_path, caplog):
         try:
             with caplog.at_level("WARNING"):
                 h.slot(1)
-            assert not h.read_ok()
+            assert h.sent() == []
             # Assert on the sentence, not a bare "7": A_ID itself contains a 7, so
             # substring-matching that digit passed whatever the code did.
             assert "marker is 42" in caplog.text
@@ -644,8 +665,9 @@ def test_a_marker_no_manifest_claims_names_the_id(tmp_path, caplog):
 
 
 def test_a_router_that_disables_the_wardrobe_keeps_it_disabled(tmp_path):
-    """Intended: `enabled` is the router's and `_active` is the arm state. The ungated
-    invalidate handler exists to drop a stale manifest, never to promote the mapping."""
+    """Intended: `enabled` belongs to the router, and the ungated invalidate handler must
+    never promote the mapping. It only ever clears, so passing an avatar change through a
+    disabled wardrobe cannot bring it back."""
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path)
         try:
@@ -653,8 +675,7 @@ def test_a_router_that_disables_the_wardrobe_keeps_it_disabled(tmp_path):
             assert vrc.wait_for_count(1)
             h.m.deactivate()             # the router's decision
 
-            h.change(B_ID)               # ungated: must still invalidate
-            assert not h.read_ok(), "a stale manifest survived an avatar change while disabled"
+            h.change(B_ID)               # ungated: runs even while disabled
             assert not h.m.enabled, "a disabled wardrobe re-enabled itself"
 
             h.slot(3)
@@ -692,7 +713,7 @@ def test_a_pinned_target_can_name_its_manifest_instead_of_reading_one(tmp_path):
             h.bridge.osc._peer_http = None      # as a pinned target leaves it
             h.slot(1)
             assert vrc.wait_for_count(1)
-            assert h.read_id() == 7
+            assert h.sent() == [A_ID], "the named manifest's slot table must be the one used"
             assert vrc.node_gets == [], "a named manifest must not be read over HTTP"
         finally:
             h.close()
@@ -733,7 +754,6 @@ def test_a_404_in_the_swap_gap_does_not_condemn_the_next_avatar(tmp_path):
             time.sleep(REPEAT_GUARD_SECS * 1.5)
             h.slot(1)                       # the incoming avatar is now serving
             assert vrc.wait_for_count(1), "the 404 was remembered and killed the wardrobe"
-            assert h.read_id() == 7
         finally:
             h.close()
 

@@ -81,7 +81,7 @@ class VRBridge:
         self._target_callbacks: list[Callable[[CallbackContext, tuple[str, int]], None]] = []
         self._lock = threading.RLock()
         self.osc.set_listener(self._on_osc_event)
-        self.osc.set_target_listener(self._on_target_selected)
+        self.osc.add_target_listener(self._on_target_selected)
         self._ctx = CallbackContext(osc=self.osc)
         self._log_callbacks = log_callbacks
 
@@ -104,7 +104,7 @@ class VRBridge:
         mappings may each need the event -- the same reason on_osc fans out.
 
         The callback runs on zeroconf's dispatch thread and fires again on a re-resolve,
-        so keep it short and make it idempotent; OSCManager.set_target_listener owns those
+        so keep it short and make it idempotent; OSCManager.add_target_listener owns those
         rules in full.
         """
         with self._lock:
