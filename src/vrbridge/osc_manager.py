@@ -267,6 +267,18 @@ class OSCManager:
         with self._cache_lock:
             return self._cache.get(address, default)
 
+    def forget(self, address: str) -> None:
+        """Drop a watched address's cached value, so the next arrival counts as a change.
+
+        `_update_cache_and_fire` suppresses a value equal to the last one seen, which is
+        what keeps a streaming parameter from waking every listener. That filter has one
+        blind spot: a consumer whose *action* changed the world can need the same value
+        delivered twice. Forgetting is how it says so, and is cheaper than teaching the
+        filter about consumers.
+        """
+        with self._cache_lock:
+            self._cache.pop(address, None)
+
     def send(self, address: str, value):
         """Send a message to the selected VRChat OSC target (if any)."""
         with self._client_lock:

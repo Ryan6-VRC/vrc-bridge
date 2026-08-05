@@ -109,7 +109,7 @@ Valid ids are 1–255, because Modular Avatar's inspector clamps an Int paramete
 
 Three things worth knowing before you file a bug:
 
-- **VRChat only accepts avatars in your favorites, recents, uploads, or purchases**, and ignores anything else without complaint. If a button does nothing, check that first.
+- **VRChat only accepts avatars in your favorites, recents, uploads, or purchases.** An ineligible id does not swap. If a button does nothing, check that first.
 - **The wardrobe goes quiet on an avatar without the prefab.** That is normal — there is no menu there to press. Swap back the usual way and it re-arms on the next avatar that has one.
 - **Buttons, not toggles.** The mapping swaps on the press and ignores the release, so a toggle left switched on would swap again on your next avatar load.
 
@@ -122,7 +122,16 @@ from vrbridge.mappings import WardrobeMapping
 bridge = VRBridge()
 wardrobe = WardrobeMapping.load_from_settings(bridge)   # or pass manifests= yourself
 wardrobe.register()
+wardrobe.activate()        # `enabled` is yours to own; the mapping never sets it itself
 bridge.start()
+```
+
+`activate()` is not optional — a registered but inactive wardrobe ignores every press. It is separate from *arming*: the wardrobe also needs a manifest, which it reads off the worn avatar, so an active wardrobe still declines presses (loudly) until it has one.
+
+**If you pin the send target** with `--osc-port` — at the Av3Emulator, or anything else that advertises nothing — there is no OSCQuery tree to read the marker from, so the wardrobe can never arm on its own. Name the manifest instead:
+
+```python
+wardrobe = WardrobeMapping.load_from_settings(bridge, pinned_manifest_id=1)
 ```
 
 `vrbridge.wardrobe` is the manifest loader if you would rather build the table in code: `load_manifest(path)`, `load_manifests(paths)` and `discover_manifests(dir)` all return validated `Manifest` objects and raise `ConfigError` naming the offending key and file.

@@ -238,7 +238,7 @@ class Harness:
     """A bridge + fake VRChat + a registered wardrobe, driven without a router.
 
     No shipped router registers this mapping, so tests drive it the way a user's own
-    router would: construct, register, then invoke through the bridge's dispatch.
+    router would: construct, register, activate, then invoke through the bridge's dispatch.
     """
 
     def __init__(self, vrc: FakeVRChat, manifests, tuning=FAST):
@@ -248,6 +248,10 @@ class Harness:
         peer(self.bridge.osc, vrc)
         self.m = WardrobeMapping(self.bridge, manifests, tuning=tuning)
         self.m.register()
+        # `enabled` is the router's and the mapping never writes its own, so something has
+        # to switch it on -- exactly as a user's router does. Arming (`_active`) is a
+        # separate axis and comes only from a marker read.
+        self.m.activate()
 
     def close(self):
         self.bridge.osc.stop()
@@ -260,14 +264,21 @@ class Harness:
         self.bridge._on_osc_event(AVATAR_CHANGE_ADDR, avatar_id)
 
     def settle(self, timeout=3.0):
-        """Wait for the marker-read worker to finish its current job."""
-        import time
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not self.m._rearm_queued and self.m._work.unfinished_tasks == 0:
-                return True
-            time.sleep(0.005)
-        return False
+        """Wait until no marker read is running or pending."""
+        return self.m._idle.wait(timeout)
+
+    def armed(self):
+        """The arm state is `_active`, never `enabled` -- which belongs to the router."""
+        with self.m._lock:
+            return self.m._active is not None
+
+    def deliver(self, address, value):
+        """Deliver through the manager's change-filter, as a real datagram would.
+
+        `bridge._on_osc_event` bypasses it, which is what let a test claim to cover the
+        repeat-press dedupe while never exercising it.
+        """
+        self.bridge.osc._update_cache_and_fire(address, value)
 
     def sent(self):
         return self.vrc.values_for(AVATAR_CHANGE_ADDR)
@@ -280,6 +291,13 @@ def discover_manifests_from(tmp_path: Path, body: str):
     return discover_manifests(d)
 
 
+
+
+def armed_manifest(h):
+    with h.m._lock:
+        return None if h.m._active is None else h.m._active.id
+
+
 def test_a_slot_press_sends_the_avatar_id_as_a_string(tmp_path):
     """Intended: /avatar/change carries the id as an OSC string. The client dispatches on
     the argument's runtime type with no coercion, so nothing else would land."""
@@ -287,15 +305,16 @@ def test_a_slot_press_sends_the_avatar_id_as_a_string(tmp_path):
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.m._queue_rearm("target-selected")
+            h.m._schedule("target-selected")
             assert h.settle()
-            assert h.m.enabled, "a served marker naming a loaded manifest should arm it"
+            assert h.armed(), "a served marker naming a loaded manifest should arm it"
 
             h.slot(1)
             assert vrc.wait_for_count(1)
             assert h.sent() == [A_ID]
             assert isinstance(h.sent()[0], str)
         finally:
+            h.m.close()
             h.close()
 
 
@@ -306,70 +325,125 @@ def test_the_rest_slot_never_swaps(tmp_path):
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.m._queue_rearm("target-selected")
+            h.m._schedule("target-selected")
             assert h.settle()
             h.slot(0)
             assert h.sent() == []
         finally:
+            h.m.close()
             h.close()
 
 
-def test_pressing_the_same_slot_twice_swaps_twice(tmp_path):
-    """Intended: the Button's release edge is load-bearing, not incidental -- it is what
-    makes a second press of the same slot a second event, which is how a retry works after
-    a swap that did not take. Momentary is the required source here, the opposite of
-    osc_muteproxy's latching contract."""
+def test_the_same_slot_twice_swaps_twice_through_the_real_change_filter(tmp_path):
+    """Intended: the release edge makes a second press of one slot a second event, which is
+    how a retry works after a swap that did not take.
+
+    Driven through the manager's change-filter rather than around it: the filter drops a
+    value equal to the last seen, so 1 -> 0 -> 1 is the only sequence that reaches the
+    mapping twice, and a test that bypassed the filter could not show that."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.m._queue_rearm("target-selected")
+            h.m._schedule("target-selected")
             assert h.settle()
-            h.slot(1)
-            h.slot(0)
-            h.slot(1)
+
+            h.deliver(SLOT_ADDR, 1)
+            h.deliver(SLOT_ADDR, 0)
+            h.deliver(SLOT_ADDR, 1)
             assert vrc.wait_for_count(2)
             assert h.sent() == [A_ID, A_ID]
         finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_repeat_press_survives_a_lost_release(tmp_path):
+    """Intended: a swap can eat the Button's release-to-0, because the outgoing avatar stops
+    emitting first. The cached slot would then equal the next press and the change-filter
+    would drop it *before* the mapping saw it -- a dead button until a different slot was
+    pressed. Forgetting the cached value on a successful send is what prevents that."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            vrc.set_node(MARKER_ADDR, 7)
+            h.m._schedule("target-selected")
+            assert h.settle()
+
+            h.deliver(SLOT_ADDR, 1)
+            assert vrc.wait_for_count(1)
+            # No release-to-0 at all, then the same slot again.
+            h.deliver(SLOT_ADDR, 1)
+            assert vrc.wait_for_count(2), "the repeat press was filtered away"
+            assert h.sent() == [A_ID, A_ID]
+        finally:
+            h.m.close()
             h.close()
 
 
 def test_a_slot_with_no_entry_warns_and_leaves_the_wardrobe_working(tmp_path, caplog):
     """Intended: gaps are legal and the menu always ships eight buttons, so a pressable
     slot with no row is an ordinary authoring state. Taking the whole wardrobe down over one
-    unused button would be a far worse failure than a warning."""
+    unused button would be far worse than a warning."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.m._queue_rearm("target-selected")
+            h.m._schedule("target-selected")
             assert h.settle()
 
             with caplog.at_level("WARNING"):
                 h.slot(2)
             assert "no entry" in caplog.text
             assert h.sent() == []
-            assert h.m.enabled, "one dead button must not disarm the wardrobe"
+            assert h.armed(), "one dead button must not disarm the wardrobe"
 
             h.slot(1)
             assert vrc.wait_for_count(1)
-            assert h.sent() == [A_ID]
         finally:
+            h.m.close()
             h.close()
 
 
-def test_a_press_before_any_marker_is_read_swaps_nothing(tmp_path, caplog):
-    """Intended: with no manifest adopted the mapping does not know what the wearer's
-    buttons mean, so it must decline rather than guess at a table."""
+def test_a_press_before_any_marker_is_read_warns_and_swaps_nothing(tmp_path, caplog):
+    """Intended: with no manifest adopted the mapping does not know what the buttons mean,
+    so it declines and says so rather than guessing.
+
+    Reached without touching the mapping by hand, which matters: while the mapping wrote its
+    own `enabled`, the press was swallowed by the gate *before* this warning, so the
+    fail-loud path existed only for a test that faked the state."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
-            h.m.activate()          # armed by hand, but no marker read has happened
             with caplog.at_level("WARNING"):
                 h.slot(1)
             assert h.sent() == []
             assert "no manifest is active" in caplog.text
         finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_router_that_disables_the_wardrobe_keeps_it_disabled(tmp_path):
+    """Intended: `enabled` is the router's and `_active` is the arm state. An avatar change
+    must be able to re-read the marker without re-enabling a mapping the router switched
+    off -- the ungated handler exists for recovery, not for self-promotion."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            vrc.set_node(MARKER_ADDR, 7)
+            h.m.activate()
+            h.m.deactivate()          # the router's decision
+
+            h.change(A_ID)            # ungated: re-reads and re-arms
+            assert h.settle()
+            assert h.armed(), "the marker should still have been read while disabled"
+            assert not h.m.enabled, "a disabled wardrobe re-enabled itself"
+
+            h.slot(3)
+            assert h.sent() == [], "a disabled wardrobe swapped an avatar"
+        finally:
+            h.m.close()
             h.close()
 
 
@@ -380,36 +454,79 @@ def test_the_avatar_already_worn_is_not_re_sent(tmp_path):
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.change(A_ID)                 # now wearing A, and re-armed from the marker
+            h.change(A_ID)                 # now wearing A, re-armed from the marker
             assert h.settle()
+            assert h.armed(), "the suppression claim is vacuous unless the wardrobe armed"
             h.slot(1)                      # slot 1 *is* A
             assert h.sent() == []
         finally:
+            h.m.close()
             h.close()
 
 
-def test_an_avatar_change_disarms_until_a_marker_read_agrees_with_itself(tmp_path):
-    """Intended: this is the defence against reading the *outgoing* avatar's marker. The
-    client 404s an address no worn avatar declares, but a wardrobe's whole purpose is that
-    several avatars declare this one at different values, so a read during the transition
-    can return the old id and be indistinguishable from a correct answer. Two agreeing reads
-    a gap apart are required, and in between the mapping is inert -- so a press during the
-    transition does nothing rather than indexing the previous avatar's table."""
+def test_a_marker_is_adopted_once_two_reads_a_gap_apart_agree(tmp_path, caplog):
+    """Intended: the stability rule, actually exercised -- the node stays served throughout,
+    so the read loop runs rather than short-circuiting.
+
+    This is the flagship of the design and its first version never entered the loop: it
+    cleared the node, so the read 404'd and returned before any stability check ran. That is
+    how a 404 ending the whole schedule went unnoticed."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.m._queue_rearm("target-selected")
-            assert h.settle()
-            assert h.m.enabled
-
-            vrc.clear_node(MARKER_ADDR)    # mid-transition: nothing served yet
-            h.change(B_ID)
-            assert h.settle()
-            assert not h.m.enabled, "a change must disarm until a marker is re-read"
-            h.slot(1)
-            assert h.sent() == [], "an inert wardrobe must not swap"
+            with caplog.at_level("INFO"):
+                h.change(B_ID)
+                assert h.settle()
+            assert armed_manifest(h) == 7
+            assert "stable across two reads" in caplog.text, \
+                "adopted by some route other than the stability rule"
+            assert len(vrc.node_gets) >= 2, "the stability rule needs two reads"
         finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_404_during_the_swap_does_not_end_the_schedule(tmp_path, caplog):
+    """Intended: during a swap the new avatar's node is not published yet, so the first read
+    of a perfectly good wardrobe 404s. Returning there left a wardrobed avatar permanently
+    unarmed, recoverable only through the very menu this feature replaces -- and an observed
+    404 is also the teardown proof that makes the next value trustworthy."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            # The node exists but 404s for the first two reads, which is the swap window:
+            # the new avatar's node is not published the instant the change is announced.
+            # Deterministic rather than a sleep raced against the read schedule.
+            vrc.set_node(MARKER_ADDR, 7)
+            vrc.node_404_first = 2
+
+            with caplog.at_level("INFO"):
+                h.change(B_ID)
+                assert h.settle()
+            assert armed_manifest(h) == 7, "a 404 then a value must still arm the wardrobe"
+            assert "after an observed 404" in caplog.text
+        finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_marker_absent_for_the_whole_schedule_reads_as_no_wardrobe(tmp_path, caplog):
+    """Intended: an avatar without the prefab is the common case and not an error, so it
+    reports at INFO and leaves the wardrobe unarmed rather than warning."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            vrc.clear_node(MARKER_ADDR)
+            with caplog.at_level("INFO"):
+                h.change(B_ID)
+                assert h.settle()
+            assert not h.armed()
+            assert "No wardrobe marker" in caplog.text
+            h.slot(1)
+            assert h.sent() == [], "an unarmed wardrobe must not swap"
+        finally:
+            h.m.close()
             h.close()
 
 
@@ -420,9 +537,7 @@ def test_a_marker_that_changes_between_reads_is_not_adopted(tmp_path, caplog):
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             import itertools
-            # A different value on every read, so no two ever agree.
             counter = itertools.count(100)
-
             real_fetch = h.bridge.osc.fetch
 
             def unstable(address, timeout=2.0):
@@ -435,32 +550,104 @@ def test_a_marker_that_changes_between_reads_is_not_adopted(tmp_path, caplog):
                     assert h.settle()
             finally:
                 h.bridge.osc.fetch = real_fetch
-            assert not h.m.enabled
+            assert not h.armed()
             assert "never held the same value" in caplog.text
         finally:
+            h.m.close()
             h.close()
 
 
-def test_a_change_re_arms_after_an_earlier_read_found_nothing(tmp_path):
-    """Intended: the /avatar/change handler stays ungated so deactivation is recoverable.
-    Gating it would make the first 404 terminal -- and because a *successful* swap is what
-    triggers the read, the feature would break precisely on working."""
+def test_transport_failures_exhaust_the_budget_and_say_so(tmp_path, caplog):
+    """Intended: a peer that cannot be reached is distinct from one that answers 404. It
+    leaves the wardrobe unarmed and names the failure count rather than reading as
+    "this avatar has no wardrobe"."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
-            h.change(B_ID)                 # no node served: no wardrobe on this avatar
-            assert h.settle()
-            assert not h.m.enabled
-
-            vrc.set_node(MARKER_ADDR, 7)   # next avatar carries one
-            h.change(A_ID)
-            assert h.settle()
-            assert h.m.enabled, "a later avatar change must be able to re-arm the wardrobe"
+            vrc.set_node(MARKER_ADDR, 7)
+            vrc.node_fault = True
+            with caplog.at_level("WARNING"):
+                h.change(B_ID)
+                assert h.settle()
+            assert not h.armed()
+            assert "transport failures" in caplog.text
         finally:
+            h.m.close()
             h.close()
 
 
-def test_a_marker_no_manifest_claims_disarms_and_names_the_id(tmp_path, caplog):
+def test_a_pinned_target_can_name_its_manifest_instead_of_reading_one(tmp_path):
+    """Intended: a pinned send target (the Av3Emulator, --osc-port) advertises nothing and
+    serves no tree, so there is no marker to read and such a session could never arm. Naming
+    the manifest takes the question away, which is design.md's rule for a named peer."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            h.m._pinned_manifest_id = 7
+            h.bridge.osc._peer_http = None      # as a pinned target leaves it
+            h.change(B_ID)
+            assert h.settle()
+            assert armed_manifest(h) == 7
+            h.slot(1)
+            assert vrc.wait_for_count(1)
+            assert h.sent() == [A_ID]
+        finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_second_avatar_change_supersedes_an_in_flight_read(tmp_path, caplog):
+    """Intended: scrolling through two avatars inside one read window must not arm the
+    wardrobe with the table of an avatar nobody is wearing.
+
+    The first version of this test sent the *same* id twice and asserted that only one read
+    happened -- freezing the defect as intent. It also guarded an impossible event: the
+    manager's change-filter already drops a repeated identical /avatar/change one layer
+    below the mapping."""
+    d = tmp_path / "two"
+    d.mkdir()
+    (d / "a.toml").write_text(ONE_MANIFEST)
+    (d / "b.toml").write_text(f'id = 9\n\n[[slots]]\nslot = 1\nid = "{B_ID}"\n')
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests(d))
+        try:
+            vrc.set_node(MARKER_ADDR, 7)
+            h.change(A_ID)                  # schedules a read that would adopt manifest 7
+            vrc.set_node(MARKER_ADDR, 9)    # the next avatar carries a different wardrobe
+            h.change(B_ID)                  # supersedes it
+            with caplog.at_level("INFO"):
+                assert h.settle()
+            assert armed_manifest(h) == 9, \
+                "adopted a manifest for an avatar that is no longer worn"
+            assert h.m._worn_avatar_id == B_ID
+        finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_read_from_a_superseded_generation_refuses_to_commit(tmp_path, caplog):
+    """Intended: a read that finishes after the worn avatar moved on must not arm anything.
+
+    Tested at the guard rather than by staging a thread race, because the end-to-end version
+    cannot see this: whichever way the guard behaves, the *last* read wins and the final
+    state looks identical. Asserting the final state passed with the guard removed, which is
+    exactly the check-that-survives-the-bug this suite is supposed to avoid."""
+    with FakeVRChat() as vrc:
+        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
+        try:
+            with h.m._lock:
+                stale_gen = h.m._generation
+                h.m._generation += 1        # a later avatar change arrived
+            with caplog.at_level("INFO"):
+                h.m._adopt(7, stale_gen, "stable across two reads")
+            assert not h.armed(), "a stale read armed the wardrobe for an unworn avatar"
+            assert "superseded" in caplog.text
+        finally:
+            h.m.close()
+            h.close()
+
+
+def test_a_marker_no_manifest_claims_leaves_it_unarmed_and_names_the_id(tmp_path, caplog):
     """Intended: fail loud. An avatar carrying a wardrobe menu whose manifest was never
     written is a real mistake, and the fix needs the number."""
     with FakeVRChat() as vrc:
@@ -468,45 +655,29 @@ def test_a_marker_no_manifest_claims_disarms_and_names_the_id(tmp_path, caplog):
         try:
             vrc.set_node(MARKER_ADDR, 42)
             with caplog.at_level("WARNING"):
-                h.change(A_ID)
+                h.change(B_ID)
                 assert h.settle()
-            assert not h.m.enabled
-            assert "42" in caplog.text and "7" in caplog.text
+            assert not h.armed()
+            # Assert on the sentence, not on a bare "7": A_ID itself contains a 7, so
+            # substring-matching that digit passed whatever the code did.
+            assert "marker is 42" in caplog.text
+            assert "loaded: 7" in caplog.text
         finally:
+            h.m.close()
             h.close()
 
 
-def test_a_doubled_avatar_change_reads_the_marker_once(tmp_path):
-    """Intended: `docs/design.md` records that every inbound message is delivered twice
-    until its open measurement lands, so a swap arrives twice. Without coalescing, one swap
-    would start two read schedules racing to adopt a manifest."""
-    with FakeVRChat() as vrc:
-        h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
-        try:
-            vrc.set_node(MARKER_ADDR, 7)
-            h.change(A_ID)
-            h.change(A_ID)              # the duplicate
-            assert h.settle()
-            assert h.m.enabled
-            # Two agreeing reads arm it, so a single schedule reads exactly twice. The lower
-            # bound matters as much as the upper: without it this passes when nothing read
-            # at all, which is the failure mode a coalescing test is most likely to have.
-            assert len(vrc.node_gets) == 2, \
-                f"expected one read schedule of two reads, got {vrc.node_gets}"
-        finally:
-            h.close()
-
-
-def test_an_empty_wardrobe_says_so_when_activated(tmp_path, caplog):
-    """Intended: a mapping that can never do anything must say why, naming where the
-    manifests were looked for -- silence reads identically to a broken avatar."""
+def test_an_empty_wardrobe_declines_a_press(tmp_path, caplog):
+    """Intended: a mapping that can never do anything must say why when asked to act."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, {})
         try:
             with caplog.at_level("WARNING"):
-                h.m.activate()
-            assert "no wardrobe manifests" in caplog.text
+                h.slot(1)
+            assert h.sent() == []
+            assert "no manifest is active" in caplog.text
         finally:
+            h.m.close()
             h.close()
 
 

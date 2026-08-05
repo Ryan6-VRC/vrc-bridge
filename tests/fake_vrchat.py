@@ -41,6 +41,11 @@ class FakeVRChat:
         self.node_fault: bool = False
         #: Set to serve a body that is not a parameter node, for the malformed path.
         self.node_garbage: str | None = None
+        #: Answer this many initial node GETs with 404 before serving normally. Reproduces
+        #: the swap window -- the new avatar's node is not published the instant the change
+        #: is announced -- deterministically, so a test need not race a sleep against the
+        #: read schedule.
+        self.node_404_first: int = 0
         self.node_gets: list[str] = []
 
     def set_node(self, address: str, value: object) -> None:
@@ -88,6 +93,9 @@ class FakeVRChat:
                     known = dict(outer.nodes)
                     fault = outer.node_fault
                     garbage = outer.node_garbage
+                    if outer.node_404_first > 0:
+                        outer.node_404_first -= 1
+                        known = {}
                 if fault:
                     # Close without answering: urllib raises, which is the transport case.
                     self.close_connection = True
