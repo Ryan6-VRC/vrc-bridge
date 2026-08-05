@@ -140,25 +140,26 @@ def test_malformed_toml_is_refused_rather_than_skipped(tmp_path):
         load_settings(p)
 
 
-def test_wardrobe_defaults_and_their_validation():
-    """These are new rather than relocated, so they pin nothing historical -- what they
-    guard is that the timing knobs stay coherent. `stable_gap_secs` is PROVISIONAL: it
-    bounds how long a stale marker could be served, which no measurement settles yet, so a
-    live probe is expected to change that number and to change it here too."""
+def test_wardrobe_settings_carry_no_timing_schedule():
+    """Intended: there is nothing here to tune but the manifest location and one timeout.
+
+    The marker is read on the first press after an avatar change rather than on the change,
+    so nothing is ever read mid-transition and there is no settling window to size. That is
+    load-bearing rather than incidental: a cold avatar download runs 30-60 s while the client
+    acknowledges the change immediately, so a scheduled read could not have been sized
+    honestly at all. This asserts the knobs stay absent, because re-adding one would mean
+    the schedule came back."""
     from vrbridge.settings import WardrobeSettings
     w = Settings().wardrobe
     assert w.manifest_dir == ""
-    assert (w.settle_delay_secs, w.stable_gap_secs) == (0.5, 1.0)
-    assert (w.max_reads, w.fetch_timeout_secs) == (6, 2.0)
+    assert w.fetch_timeout_secs == 2.0
     assert w.resolved_manifest_dir().name == "wardrobe"
 
-    # Adopting a marker after an avatar change needs two agreeing reads, so a budget of one
-    # can never succeed -- it would read as a wardrobe that silently never arms.
-    with pytest.raises(ConfigError) as exc:
-        WardrobeSettings(max_reads=1).validate("wardrobe")
-    assert "two agreeing reads" in str(exc.value)
+    for gone in ("settle_delay_secs", "stable_gap_secs", "max_reads"):
+        assert not hasattr(w, gone), f"{gone} is back; the read schedule returned with it"
+
     with pytest.raises(ConfigError):
-        WardrobeSettings(stable_gap_secs=0.0).validate("wardrobe")
+        WardrobeSettings(fetch_timeout_secs=0.0).validate("wardrobe")
 
 
 def test_exposure_ladder_keeps_its_top_rung():

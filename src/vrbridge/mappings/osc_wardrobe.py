@@ -8,23 +8,31 @@ Two avatar parameters carry it, both declared by the `osc-wardrobe` vrc-patterns
   the bridge learns which slot table this avatar's menu means. Read over OSCQuery rather
   than off the wire, because a value that never changes is never emitted.
 
+**The marker is read on the first press after an avatar change, not on the change itself.**
+The press is the readiness signal, and using it is what makes this simple: a Slot datagram
+can only arrive if the new avatar is loaded and emitting, so a marker read at that instant
+necessarily describes the avatar being worn. Reading on the change instead means reading
+*during* a transition, which needs a settling window -- and no window can be sized, because
+a cold avatar download runs 30-60 s while the client acknowledges the change immediately. An
+earlier design polled the marker on a ~6.5 s budget and concluded "this avatar has no
+wardrobe" while the avatar was still downloading. Do not reintroduce a schedule here.
+
 **This mapping requires a momentary source, which is the opposite of osc_muteproxy.**
-It acts only on a transition *to* a non-zero slot, so a Button -- held a minimum 0.2 s by
-the SDK, then released to 0 -- gives exactly one swap per press. The release edge is not
-incidental: it is what makes pressing the same slot twice two events rather than one.
+It acts only on a transition *to* a non-zero slot. Measured on a live client, a menu Button
+holds for 200 ms and then returns to 0 -- matching the SDK's documented floor -- so one press
+is exactly one swap, and the release edge is what makes a second press of the same slot a
+second event rather than a repeat the change filter drops.
 
 **`_active` is the arm state; `enabled` belongs to the router.** This mapping never writes
-its own `enabled`. A wardrobe with no adopted manifest declines a press and says so; a
-wardrobe a router disabled stays disabled. Conflating the two let the ungated avatar-change
-handler re-enable a mapping its router had deliberately switched off.
+its own `enabled`. Conflating them let the ungated avatar-change handler re-enable a mapping
+its router had deliberately switched off.
 
-**It cannot verify that a swap happened, and that is a property of the channel.** Measured
-against a live client: VRChat echoes `/avatar/change` carrying whatever id we sent within
-5 ms, and does so for an ineligible id and for a malformed one alike -- then never emits
-again when the avatar actually loads. The echo is an acknowledgement of the request, not a
-report of the outcome, so no watchdog built on it could tell a working swap from a rejected
-one. Anything that needs to know the outcome has to read it somewhere other than this
-address.
+**It cannot verify that a swap happened, and that is a property of the channel.** Measured:
+VRChat echoes `/avatar/change` carrying the id we sent within 5 ms, does so identically for
+an ineligible id and for a malformed one, and never emits again when the avatar really loads.
+The echo acknowledges the request and never reports the outcome, so no watchdog built on it
+could tell a working swap from a rejected one, and nothing here may treat it as evidence of
+what is worn.
 
 **It never enumerates your avatars.** The manifest is authoritative about what is swappable,
 and `design.md` descopes discovery.
@@ -33,13 +41,12 @@ and `design.md` descopes discovery.
 from __future__ import annotations
 
 import threading
-import time
 from typing import Dict, Optional
 
 from vrbridge import VRBridge
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.osc_manager import (FETCH_NO_PEER, FETCH_NOT_FOUND, FETCH_OK,
-                                  FETCH_TRANSPORT, FetchResult)
+                                  FetchResult)
 from vrbridge.settings import settings
 from vrbridge.wardrobe import Manifest
 
@@ -56,13 +63,6 @@ AVATAR_CHANGE_ADDR = "/avatar/change"
 #: and an avatar load initialises the parameter here, so acting on it would swap on every
 #: avatar load.
 REST_SLOT = 0
-
-#: Why a marker read happens, strongest first. An avatar change demands the careful path
-#: (the previous avatar's marker may still be served); a target selection cannot be
-#: confused by a previous avatar, because none was worn under this target.
-WHY_AVATAR_CHANGE = "avatar-change"
-WHY_TARGET = "target-selected"
-_WHY_RANK = {WHY_TARGET: 1, WHY_AVATAR_CHANGE: 2}
 
 
 # ----------------------------- Mapping ------------------------------------
@@ -86,28 +86,15 @@ class WardrobeMapping(Mapping):
         # without this such a session can never arm.
         self._pinned_manifest_id = pinned_manifest_id
 
-        # --- state shared across threads ---------------------------------------
-        # Touched from the OSC datagram threads (thread-per-datagram), zeroconf's dispatch
-        # thread, and the marker worker. One lock covers all of it and is never held across
-        # a fetch -- the discipline _consider_service already follows.
+        # The OSC server is thread-per-datagram, so two presses and an avatar change can be
+        # in flight at once. One lock covers this state and is never held across a fetch --
+        # the discipline _consider_service already follows.
         self._lock = threading.RLock()
         self._active: Optional[Manifest] = None
-        # Bumped on every distinct transition. A read job carries the generation it began
-        # under and refuses to adopt if the world moved on; without it, a scroll through
-        # two avatars inside one read window adopts the wrong table for the one now worn.
-        self._generation = 0
-        self._pending: Optional[str] = None
-        self._no_peer_logged = False
-
-        self._wake = threading.Event()
-        # Set whenever no marker read is running or pending. A caller that needs to know the
-        # wardrobe has finished settling has nothing else to wait on -- every other signal
-        # (`_pending`, `_wake`) clears the moment the worker *picks up* a job rather than
-        # when it finishes, so polling those reports idle through the whole read.
-        self._idle = threading.Event()
-        self._idle.set()
-        self._stop = False
-        self._thread: Optional[threading.Thread] = None
+        # Set once a read has established that the worn avatar carries no usable marker, so
+        # a wardrobe-less avatar is not re-queried on every press. Cleared by any avatar
+        # change, which is the only thing that can make the answer different.
+        self._marker_settled = False
 
     # ---- construction helpers --------------------------------------------
 
@@ -131,27 +118,29 @@ class WardrobeMapping(Mapping):
         # Gated: a router that disabled this mapping must not have it swapping avatars.
         self.bridge.on_osc(SLOT_ADDR, self._gate(self._on_slot))
 
-        # UNGATED, and that is load-bearing. This handler is the only trigger that re-reads
-        # the marker, so gating it would make a single failed read terminal until the
-        # process restarted -- and because a *successful* swap is what triggers the read,
-        # the gated version would fail precisely on working. It only ever invalidates and
-        # schedules; it never enables anything, so an ungated handler cannot resurrect a
-        # mapping its router switched off.
-        self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_avatar_change)
+        # UNGATED, and that is load-bearing: this is what drops a manifest that no longer
+        # describes the worn avatar. Gated, a router-disabled wardrobe would keep a stale
+        # table across every avatar change and act on it the moment it was re-enabled. It
+        # only ever invalidates -- it never enables anything, so an ungated handler cannot
+        # resurrect a mapping its router switched off.
+        self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_invalidate)
 
-        # Same reasoning; also runs on zeroconf's dispatch thread, so it only schedules.
-        self.bridge.on_target_selected(self._on_target_selected)
-
-    def close(self) -> None:
-        """Stop the marker worker. Idempotent; safe to call on a never-started mapping."""
-        with self._lock:
-            self._stop = True
-        self._wake.set()
-        t = self._thread
-        if t is not None and t.is_alive():
-            t.join(timeout=2.0)
+        # A different client means a different worn avatar. Same reasoning; also runs on
+        # zeroconf's dispatch thread, so it must stay cheap -- invalidating is one field.
+        self.bridge.on_target_selected(lambda ctx, target: self._on_invalidate(ctx, "", None))
 
     # ---- events ----------------------------------------------------------
+
+    def _on_invalidate(self, ctx, address: str, value) -> None:
+        """The worn avatar (or the client) changed, so the active manifest is stale.
+
+        The echoed avatar id is deliberately not retained: it acknowledges whatever was last
+        requested rather than stating what is worn (see the module docstring), so keeping it
+        would only invite a caller to trust it.
+        """
+        with self._lock:
+            self._active = None
+            self._marker_settled = False
 
     def _on_slot(self, ctx, address: str, value) -> None:
         try:
@@ -163,44 +152,24 @@ class WardrobeMapping(Mapping):
         if slot == REST_SLOT:
             return
 
-        with self._lock:
-            active = self._active
-            gen = self._generation
-
-        if active is None:
-            self.log.warning(
-                "Wardrobe slot %d pressed, but no manifest is active for the worn avatar "
-                "(marker %s unread or unknown); ignoring the press.", slot, MARKER_ADDR)
+        manifest = self._arm()
+        if manifest is None:
             return
 
-        row = active.avatar_for(slot)
+        row = manifest.avatar_for(slot)
         if row is None:
             # Gaps are legal and the menu always ships eight buttons, so a pressable slot
             # with no row is an ordinary authoring state. Warn and leave the wardrobe
             # working -- taking it down over one unused button would be far worse.
             self.log.warning(
                 "Wardrobe slot %d has no entry in manifest %d (%s); nothing to swap to.",
-                slot, active.id, active.source)
+                slot, manifest.id, manifest.source)
             return
 
-        # There is deliberately no "already wearing this one, skip it" check. It looks free
-        # and is not: the only thing that could tell us what is worn is the /avatar/change
-        # echo, and that echo is a bare **acknowledgement of our own request** -- measured,
-        # it fires within 5 ms for any id we send, including a malformed one, and never
-        # fires again when the avatar really loads. So after a swap the client declined, we
-        # would believe we were wearing the avatar that failed, and would then suppress the
-        # wearer's retry of that very slot in silence. A redundant send the client no-ops is
-        # much cheaper than a button that stops working after it fails once.
-
-        # Re-check under the lock immediately before sending. Selecting the row and sending
-        # are separate steps, and an /avatar/change on another datagram thread can
-        # invalidate in between -- which would put this send against the outgoing avatar's
-        # table.
-        with self._lock:
-            if self._generation != gen or self._active is not active:
-                self.log.info("Wardrobe slot %d dropped: the worn avatar changed while the "
-                              "press was being handled.", slot)
-                return
+        # There is deliberately no "already wearing this one, skip it" check: the only thing
+        # that could say what is worn is the /avatar/change echo, and it is an
+        # acknowledgement of our own request. Suppressing on it would mean that after a swap
+        # the client declined, the wearer's retry of that very slot is swallowed in silence.
 
         label = f" ({row.label})" if row.label else ""
         self.log.info("Wardrobe slot %d -> %s%s", slot, row.avatar_id, label)
@@ -212,207 +181,82 @@ class WardrobeMapping(Mapping):
             # slot is pressed. Forgetting the value makes the repeat a change again.
             self.bridge.osc.forget(SLOT_ADDR)
 
-    def _on_avatar_change(self, ctx, address: str, value) -> None:
-        """The worn avatar changed: the active manifest no longer describes it."""
-        with self._lock:
-            # The echoed id is deliberately not retained. It is an acknowledgement of
-            # whatever was last requested rather than a statement of what is worn -- see
-            # _on_slot -- so storing it would only invite a caller to trust it.
-            # Invalidate first. Until a validated read lands, a press does nothing rather
-            # than indexing the previous avatar's table and swapping somewhere unasked.
-            self._active = None
-        self._schedule(WHY_AVATAR_CHANGE)
+    # ---- arming ----------------------------------------------------------
 
-    def _on_target_selected(self, ctx, target) -> None:
-        """VRChat was discovered, or came back on a new port.
+    def _arm(self) -> Optional[Manifest]:
+        """The manifest for the worn avatar, reading its marker if that is not yet known.
 
-        Without this the mapping would wait for the wearer's first avatar change, because a
-        marker's value never changes and so is never emitted -- the cache would stay empty
-        for the whole session. It invalidates too: a different client is a different worn
-        avatar, and keeping the old one's manifest live would index a stranger's table.
+        Called from a press, on an OSC datagram thread, where `design.md` sanctions a
+        blocking call. The read is one HTTP GET against loopback.
         """
         with self._lock:
-            self._active = None
-        self._schedule(WHY_TARGET)
-
-    # ---- the marker worker ----------------------------------------------
-
-    def _schedule(self, why: str) -> None:
-        """Request a marker read, keeping the strongest reason and never losing a request.
-
-        Coalescing is by *generation*, not by "one at a time": a request that arrives while
-        a read is in flight supersedes it rather than being dropped. Dropping it was a
-        defect -- two avatar changes inside one read window left the finishing read free to
-        adopt a manifest for an avatar no longer worn.
-        """
-        with self._lock:
-            self._generation += 1
-            self._idle.clear()
-            if self._pending is None or _WHY_RANK[why] > _WHY_RANK[self._pending]:
-                self._pending = why
-            if self._thread is None or not self._thread.is_alive():
-                self._stop = False
-                self._thread = threading.Thread(
-                    target=self._run, name="OscWardrobeMarker", daemon=True)
-                self._thread.start()
-        self._wake.set()
-
-    def _run(self) -> None:
-        while True:
-            self._wake.wait()
-            with self._lock:
-                if self._stop:
-                    return
-                self._wake.clear()
-                why = self._pending
-                self._pending = None
-                gen = self._generation
-            if why is None:
-                with self._lock:
-                    if self._pending is None:
-                        self._idle.set()
-                continue
-            try:
-                self._read_marker(why, gen)
-            except Exception:
-                # Off any caller's thread, so nothing else would surface this.
-                self.log.exception("Wardrobe marker read failed (%s)", why)
-            finally:
-                with self._lock:
-                    # Only idle if nothing arrived while we were reading; a superseding
-                    # request has already cleared this and is about to be served.
-                    if self._pending is None:
-                        self._idle.set()
-
-    def _superseded(self, gen: int) -> bool:
-        with self._lock:
-            return self._generation != gen or self._stop
-
-    def _read_marker(self, why: str, gen: int) -> None:
-        """Read the marker and adopt the manifest it names, or leave the mapping unarmed.
-
-        After an avatar change a single read is not enough. The client's tree 404s an
-        address no worn avatar declares, but a wardrobe's whole purpose is that *several*
-        avatars declare this one at different values -- so a read taken during the
-        transition can return the outgoing avatar's id and be indistinguishable from a
-        correct answer.
-
-        Two discriminators, in order of strength. **An observed 404 proves teardown**, so
-        the first value after one is necessarily the new avatar's and is adopted at once.
-        Failing that, two reads a gap apart that agree are accepted -- which establishes
-        that the value is *stable*, not that it is *current*, and is therefore a timing bet
-        rather than a proof. Which one was used is logged, because that is what a live
-        measurement needs to know.
-
-        On target selection there is no transition to be confused by, so one read settles
-        it: nothing was worn before that could still be served.
-        """
-        tune = self.tuning
+            if self._active is not None:
+                return self._active
+            if self._marker_settled:
+                # A previous press already established there is nothing to arm with. Say
+                # nothing further: repeating it on every press would bury the first message.
+                return None
 
         if self._pinned_manifest_id is not None:
-            # Named outright, so there is nothing to read and no staleness to defend
-            # against -- design.md's rule that naming a peer takes the question away.
-            self._adopt(self._pinned_manifest_id, gen, "pinned")
-            return
+            # Named outright, so there is nothing to read -- design.md's rule that naming a
+            # peer takes the question away rather than entering it as a bid.
+            return self._adopt(self._pinned_manifest_id, "named by pinned_manifest_id")
 
-        need_stable = (why == WHY_AVATAR_CHANGE)
-        if need_stable and tune.settle_delay_secs:
-            time.sleep(tune.settle_delay_secs)
+        result: FetchResult = self.bridge.osc.fetch(
+            MARKER_ADDR, timeout=self.tuning.fetch_timeout_secs)
 
-        previous: Optional[int] = None
-        saw_teardown = False
-        transport_failures = 0
-
-        for attempt in range(tune.max_reads):
-            if attempt:
-                time.sleep(tune.stable_gap_secs)
-            if self._superseded(gen):
-                return
-
-            result: FetchResult = self.bridge.osc.fetch(
-                MARKER_ADDR, timeout=tune.fetch_timeout_secs)
-
-            if result.reason == FETCH_NOT_FOUND:
-                # NOT the end of the schedule. During a swap the new avatar's node is not
-                # published yet, so the first read of a perfectly good wardrobe 404s --
-                # returning here left a wardrobed avatar permanently unarmed, recoverable
-                # only through the very menu this feature replaces. A 404 is also the
-                # teardown signal that makes the next value trustworthy.
-                saw_teardown = True
-                previous = None
-                continue
-            if result.reason == FETCH_TRANSPORT:
-                transport_failures += 1
-                previous = None      # a gap in the series breaks the stability claim
-                continue
-            if result.reason == FETCH_NO_PEER:
-                # A pinned target advertises nothing and serves no tree. Say it once rather
-                # than on every avatar change, and name the way out.
-                if not self._no_peer_logged:
-                    self._no_peer_logged = True
-                    self.log.warning(
-                        "No OSCQuery peer to read %s from -- the send target was pinned, and "
-                        "a pinned peer serves no tree. Construct the wardrobe with "
-                        "pinned_manifest_id= to name the manifest instead.", MARKER_ADDR)
-                return
-            if result.reason != FETCH_OK:
-                self.log.warning("Cannot read the wardrobe marker: %s (%s)",
-                                 result.reason, result.detail)
-                return
-
-            try:
-                marker = int(result.value)
-            except (TypeError, ValueError):
-                self.log.warning("Wardrobe marker %s served %r, which is not a whole "
-                                 "number; ignoring.", MARKER_ADDR, result.value)
-                return
-
-            if not need_stable:
-                self._adopt(marker, gen, "first read")
-                return
-            if saw_teardown:
-                self._adopt(marker, gen, "after an observed 404")
-                return
-            if marker == previous:
-                self._adopt(marker, gen, "stable across two reads")
-                return
-            previous = marker
-
-        if saw_teardown:
-            # 404 for the whole schedule: the worn avatar declares no marker, so it carries
-            # no wardrobe. Normal on any avatar without the prefab, and not an error.
-            self.log.info("No wardrobe marker on the worn avatar (%s 404s); wardrobe idle "
-                          "until the next avatar change.", MARKER_ADDR)
-        elif transport_failures:
+        if result.reason == FETCH_NOT_FOUND:
+            # The worn avatar declares no marker, so it carries no wardrobe. Normal on any
+            # avatar without the prefab, and settled until the next avatar change.
+            with self._lock:
+                self._marker_settled = True
+            self.log.info("The worn avatar declares no wardrobe marker (%s 404s), so its "
+                          "menu is not a wardrobe.", MARKER_ADDR)
+            return None
+        if result.reason == FETCH_NO_PEER:
+            # A pinned target advertises nothing and serves no tree. Settle so this is said
+            # once per avatar rather than once per press, and name the way out.
+            with self._lock:
+                self._marker_settled = True
             self.log.warning(
-                "Gave up reading the wardrobe marker after %d attempts (%d transport "
-                "failures); the wardrobe stays idle until the next avatar change.",
-                tune.max_reads, transport_failures)
-        else:
-            self.log.warning(
-                "The wardrobe marker never held the same value across %d reads, so no "
-                "manifest was adopted. The worn avatar may still have been loading.",
-                tune.max_reads)
+                "No OSCQuery peer to read %s from -- the send target was pinned, and a "
+                "pinned peer serves no tree. Construct the wardrobe with "
+                "pinned_manifest_id= to name the manifest instead.", MARKER_ADDR)
+            return None
+        if result.reason != FETCH_OK:
+            # Deliberately NOT settled: a transport failure or an unusable answer says
+            # nothing about the avatar, so the next press should try again.
+            self.log.warning("Cannot read the wardrobe marker, so this press does nothing: "
+                             "%s (%s)", result.reason, result.detail)
+            return None
 
-    def _adopt(self, marker: int, gen: int, how: str) -> None:
+        try:
+            marker = int(result.value)
+        except (TypeError, ValueError):
+            with self._lock:
+                self._marker_settled = True
+            self.log.warning("Wardrobe marker %s served %r, which is not a whole number.",
+                             MARKER_ADDR, result.value)
+            return None
+
+        return self._adopt(marker, "read from the worn avatar")
+
+    def _adopt(self, marker: int, how: str) -> Optional[Manifest]:
         manifest = self._manifests.get(marker)
         if manifest is None:
             known = ", ".join(str(k) for k in sorted(self._manifests)) or "none"
+            with self._lock:
+                self._marker_settled = True
             self.log.warning(
                 "The worn avatar's wardrobe marker is %d, which no loaded manifest claims "
                 "(loaded: %s). Give a manifest id %d, or correct the avatar's %s default.",
                 marker, known, marker, MARKER_ADDR)
-            return
+            return None
         with self._lock:
-            if self._generation != gen:
-                # The worn avatar changed while this read was in flight. Committing here
-                # would arm the wardrobe with a table for an avatar nobody is wearing.
-                self.log.info("Discarding a wardrobe marker read superseded by a later "
-                              "avatar change.")
-                return
             self._active = manifest
         self.log.info("Wardrobe manifest %d active (%d slot(s), from %s) -- %s.",
                       manifest.id, len(manifest.slots), manifest.source, how)
+        return manifest
 
     def update(self, now: float) -> None:
         return

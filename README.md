@@ -126,7 +126,9 @@ wardrobe.activate()        # `enabled` is yours to own; the mapping never sets i
 bridge.start()
 ```
 
-`activate()` is not optional — a registered but inactive wardrobe ignores every press. It is separate from *arming*: the wardrobe also needs a manifest, which it reads off the worn avatar, so an active wardrobe still declines presses (loudly) until it has one.
+`activate()` is not optional — a registered but inactive wardrobe ignores every press.
+
+The manifest is read off the worn avatar **on your first press after each avatar change**, not when the avatar changes. That is deliberate: a cold avatar download can take a minute, so anything that read on the change would be asking about an avatar that does not exist yet. Pressing a button is proof the avatar is loaded, so the read is always about what you are actually wearing — and a slow load costs nothing.
 
 **If you pin the send target** with `--osc-port` — at the Av3Emulator, or anything else that advertises nothing — there is no OSCQuery tree to read the marker from, so the wardrobe can never arm on its own. Name the manifest instead:
 
