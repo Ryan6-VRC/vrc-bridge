@@ -62,11 +62,12 @@ class VRBridge:
     """
     def __init__(self, *, log_level: str = "INFO", vr_background=True, enable_steamvr: bool = True,
                  advertise=True, log_callbacks: bool = False,
-                 target: tuple[str, int] | None = None, bind_port: int = 0):
+                 target: tuple[str, int] | None = None, bind_port: int = 0,
+                 discover: bool = True):
         import logging as _logging
         self.log = setup_logging(level=getattr(_logging, log_level))
         self.osc = OSCManager(logger=self.log, advertise=advertise,
-                              target=target, bind_port=bind_port)
+                              target=target, bind_port=bind_port, discover=discover)
 
         self.controllers: Optional[ControllerManager] = None
         if enable_steamvr:

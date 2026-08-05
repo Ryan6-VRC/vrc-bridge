@@ -73,8 +73,15 @@ class OSCManager:
     fixed 127.0.0.1:9001, which no floating port can satisfy.
     """
     def __init__(self, host: str = "127.0.0.1", logger=None, advertise: bool = True,
-                 target: Optional[tuple[str, int]] = None, bind_port: int = 0):
+                 target: Optional[tuple[str, int]] = None, bind_port: int = 0,
+                 discover: bool = True):
         self.host = host
+        # Browsing reaches the real network, so a test that wants a fake peer has to be able
+        # to switch it off. Until the browser was given its own unpinned Zeroconf it was
+        # pinned to loopback and therefore deaf, and the suite's isolation was an accident of
+        # that bug: with discovery actually working, a live VRChat on the same host wins the
+        # target away from the fake mid-test.
+        self._discover = discover
         self.log = logger
         self._disp = dispatcher.Dispatcher()
         self._srv: Optional[osc_server.ThreadingOSCUDPServer] = None
@@ -118,6 +125,9 @@ class OSCManager:
         # OSCQuery
         self._advertise = advertise
         self._zeroconf: Optional[Zeroconf] = None
+        # Separate from _zeroconf: announcing is pinned to the serve interface, browsing
+        # must not be. See the comment where the browser is built.
+        self._browse_zeroconf: Optional[Zeroconf] = None
         self._browser: Optional[ServiceBrowser] = None
         self._service_info: Optional[ServiceInfo] = None
         self._current_service_name: Optional[str] = None
@@ -210,8 +220,28 @@ class OSCManager:
                 server="VRBridge.local."
             )
             self._zeroconf.register_service(self._service_info)
-        self._browser = ServiceBrowser(self._zeroconf, "_oscjson._tcp.local.", self._BrowserListener(self))
-        if self.log: self.log.info("mDNS service %s and browsing for VRChat...", "advertised" if self._advertise else "browsing")
+
+        # The browser gets its OWN unpinned Zeroconf, and that is the whole point of the
+        # split. The pin above is about what we *announce*; a browser inherits nothing good
+        # from it, because a Zeroconf pinned to the loopback interface receives no multicast
+        # at all and therefore discovers nothing, ever.
+        #
+        # Measured, two arms over the same 30 s window with VRChat running: pinned to
+        # 127.0.0.1 saw nothing, while InterfaceChoice.All saw
+        # VRChat-Client-<id>._oscjson._tcp advertising 127.0.0.1:<port>, whose /?HOST_INFO
+        # then answered 200. Sharing the pinned instance is what made VRChat look like it
+        # never advertised OSCQuery; discovery could not have succeeded on any host.
+        #
+        # Announcing stays pinned, so the one-announce-socket-per-interface duplication that
+        # docs/design.md names as the leading explanation for the doubled inbound is unchanged.
+        if self._discover:
+            self._browse_zeroconf = Zeroconf()
+            self._browser = ServiceBrowser(self._browse_zeroconf, "_oscjson._tcp.local.",
+                                           self._BrowserListener(self))
+        if self.log:
+            self.log.info("mDNS service %s; %s",
+                          "advertised" if self._advertise else "not advertised",
+                          "browsing for VRChat" if self._discover else "discovery off")
 
     def stop(self):
         try:
@@ -226,6 +256,15 @@ class OSCManager:
                 except Exception as e:
                     if self.log: self.log.debug("zeroconf.close failed: %s", e)
             self._zeroconf = None
+            # The browse instance owns its own sockets and dispatch thread, so it has to be
+            # closed too or stop() leaks both. Closed after the announce instance so an
+            # unregister failure above cannot skip it.
+            if self._browse_zeroconf:
+                try:
+                    self._browse_zeroconf.close()
+                except Exception as e:
+                    if self.log: self.log.debug("browse zeroconf.close failed: %s", e)
+            self._browse_zeroconf = None
         if self._httpd:
             try:
                 self._httpd.shutdown()
@@ -507,11 +546,17 @@ class OSCManager:
             return FetchResult(FETCH_NO_PEER, detail=why)
 
         import urllib.error
+        import urllib.parse
         import urllib.request
         host, http_port = peer
         # Bracket an IPv6 literal, as _host_info does; a bare colon parses as a port.
         base = f"http://[{host}]:{http_port}" if ":" in host else f"http://{host}:{http_port}"
-        url = base + address
+        # Percent-encode the address. Unencoded, a `#` in a parameter name is stripped as a
+        # URL fragment and the GET returns 200 for a *different* node -- a silently wrong
+        # answer, which is the one outcome this function's named-failure vocabulary has no
+        # way to express. A space would likewise report FETCH_TRANSPORT ("ask again") for a
+        # node that is there. `safe="/"` keeps the OSC path separators intact.
+        url = base + urllib.parse.quote(address, safe="/")
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8")
