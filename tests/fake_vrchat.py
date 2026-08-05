@@ -7,6 +7,11 @@ and that a mapping's sends arrive at the addresses it claims.
 mDNS discovery is deliberately NOT modelled. Browsing a real network from a test
 is flaky and proves nothing about our code that pointing the client at a known
 port does not. Tests inject the target; discovery stays a live-run concern.
+
+`hold_next_node_get` parks a node GET mid-flight, which is how the suite reaches an
+interleaving at all: a mapping on the OSC datagram path blocks on exactly one thing,
+this read, so holding it open stalls a dispatch thread where production stalls it.
+docs/design.md holds why the rendezvous lives here rather than in the code under test.
 """
 from __future__ import annotations
 
@@ -21,6 +26,47 @@ from pythonosc import dispatcher, osc_server
 # 0.5s default these two servers cost about 1.0s of every fixture teardown, on top
 # of the manager's own. Six round-trip tests paid it, which was most of the suite.
 _SERVE_POLL_SECS = 0.05
+
+
+class _NodeGate:
+    """One node GET, held mid-flight. `FakeVRChat.hold_next_node_get` hands one out.
+
+    A context manager, because an assertion failing between the park and the release would
+    otherwise leak a stuck handler thread for the whole park bound.
+    """
+
+    def __init__(self):
+        self._parked = threading.Event()
+        self._go = threading.Event()
+
+    def wait_until_parked(self, timeout: float = 2.0) -> bool:
+        """Block until the held GET has actually arrived, so a caller never races it.
+
+        Returns False on timeout rather than raising: the caller asserts on it, which names
+        the test that failed to reach the rendezvous instead of the fake's handler thread.
+        """
+        return self._parked.wait(timeout)
+
+    def release(self) -> None:
+        self._go.set()
+
+    def __enter__(self) -> "_NodeGate":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.release()
+        return False
+
+    def _park(self, timeout: float = 5.0) -> None:
+        """Called on the fake's handler thread. Bounded, so a bug fails a test not the run.
+
+        A caller's `fetch_timeout_secs` must exceed this bound, or the *fetch* unparks
+        itself first, the rendezvous silently dissolves, and the abandoned handler writes to
+        a closed socket -- which socketserver reports as a traceback against whichever test
+        happens to run next.
+        """
+        self._parked.set()
+        self._go.wait(timeout)
 
 
 class FakeVRChat:
@@ -47,6 +93,20 @@ class FakeVRChat:
         #: read schedule.
         self.node_404_first: int = 0
         self.node_gets: list[str] = []
+        self._node_gate: _NodeGate | None = None
+
+    def hold_next_node_get(self) -> _NodeGate:
+        """Park the next node GET mid-flight, so a caller's fetch() stalls there.
+
+        Joins node_fault / node_garbage / node_404_first: a knob here makes a hard-to-reach
+        path deterministic without a seam in the code under test. This one reaches the
+        interleavings -- what a stalled read does to state a later caller established -- which
+        no inline delivery can produce. docs/design.md holds the reasoning.
+        """
+        gate = _NodeGate()
+        with self._lock:
+            self._node_gate = gate
+        return gate
 
     def set_node(self, address: str, value: object) -> None:
         """Serve `address` with this VALUE. VRChat wraps VALUE in an array; so do we."""
@@ -96,6 +156,20 @@ class FakeVRChat:
                     if outer.node_404_first > 0:
                         outer.node_404_first -= 1
                         known = {}
+                    # Claimed here, in the same locked block that consumes node_404_first, so
+                    # the parked request is provably the one that took the 404. Claimed the
+                    # other way round, a *later* request takes it, a test aimed at one
+                    # mechanism silently exercises another, and the fix under test stops
+                    # curing it. One-shot: a second GET is served normally.
+                    gate = outer._node_gate
+                    outer._node_gate = None
+                if gate is not None:
+                    # Parked outside the lock: holding it would block every other GET,
+                    # including the one a caller means to release this thread with. The answer
+                    # served below was snapshotted above, before the park, so a stalled read
+                    # describes the avatar it asked about rather than whatever the fake was
+                    # retuned to while it waited.
+                    gate._park()
                 if fault:
                     # Close without answering: urllib raises, which is the transport case.
                     self.close_connection = True

@@ -151,7 +151,7 @@ vrc-bridge speaks to these projects over OSC. None of their code is vendored her
 
 vrc-bridge registers itself with SteamVR as a background application to receive low-level controller input. It simultaneously runs an OSC server (in) and client (out) for VRChat. The core engine processes inputs, and the active router directs them to the correct mapping, which emits the appropriate OSC commands.
 
-See [`docs/design.md`](docs/design.md) for what this project is, the decisions behind it, and the sequenced plan for where it is going.
+See [`docs/design.md`](docs/design.md) for what this project is, the decisions behind it, and the measured behaviour a mapping author has to build around.
 
 ## Development
 
