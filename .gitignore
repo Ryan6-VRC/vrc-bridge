@@ -4,6 +4,9 @@ steamvr_files/
 # Local tuning overrides (see src/vrbridge/settings.py)
 vrbridge.toml
 
+# Wardrobe manifests: they hold your own avatar ids (see wardrobe.example.toml)
+wardrobe/
+
 # Python cache / build
 __pycache__/
 *.py[cod]

@@ -229,6 +229,29 @@ class VRCFTSettings:
 
 
 @dataclass(frozen=True)
+class WardrobeSettings:
+    """Where wardrobe manifests live, and how long to wait on one marker read. The slot
+    table itself is not here -- it is user data in its own file (`wardrobe.py`), and this
+    loader cannot hold a list of strings anyway."""
+    manifest_dir: str = ""               # empty -> app_base_dir()/wardrobe
+    # There is deliberately no settling or retry timing here. The marker is read on the
+    # first press after an avatar change rather than on the change, so nothing is ever read
+    # mid-transition and there is no window to size -- which matters because a cold avatar
+    # download runs 30-60 s while the client acknowledges the change immediately, so no
+    # window could have been sized honestly anyway. `osc_wardrobe`'s docstring holds the
+    # reasoning; do not add a schedule back.
+    fetch_timeout_secs: float = 2.0
+
+    def validate(self, at: str) -> None:
+        _positive(self.fetch_timeout_secs, f"{at}.fetch_timeout_secs")
+
+    def resolved_manifest_dir(self) -> Path:
+        if self.manifest_dir:
+            return Path(self.manifest_dir).expanduser()
+        return app_base_dir() / "wardrobe"
+
+
+@dataclass(frozen=True)
 class RemySettings:
     base_url: str = "http://127.0.0.1:8000"
     http_timeout_sec: float = 1.0
@@ -261,6 +284,7 @@ class Settings:
     vrclens: VRCLensSettings = VRCLensSettings()
     muteproxy: MuteProxySettings = MuteProxySettings()
     vrcft: VRCFTSettings = VRCFTSettings()
+    wardrobe: WardrobeSettings = WardrobeSettings()
     remy: RemySettings = RemySettings()
 
     def validate(self) -> None:

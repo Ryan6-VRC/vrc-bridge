@@ -32,6 +32,31 @@ class FakeVRChat:
         self.messages: list[tuple[str, object]] = []
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
+        # Parameter nodes this fake serves, address -> VALUE. Anything absent 404s, which
+        # is how the real client answers for a parameter the worn avatar does not declare
+        # -- the state a wardrobe read has to tell apart from a failure.
+        self.nodes: dict[str, object] = {}
+        #: Set to make every node GET fail at the transport level instead of answering,
+        #: so a caller's retry path is reachable without a real network fault.
+        self.node_fault: bool = False
+        #: Set to serve a body that is not a parameter node, for the malformed path.
+        self.node_garbage: str | None = None
+        #: Answer this many initial node GETs with 404 before serving normally. Reproduces
+        #: the swap window -- the new avatar's node is not published the instant the change
+        #: is announced -- deterministically, so a test need not race a sleep against the
+        #: read schedule.
+        self.node_404_first: int = 0
+        self.node_gets: list[str] = []
+
+    def set_node(self, address: str, value: object) -> None:
+        """Serve `address` with this VALUE. VRChat wraps VALUE in an array; so do we."""
+        with self._lock:
+            self.nodes[address] = value
+
+    def clear_node(self, address: str) -> None:
+        """Stop serving `address`, so it 404s as an undeclared parameter does."""
+        with self._lock:
+            self.nodes.pop(address, None)
 
     # ---- lifecycle ----
 
@@ -59,9 +84,41 @@ class FakeVRChat:
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
                     self.wfile.write(payload)
-                else:
-                    self.send_response(404)
+                    return
+
+                # A single-node GET, which is what OSCManager.fetch issues. The real
+                # server answers one JSON node per parameter address.
+                with outer._lock:
+                    outer.node_gets.append(self.path)
+                    known = dict(outer.nodes)
+                    fault = outer.node_fault
+                    garbage = outer.node_garbage
+                    if outer.node_404_first > 0:
+                        outer.node_404_first -= 1
+                        known = {}
+                if fault:
+                    # Close without answering: urllib raises, which is the transport case.
+                    self.close_connection = True
+                    return
+                if garbage is not None:
+                    payload = garbage.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
                     self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                if self.path in known:
+                    node = {"FULL_PATH": self.path, "ACCESS": 3,
+                            "VALUE": [known[self.path]]}
+                    payload = json.dumps(node).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+
+                self.send_response(404)
+                self.end_headers()
 
             def log_message(self, fmt, *args):
                 return

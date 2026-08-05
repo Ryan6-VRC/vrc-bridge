@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Literal, Optional
 
 from .controller_manager import ControllerEvent, ControllerManager
-from .osc_manager import OSCManager
+from .osc_manager import FetchResult, OSCManager
 from .utils import drain_pulses, setup_logging
 
 Hand = Literal["left", "right", "both"]
@@ -43,6 +43,15 @@ class CallbackContext:
         advance that mirror; discarding it is how ParamState drifted from the avatar.
         """
         return self.osc.send(address, value)
+    def fetch(self, address: str, timeout: float = 2.0) -> FetchResult:
+        """Read one parameter node's live VALUE off the peer's OSCQuery server.
+
+        Blocking, and OSCManager.fetch's docstring owns which threads may pay for it.
+        Unlike `get`, this asks the avatar rather than reading what we happen to have
+        seen -- which is the difference that matters at startup, when the cache is empty
+        because no value has changed since we began listening.
+        """
+        return self.osc.fetch(address, timeout=timeout)
 
 class VRBridge:
     """Orchestrates OSC I/O and SteamVR controller events.
@@ -53,11 +62,12 @@ class VRBridge:
     """
     def __init__(self, *, log_level: str = "INFO", vr_background=True, enable_steamvr: bool = True,
                  advertise=True, log_callbacks: bool = False,
-                 target: tuple[str, int] | None = None, bind_port: int = 0):
+                 target: tuple[str, int] | None = None, bind_port: int = 0,
+                 discover: bool = True):
         import logging as _logging
         self.log = setup_logging(level=getattr(_logging, log_level))
         self.osc = OSCManager(logger=self.log, advertise=advertise,
-                              target=target, bind_port=bind_port)
+                              target=target, bind_port=bind_port, discover=discover)
 
         self.controllers: Optional[ControllerManager] = None
         if enable_steamvr:
@@ -68,8 +78,10 @@ class VRBridge:
 
         self._osc_callbacks: Dict[str, list[Callable[[CallbackContext, str, Any], None]]] = {}
         self._ctl_callbacks: Dict[tuple[str, Hand], list[Callable[[CallbackContext, ControllerEvent], None]]] = {}
+        self._target_callbacks: list[Callable[[CallbackContext, tuple[str, int]], None]] = []
         self._lock = threading.RLock()
         self.osc.set_listener(self._on_osc_event)
+        self.osc.add_target_listener(self._on_target_selected)
         self._ctx = CallbackContext(osc=self.osc)
         self._log_callbacks = log_callbacks
 
@@ -84,6 +96,19 @@ class VRBridge:
     def _short(val, maxlen: int = 120) -> str:
         s = repr(val)
         return s if len(s) <= maxlen else (s[:maxlen - 1] + "…")
+
+    def on_target_selected(self, callback: Callable[[CallbackContext, tuple[str, int]], None]):
+        """Register for "discovery just chose a send target".
+
+        Multiplexed here because OSCManager holds a single listener slot while several
+        mappings may each need the event -- the same reason on_osc fans out.
+
+        The callback runs on zeroconf's dispatch thread and fires again on a re-resolve,
+        so keep it short and make it idempotent; OSCManager.add_target_listener owns those
+        rules in full.
+        """
+        with self._lock:
+            self._target_callbacks.append(callback)
 
     def on_osc(self, address: str, callback: Callable[[CallbackContext, str, Any], None], *, watch: Iterable[str] | None = None):
         with self._lock:
@@ -137,6 +162,20 @@ class VRBridge:
                 cb(self._ctx, address, value)
             except Exception as e:
                 self.log.exception("VRChat callback error for %s: %s", address, e)
+
+    def _on_target_selected(self, target: tuple[str, int]):
+        with self._lock:
+            cbs = list(self._target_callbacks)
+        for cb in cbs:
+            if self._log_callbacks and self.log.isEnabledFor(logging.INFO):
+                self.log.info("Target %s:%d -> %s", target[0], target[1], self._cb_name(cb))
+            try:
+                cb(self._ctx, target)
+            except Exception as e:
+                # One mapping's handler must not cost the others theirs, and this runs on
+                # zeroconf's dispatch thread where an escape would take out every later
+                # service callback.
+                self.log.exception("Target callback error for %s:%d: %s", target[0], target[1], e)
 
     def _on_controller_event(self, evt: ControllerEvent):
         key_variants = [(evt.type, evt.hand), (evt.type, "both")]

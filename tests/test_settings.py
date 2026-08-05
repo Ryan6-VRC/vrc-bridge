@@ -140,6 +140,28 @@ def test_malformed_toml_is_refused_rather_than_skipped(tmp_path):
         load_settings(p)
 
 
+def test_wardrobe_settings_carry_no_timing_schedule():
+    """Intended: there is nothing here to tune but the manifest location and one timeout.
+
+    The marker is read on the first press after an avatar change rather than on the change,
+    so nothing is ever read mid-transition and there is no settling window to size. That is
+    load-bearing rather than incidental: a cold avatar download runs 30-60 s while the client
+    acknowledges the change immediately, so a scheduled read could not have been sized
+    honestly at all. This asserts the knobs stay absent, because re-adding one would mean
+    the schedule came back."""
+    from vrbridge.settings import WardrobeSettings
+    w = Settings().wardrobe
+    assert w.manifest_dir == ""
+    assert w.fetch_timeout_secs == 2.0
+    assert w.resolved_manifest_dir().name == "wardrobe"
+
+    for gone in ("settle_delay_secs", "stable_gap_secs", "max_reads"):
+        assert not hasattr(w, gone), f"{gone} is back; the read schedule returned with it"
+
+    with pytest.raises(ConfigError):
+        WardrobeSettings(fetch_timeout_secs=0.0).validate("wardrobe")
+
+
 def test_exposure_ladder_keeps_its_top_rung():
     """int(span / (1/3)) can land one under. Counting in whole steps cannot.
 
