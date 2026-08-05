@@ -18,13 +18,16 @@ its own `enabled`. A wardrobe with no adopted manifest declines a press and says
 wardrobe a router disabled stays disabled. Conflating the two let the ungated avatar-change
 handler re-enable a mapping its router had deliberately switched off.
 
-**Two things this deliberately does not do.** It does not verify that a swap happened: an
-echo watchdog would fire on the most ordinary press, because the wearer's current avatar is
-normally one of the eight slots and pressing that slot legitimately produces no echo. VRChat
-accepts only ids in the player's favorites, recents, uploads or purchases, and what it does
-with an ineligible one is **unmeasured** -- do not build a detector on an assumption of
-silence. And it never enumerates your avatars: the manifest is authoritative about what is
-swappable, and `design.md` descopes discovery.
+**It cannot verify that a swap happened, and that is a property of the channel.** Measured
+against a live client: VRChat echoes `/avatar/change` carrying whatever id we sent within
+5 ms, and does so for an ineligible id and for a malformed one alike -- then never emits
+again when the avatar actually loads. The echo is an acknowledgement of the request, not a
+report of the outcome, so no watchdog built on it could tell a working swap from a rejected
+one. Anything that needs to know the outcome has to read it somewhere other than this
+address.
+
+**It never enumerates your avatars.** The manifest is authoritative about what is swappable,
+and `design.md` descopes discovery.
 """
 
 from __future__ import annotations
@@ -89,7 +92,6 @@ class WardrobeMapping(Mapping):
         # a fetch -- the discipline _consider_service already follows.
         self._lock = threading.RLock()
         self._active: Optional[Manifest] = None
-        self._worn_avatar_id: Optional[str] = None
         # Bumped on every distinct transition. A read job carries the generation it began
         # under and refuses to adopt if the world moved on; without it, a scroll through
         # two avatars inside one read window adopts the wrong table for the one now worn.
@@ -163,7 +165,6 @@ class WardrobeMapping(Mapping):
 
         with self._lock:
             active = self._active
-            worn = self._worn_avatar_id
             gen = self._generation
 
         if active is None:
@@ -182,11 +183,14 @@ class WardrobeMapping(Mapping):
                 slot, active.id, active.source)
             return
 
-        if worn is not None and row.avatar_id == worn:
-            # A courtesy, not a correctness mechanism: the client no-ops a swap to the
-            # avatar already worn. Skipping it keeps the log honest about what we asked for.
-            self.log.info("Wardrobe slot %d is the avatar already worn; no send.", slot)
-            return
+        # There is deliberately no "already wearing this one, skip it" check. It looks free
+        # and is not: the only thing that could tell us what is worn is the /avatar/change
+        # echo, and that echo is a bare **acknowledgement of our own request** -- measured,
+        # it fires within 5 ms for any id we send, including a malformed one, and never
+        # fires again when the avatar really loads. So after a swap the client declined, we
+        # would believe we were wearing the avatar that failed, and would then suppress the
+        # wearer's retry of that very slot in silence. A redundant send the client no-ops is
+        # much cheaper than a button that stops working after it fails once.
 
         # Re-check under the lock immediately before sending. Selecting the row and sending
         # are separate steps, and an /avatar/change on another datagram thread can
@@ -210,9 +214,10 @@ class WardrobeMapping(Mapping):
 
     def _on_avatar_change(self, ctx, address: str, value) -> None:
         """The worn avatar changed: the active manifest no longer describes it."""
-        worn = value if isinstance(value, str) else None
         with self._lock:
-            self._worn_avatar_id = worn
+            # The echoed id is deliberately not retained. It is an acknowledgement of
+            # whatever was last requested rather than a statement of what is worn -- see
+            # _on_slot -- so storing it would only invite a caller to trust it.
             # Invalidate first. Until a validated read lands, a press does nothing rather
             # than indexing the previous avatar's table and swapping somewhere unasked.
             self._active = None
@@ -228,7 +233,6 @@ class WardrobeMapping(Mapping):
         """
         with self._lock:
             self._active = None
-            self._worn_avatar_id = None
         self._schedule(WHY_TARGET)
 
     # ---- the marker worker ----------------------------------------------

@@ -447,18 +447,30 @@ def test_a_router_that_disables_the_wardrobe_keeps_it_disabled(tmp_path):
             h.close()
 
 
-def test_the_avatar_already_worn_is_not_re_sent(tmp_path):
-    """Intended: a courtesy, not a correctness mechanism -- the client no-ops a swap to the
-    avatar already worn, and skipping it keeps the log honest about what was asked for."""
+def test_a_press_is_always_sent_because_the_echo_is_only_an_acknowledgement(tmp_path):
+    """Intended: no "already wearing it" suppression. The client no-ops a swap to the
+    avatar already worn -- so a press is always sent, even for the avatar we appear to be
+    wearing.
+
+    Measured against a live client: the /avatar/change echo carries whatever id was *sent*,
+    arrives inside 5 ms, and fires for an ineligible or malformed id too. It is an
+    acknowledgement, not a statement of what is worn. Skipping a send on the strength of it
+    would mean that after a swap the client declined, the wearer's retry of that same slot is
+    suppressed in silence -- a button that stops working once it fails. A redundant send the
+    client no-ops is much cheaper."""
     with FakeVRChat() as vrc:
         h = Harness(vrc, discover_manifests_from(tmp_path, ONE_MANIFEST))
         try:
             vrc.set_node(MARKER_ADDR, 7)
-            h.change(A_ID)                 # now wearing A, re-armed from the marker
+            h.change(A_ID)                 # the echo names A; that does not mean A is worn
             assert h.settle()
-            assert h.armed(), "the suppression claim is vacuous unless the wardrobe armed"
-            h.slot(1)                      # slot 1 *is* A
-            assert h.sent() == []
+            assert h.armed()
+            h.slot(1)                      # slot 1 is the id that echo named
+            assert vrc.wait_for_count(1)
+            assert h.sent() == [A_ID], "a press must be sent, not suppressed on an echo"
+
+            h.slot(1)                      # and a retry must work too
+            assert vrc.wait_for_count(2)
         finally:
             h.m.close()
             h.close()
@@ -619,7 +631,7 @@ def test_a_second_avatar_change_supersedes_an_in_flight_read(tmp_path, caplog):
                 assert h.settle()
             assert armed_manifest(h) == 9, \
                 "adopted a manifest for an avatar that is no longer worn"
-            assert h.m._worn_avatar_id == B_ID
+            assert armed_manifest(h) == 9
         finally:
             h.m.close()
             h.close()

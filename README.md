@@ -109,7 +109,7 @@ Valid ids are 1–255, because Modular Avatar's inspector clamps an Int paramete
 
 Three things worth knowing before you file a bug:
 
-- **VRChat only accepts avatars in your favorites, recents, uploads, or purchases.** An ineligible id does not swap. If a button does nothing, check that first.
+- **VRChat only accepts avatars in your favorites, recents, uploads, or purchases.** An ineligible id does not swap, and the bridge cannot tell you it failed: the client acknowledges every request the same way whether it can wear the avatar or not, and never reports the result. So if a button does nothing, check eligibility first — and check your profile page on vrchat.com, which shows what you are actually wearing.
 - **The wardrobe goes quiet on an avatar without the prefab.** That is normal — there is no menu there to press. Swap back the usual way and it re-arms on the next avatar that has one.
 - **Buttons, not toggles.** The mapping swaps on the press and ignores the release, so a toggle left switched on would swap again on your next avatar load.
 
