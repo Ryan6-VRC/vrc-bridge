@@ -8,21 +8,24 @@ Two avatar parameters carry it, both declared by the `osc-wardrobe` vrc-patterns
   the bridge learns which slot table this avatar's menu means. Read over OSCQuery rather
   than off the wire, because a value that never changes is never emitted.
 
-**The marker is read on every press, and never cached.** A press proves that whatever is
-emitting it is loaded, so a read taken then describes the avatar the press came from -- which
-is the only avatar whose table could be meant. Reading on the avatar *change* instead needs a
-settling window, and none can be sized: the client acknowledges a change immediately while a
-cold download runs 30-60 s, so a scheduled read polls an avatar that does not exist yet. An
-earlier design did exactly that and concluded "no wardrobe here" mid-download.
+**The marker is read on every press, and never cached.** A press can only reach us from a
+fully loaded avatar: while an avatar is loading the wearer *is* the placeholder, which declares
+no expression parameters and emits no OSC, so no `OscWardrobe/Slot` can arrive from a
+half-swapped state. A read taken at a press therefore describes the avatar whose button was
+pressed -- which is the only avatar whose table could be meant.
 
-**Caching that read was the subtler version of the same bug.** The outgoing avatar stays worn
-and emitting for the whole download, so a press in that window is genuinely *its* press and
-the read genuinely describes *it* -- correct at that instant, and wrong forever after if
-kept, because nothing invalidates when the incoming avatar finishes loading: the client emits
-no `/avatar/change` on load (measured). The cached table then survives into an avatar it does
-not describe and the next press swaps somewhere unasked, silently. An epoch counter does not
-help, because the stale read is not racing anything; it is a correct read of the wrong
-avatar. Do not reintroduce a schedule, and do not reintroduce a cache.
+**Reading on the avatar *change* is what cannot work**, and no window can be sized for it: the
+client acknowledges a change immediately while a cold download runs 30-60 s, so a scheduled
+read interrogates an avatar that does not exist yet. An earlier design did exactly that and
+concluded "no wardrobe here" mid-download, leaving a wardrobed avatar unarmed until the next
+change. Do not reintroduce a schedule.
+
+**Not caching the read is a simplicity choice, not a bug fix.** A cache would be *correct* only
+as long as invalidation is provably complete -- every avatar change reaches `_on_invalidate`,
+including one the wearer makes from VRChat's own menu, and including the case where the change
+filter suppresses a repeated identical echo. Re-reading costs one loopback GET at human press
+rates on a path `design.md` sanctions blocking, and needs none of that argument. Prefer the
+version with less to get wrong.
 
 **This mapping requires a momentary source, which is the opposite of osc_muteproxy.**
 It acts only on a transition *to* a non-zero slot. Measured on a live client, a menu Button
@@ -244,20 +247,10 @@ class WardrobeMapping(Mapping):
     def _read_manifest(self) -> Optional[Manifest]:
         """Read the worn avatar's marker and return its manifest. **Every press.**
 
-        Not cached, and that is the whole correctness argument. The premise this design
-        rests on is that a press proves the avatar sending it is loaded -- but the *outgoing*
-        avatar stays worn and emitting for the entire 30-60 s while the incoming one
-        downloads, so a press during that window is genuinely the outgoing avatar's, and a
-        read then genuinely describes the outgoing avatar. Correct at that instant, and
-        wrong forever after if kept: nothing invalidates when the new avatar finishes
-        loading, because the client emits no `/avatar/change` on load (measured). A cached
-        answer therefore survives into an avatar it does not describe, and the next press
-        indexes the wrong table with no diagnostic.
-
-        Re-reading per press makes the answer always as current as the press that asked. It
-        costs one loopback GET at human press rates -- about a millisecond, on the OSC
-        datagram path where `design.md` sanctions blocking -- and it is less machinery than
-        the cache plus the epoch counter that would be needed to make a cache safe.
+        A press can only come from a loaded avatar -- the loading placeholder declares no
+        parameters and emits no OSC -- so this read always describes the avatar whose button
+        was pressed. Not cached because a cache would be correct only while invalidation is
+        provably complete, and one loopback GET per press buys not needing that proof.
         """
         if self._pinned_manifest_id is not None:
             # Named outright, so there is nothing to read -- design.md's rule that naming a

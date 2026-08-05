@@ -3,9 +3,9 @@
 Intent before test, per `docs/design.md`. Three behaviours here are deliberate designs that a
 test written against observed behaviour would freeze backwards, so each states its intent: the
 mapping acts on the transition *to* a non-zero slot (not on every change, which is
-`osc_muteproxy`'s opposite contract); the marker is read on **every** press and never cached,
-because the outgoing avatar stays worn and emitting for the whole 30-60 s download and nothing
-announces the incoming avatar's arrival; and a repeat of one slot inside 150 ms is a doubled
+`osc_muteproxy`'s opposite contract); the marker is read on **every** press rather than cached,
+because a cache is only correct while invalidation is provably complete and a read costs a
+millisecond; and a repeat of one slot inside 150 ms is a doubled
 delivery rather than a second press.
 
 The live client is not needed for any of this. Whether VRChat accepts an inbound
@@ -325,11 +325,12 @@ def test_the_marker_is_read_on_the_first_press_not_before(tmp_path):
 def test_every_press_re_reads_the_marker(tmp_path):
     """Intended: the read is deliberately NOT cached.
 
-    The outgoing avatar stays worn and emitting for the whole 30-60 s download, so a press in
-    that window legitimately reads the outgoing avatar's marker -- and nothing invalidates
-    when the incoming avatar finishes loading, because the client emits no /avatar/change on
-    load. A cached answer would survive into an avatar it does not describe. One loopback GET
-    per press at human press rates is the price of never being stale."""
+    A press can only arrive from a loaded avatar (the loading placeholder emits no OSC), so a
+    cache would in fact stay correct as long as every avatar change reaches the invalidation
+    path -- including one made from VRChat's own menu, and the case where the change filter
+    suppresses a repeated identical echo. Re-reading needs none of that reasoning and costs one
+    loopback GET at human press rates. Pinned so the cache is not quietly reintroduced as an
+    optimisation."""
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path)
         try:
@@ -617,13 +618,12 @@ def test_a_pinned_target_without_a_named_manifest_says_how_to_fix_it(tmp_path, c
 
 
 def test_a_404_in_the_swap_gap_does_not_condemn_the_next_avatar(tmp_path):
-    """Intended: a 404 must never be remembered as a fact about an avatar.
+    """Intended: a 404 answers "right now", never "this avatar, forever".
 
-    The failure it guards: press, swap begins, the wearer retries because nothing visibly
-    happened, that read lands in the gap where no avatar declares the address, and a cached
-    404 would mark the *incoming* avatar wardrobe-less for the whole session -- reachable only
-    through the avatar menu this feature exists to replace. `node_404_first` reproduces the
-    gap deterministically instead of racing a sleep."""
+    Remembering it would mean any transient 404 -- a read landing between avatars, a tree not
+    yet serving -- marks an avatar wardrobe-less until something else invalidates, which is the
+    failure mode the scheduled design was abandoned for. `node_404_first` reproduces a
+    transient 404 deterministically rather than racing a sleep."""
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path)
         try:
