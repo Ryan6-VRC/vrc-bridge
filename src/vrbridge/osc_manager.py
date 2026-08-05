@@ -308,19 +308,19 @@ class OSCManager:
 
         # Drop the readable peer, for the reason remove_service already states: fetch() must
         # not keep querying the HTTP endpoint of a peer we have stopped serving and report its
-        # answers as the worn avatar's. A stopped manager had one and no longer does, so this
-        # reads as FETCH_PEER_GONE rather than as a peer that was never there.
+        # answers as the worn avatar's.
         #
-        # `_client` is deliberately left alone. A pulse caught between its value and its
-        # trailing zero needs a live sender or /input/Voice stays latched and keys the mic
-        # open; VRBridge.stop() drains pulses before calling this, but a library embedder
-        # calling stop() directly does not, and a dropped trailing zero is worse than a send
-        # into a torn-down session.
+        # `_peer_lost` is deliberately NOT set. It means the peer withdrew, which is a claim
+        # about the network; tearing down our own end is not that, and asserting it would have
+        # `fetch()` tell a caller to wait for a client that never left. Reserved for
+        # remove_service, which is the only place something really went away.
+        #
+        # `_client` is also left alone. A pulse caught between its value and its trailing zero
+        # needs a live sender or /input/Voice stays latched and keys the mic open;
+        # VRBridge.stop() drains pulses before calling this, but a library embedder calling
+        # stop() directly does not, and a dropped trailing zero is worse than a send into a
+        # torn-down session.
         with self._client_lock:
-            if self._peer_http is not None:
-                # Conditional: a session that never resolved a peer has not lost one, and
-                # saying otherwise would be the same conflation this exists to end.
-                self._peer_lost = True
             self._peer_http = None
 
     def watch(self, address: str):
@@ -504,8 +504,14 @@ class OSCManager:
             # accepted rather than resolved off-thread: concurrent callbacks would make
             # the two-phase read here racy, and their serialisation is exactly what
             # lets it skip holding the lock across the query.
+            # Every piece of derived state must already match, not just the send target.
+            # `stop()` drops `_peer_http` while leaving the client standing, so a target
+            # check alone would treat the peer's return on an unchanged port -- the normal
+            # case, since VRChat sits on 9000 -- as nothing to do, and `fetch()` would stay
+            # peerless for the rest of the process while `send` kept working.
             if self._client is not None and self._client_target == (host, osc_port) \
-                    and self._current_service_name == name:
+                    and self._current_service_name == name \
+                    and self._peer_http == (host, info.port):
                 return
             self._client = udp_client.SimpleUDPClient(host, osc_port)
             self._client_target = (host, osc_port)

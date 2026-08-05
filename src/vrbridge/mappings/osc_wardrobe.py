@@ -193,7 +193,8 @@ class WardrobeMapping(Mapping):
             # inside the 150 ms duplicate window the swap itself just armed. Clearing it here
             # destroyed the guard from within: once ctx.send's forget() has reopened the
             # change filter, a second copy of the press whose dispatch thread starts late
-            # meets an empty guard and swaps again, which is the doubled swap 58a70a5 fixed.
+            # meets an empty guard and swaps again -- the doubled swap REPEAT_GUARD_SECS and
+            # `_release_guard`'s token exist to prevent. `design.md` rules cite by path, not SHA.
             # Nothing is lost by keeping it: a genuine same-slot press on the new avatar
             # cannot arrive inside 150 ms, because a Button holds for 200 ms (measured) and
             # the loading wearer is the placeholder, which emits no OSC at all.
@@ -258,17 +259,30 @@ class WardrobeMapping(Mapping):
         # has already gone out. Sending ours now would land the wearer on the avatar they
         # pressed *first*, which is what they will read as the wardrobe picking at random.
         # Abandon instead. Last press wins, which is the only rule a menu can express.
+        #
+        # The check and the send are one critical section. Testing the token, releasing, and
+        # then sending only narrows the race from the length of a read to the length of a log
+        # call: a later press can still arm, read and send inside that gap, and ours would
+        # land after it. Holding across the send is what actually orders them.
+        #
+        # `ctx.send` is a UDP sendto and is safe to hold this across; the adjacent rule is that
+        # the lock is never held across a *fetch*, which this is not. `forget()` is called after
+        # releasing, so the only nesting would be _lock -> _cache_lock, and nothing acquires
+        # them the other way round: `_update_cache_and_fire` releases `_cache_lock` before
+        # firing a listener, and `_consider_service` fires target listeners outside its own.
+        label = f" ({row.label})" if row.label else ""
         with self._lock:
             still_ours = self._last_press == token
+            if still_ours:
+                self.log.info("Wardrobe slot %d -> %s%s", slot, row.avatar_id, label)
+                sent = ctx.send(AVATAR_CHANGE_ADDR, row.avatar_id)
         if not still_ours:
             self.log.info(
                 "Wardrobe slot %d was superseded by a later press while its marker was being "
                 "read; not swapping to %s.", slot, row.avatar_id)
             return
 
-        label = f" ({row.label})" if row.label else ""
-        self.log.info("Wardrobe slot %d -> %s%s", slot, row.avatar_id, label)
-        if ctx.send(AVATAR_CHANGE_ADDR, row.avatar_id):
+        if sent:
             # The watch layer suppresses a value equal to the last one seen, and a swap can
             # eat the Button's release-to-0 (the outgoing avatar stops emitting first). That
             # would leave the cache holding this slot, so pressing the same button again

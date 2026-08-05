@@ -15,7 +15,7 @@ Do not relitigate these; they are the operator's.
 | Decision | Consequence |
 |---|---|
 | Library **and** application, with a declared seam | The library path is the documented extension route; a `[project.entry-points]` router group makes third-party routers reachable from the CLI. |
-| Tuned values live in a config file, never in module-level constants | Retuning must not require editing installed source. |
+| Operator-tunable values live in a config file | Retuning must not require editing installed source. A constant that is a *contract* rather than a feel setting stays in source and says so — `osc_wardrobe.REPEAT_GUARD_SECS` and `osc_manager._SERVE_POLL_SECS` are both deliberate, and `settings.py`'s header rule draws the line. |
 | Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. |
 | `index_remy` is a labelled personal-integration example | Lazy-imported, behind an optional extra, kept as the worked example of an integration mapping. |
 | Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
@@ -27,7 +27,9 @@ Do not relitigate these; they are the operator's.
 
 Four facts about what arrives. Together they are why a mapping must be idempotent per *value* rather than per delivery.
 
-**Every inbound message is delivered twice, from two UDP sender sockets.** Every inbound-triggered callback fires twice, so a non-idempotent listener double-applies; outbound sends appear once. Whether the cause is VRChat's or our own mDNS configuration is unsettled, and the leading suspect is a client opening one sender per announcement, since `start()` once announced on every interface while the record carried a single loopback address. **Do not reach for a dedupe window** — it masks the signal the open measurement below reads.
+**Every inbound message is delivered twice, from two UDP sender sockets** — measured on one client build (`VRChat-Client-161618`) on one machine, so treat it as the working assumption rather than a law. Every inbound-triggered callback fires twice, so a non-idempotent listener double-applies; outbound sends appear once. Whether the cause is VRChat's or our own mDNS configuration is unsettled, and the leading suspect is a client opening one sender per announcement, since `start()` once announced on every interface while the record carried a single loopback address. **Do not reach for a dedupe window** — it masks the signal the open measurement below reads.
+
+Two attributions are already ruled out, so do not re-investigate them: the service record is not itself duplicated, and there is only one candidate destination — one service, one address, `VRBridge.local.` resolving to `127.0.0.1` alone — so the `OSC_IP` missing from our `?HOST_INFO` in §OSCQuery interop gaps is **not** implicated here despite looking like it should be.
 
 **A repeated identical value never reaches a mapping at all.** `_update_cache_and_fire` compares and writes under one lock and suppresses a value equal to the last seen, so the second copy of one press is eaten until something calls `forget()`. The consequence for anything guarding against doubled delivery: the guard's live window *opens* at `forget()`, roughly 1 ms after arrival, rather than at arrival. A test that redelivers a value without first driving the source's return to rest is exercising the change filter and nothing else.
 
@@ -47,7 +49,7 @@ The handshake is solid in daily use, but the proven set is narrower than "it wor
 - **Still never exercised:** any client reading *our* tree, and mDNS discovery itself — the `_BrowserListener` wiring, meaning whether zeroconf calls those methods when we expect. Deliberately not faked: browsing a real network from a test is flaky and proves nothing that pointing at a known port does not. VRChat is the tree's only consumer and tolerates every non-conformance in §OSCQuery interop gaps.
 - **Out of the interleaving harness's reach:** it parks *after* the change filter, so two copies of one value racing `_update_cache_and_fire` with both reading `old is None` cannot be staged. Per §Inbound delivery semantics that race is unreachable in production too.
 
-**Trap:** running alongside VRCFaceTracking proves nothing about our server. `osc_vrcft` consumes VRCFT's mDNS *advertisement* via `is_service_running`; VRCFT never reads our tree, and `_service_rank` scores it below VRChat so it is never a send target.
+**Trap:** running alongside VRCFaceTracking proves nothing about our server. `osc_vrcft` consumes VRCFT's mDNS *advertisement* via `is_service_running`, and VRCFT never reads our tree. `_service_rank` scores it below VRChat so it **cannot unseat** VRChat — but it can take an *empty* slot, and then `fetch` 404s against a tree holding no avatar parameters and the wardrobe reports the worn avatar as declaring no marker. Naming the real offender there is open work.
 
 **Intent before test, on every step.** The suite is thin enough that a test written against observed behavior freezes a known defect as expected. State intended behavior first, then assert intent (`CLAUDE.md` rule 5). Where intent cannot be settled from the source the test **pins** the value and says so: pinning preserves and claims nothing about correctness. `index_vrclens`'s `FEATURE_EXPOSURE_PLUS = 110` is the live example — it breaks the pattern its neighbouring pair sets, and is kept verbatim as tested working code.
 
@@ -65,7 +67,7 @@ The handshake is solid in daily use, but the proven set is narrower than "it wor
 
 Neither is a `settings.py` value: that file holds mapping and hardware feel, and which peer to address is runtime wiring, like `--no-steamvr`.
 
-**`stop()`'s cost is the serve-poll interval, not thread joins.** `serve_forever()` notices `shutdown()` only between polls, so the interval *is* each server's teardown cost, and the joins measure zero because `shutdown()` already blocks until the loop exits. `_SERVE_POLL_SECS` is the lever; at a 0.5 s interval a non-advertising `stop()` costs 0.8 s against 0.1 s tuned down.
+**`stop()`'s cost is the serve-poll interval, not thread joins.** `serve_forever()` notices `shutdown()` only between polls, so the interval *is* each server's teardown cost, and the joins measure zero because `shutdown()` already blocks until the loop exits. `_SERVE_POLL_SECS` is the lever; at a 0.5 s interval a non-advertising `stop()` costs 0.8 s against 0.1 s tuned down. A `discover=False` option was proposed as the remedy instead and declined: the Zeroconf share of that cost is paid only when advertising, and the tests already run `advertise=False`, so it buys them nothing.
 
 ## OSCQuery interop gaps
 
@@ -79,6 +81,8 @@ Neither is a `settings.py` value: that file holds mapping and hardware feel, and
 | `/avatar` — a path we advertise ourselves | `404`, empty body | serves any registered node |
 | `/#fragment` | `404` | resolved via `Url.LocalPath` |
 | 404 body, `pragma: no-cache` | empty, absent | `"OSC Path not found"`, set |
+
+Two claims about that reference are wrong in the *other* direction and should not be repeated: its `GetAvailableTcpPort()` binds port 0, reads the number and then **closes** the socket, leaving a TOCTOU window — so binding port 0 on the real server socket and keeping it, as here, is the more correct of the two. And it *does* implement `VALUE` as a node attribute and advertise it in `EXTENSIONS`; what it lacks is a `?VALUE` query **filter**.
 
 **The ruling: close none of them, and do not adopt a library to close them.** The tree has exactly one consumer. VRChat reads `/?HOST_INFO` for our OSC port and then sends; it does not read `CONTENTS` to decide what to send, which is why every row above has been survivable for the product's whole life. Third-party mapping authors — the audience §Settled decisions commits to — consume the Python API, not the served tree. Conformance here is work against a hypothetical consumer, and `CLAUDE.md` rule 2 disposes of it.
 
@@ -138,6 +142,6 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 ## Provenance
 
-`osc_leash` was a literal port of OSCLeash (MIT, © 2022 ZenithVal) carrying no notice — the same movement formula, deadzone, modifier compensation and `/input/` outputs. Deleting it ends the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. Its replacement is a `vrc-patterns` entry rebuilding the leash on face-proximity box receivers rather than OSCLeash's six-sphere direction cage: `box-tracker` establishes the mechanism, and the open design question is how far below six contacts an axis-separable readout gets. Until that ships there is no leash in this repo.
+`osc_leash` was a literal port of OSCLeash (MIT, © 2022 ZenithVal) carrying no notice. The evidence is the finding, so it is recorded rather than summarised: the same movement formula, the same `Y_Combined` up/down deadzone, the same divide-by-`Y_Modifier` compensation, the same three `/input/` outputs, and two of three tuning constants identical. Deleting it ends the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. Its replacement is a `vrc-patterns` entry rebuilding the leash on face-proximity box receivers rather than OSCLeash's six-sphere direction cage: `box-tracker` establishes the mechanism, and the open design question is how far below six contacts an axis-separable readout gets. Until that ships there is no leash in this repo.
 
 Every other named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.

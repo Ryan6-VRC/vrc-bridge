@@ -285,10 +285,12 @@ def test_an_unrelated_service_withdrawing_leaves_our_peer_alone():
         assert mgr.fetch(MARKER_ADDR).ok, "an unrelated removal took our peer down"
 
 
-def test_a_stopped_manager_reports_its_peer_as_gone_not_as_never_found():
-    """Intended: a stopped manager must not answer from the tree of a peer it no longer
-    serves -- the rule remove_service already states -- and it had a peer, so the honest
-    answer is that it went away."""
+def test_a_stopped_manager_stops_answering_from_the_peer_it_served():
+    """Intended: a stopped manager must not answer from the tree of a peer it no longer serves
+    -- the rule remove_service already states -- and it must not claim that peer withdrew,
+    because tearing down our own end is not a fact about the network. A caller told "press
+    again once VRChat is rediscovered" about a client that never left is worse off than one
+    told there is no peer."""
     with FakeVRChat() as vrc:
         mgr = OSCManager(advertise=False)
         mgr.start()
@@ -302,8 +304,44 @@ def test_a_stopped_manager_reports_its_peer_as_gone_not_as_never_found():
             assert mgr.fetch(MARKER_ADDR).ok
         finally:
             mgr.stop()
-        assert mgr.fetch(MARKER_ADDR).reason == FETCH_PEER_GONE, \
-            "a stopped manager still answered from the peer it stopped serving"
+        after = mgr.fetch(MARKER_ADDR)
+        assert not after.ok, "a stopped manager still answered from the peer it stopped serving"
+        assert after.reason == FETCH_NO_PEER, \
+            "a local teardown was reported as the peer withdrawing"
+
+
+def test_a_peer_returning_on_the_same_port_after_a_restart_is_readable_again():
+    """Intended: stop() then start() leaves the manager able to read the peer it finds, and
+    the unchanged-port case is the normal one because VRChat sits on 9000.
+
+    The republication dedupe exists so an mDNS refresh does not rebuild the socket, and it
+    compared only the send target -- all of which survives stop(). Since stop() drops
+    `_peer_http`, the peer's return on an unchanged port matched the dedupe, returned early,
+    and left fetch() permanently peerless while send kept working: a half-alive bridge on the
+    library path, with no symptom until a read was attempted."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        name = "VRChat-Client-1._oscjson._tcp.local."
+        info = ServiceInfo("_oscjson._tcp.local.", name,
+                           addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                           properties={}, server="h.local.")
+        mgr.start()
+        try:
+            mgr._consider_service(name, info)
+            vrc.set_node(MARKER_ADDR, 3)
+            assert mgr.fetch(MARKER_ADDR).ok
+        finally:
+            mgr.stop()
+
+        mgr.start()
+        try:
+            # Same service, same name, same ports -- exactly what a client that never moved
+            # republishes, and what the dedupe is entitled to treat as unchanged.
+            mgr._consider_service(name, info)
+            assert mgr.fetch(MARKER_ADDR).ok, \
+                "the peer came back on the same port and stayed unreadable"
+        finally:
+            mgr.stop()
 
 
 def test_target_selection_fires_the_hook():
@@ -688,12 +726,14 @@ def test_a_stalled_read_does_not_disarm_a_later_presss_guard(tmp_path, monkeypat
     press, two swaps, and the wearer sees the client's "you are already using this avatar"
     error on a press that worked.
 
-    Two conditions are stated rather than raced. REPEAT_GUARD_SECS is widened so the duplicate
-    at the end lands well inside press 2's window, and press 1's own stamp is backdated so its
-    window has expired while it sat parked. Sleeping for both instead would put a real
-    duplicate-swap report at the mercy of a scheduling hiccup.
+    Two conditions are stated rather than raced, and both margins are absurd on purpose so the
+    wall clock cannot participate in the result at all: the guard is widened to 30 s so the
+    duplicate at the end lands inside press 2's window even if `join` takes its full timeout,
+    and press 1's stamp is backdated 100 s so its own window has certainly expired while it sat
+    parked. Sleeping for either would put a real duplicate-swap report at the mercy of a
+    scheduling hiccup.
     """
-    monkeypatch.setattr(osc_wardrobe, "REPEAT_GUARD_SECS", 0.5)
+    monkeypatch.setattr(osc_wardrobe, "REPEAT_GUARD_SECS", 30.0)
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path, tuning=GATED)
         try:
@@ -704,7 +744,7 @@ def test_a_stalled_read_does_not_disarm_a_later_presss_guard(tmp_path, monkeypat
                 with h.m._lock:
                     # Press 1's guard window expired while it was stalled. Backdated rather
                     # than slept for: the condition is the point, not the wall clock.
-                    h.m._last_slot_at -= 1.0
+                    h.m._last_slot_at -= 100.0
                 h.deliver(SLOT_ADDR, 0)   # the Button's release, press 1 still stalled
                 h.deliver(SLOT_ADDR, 1)   # press 2: a genuine second press of the same slot
                 # Press 2 must be the press that read successfully. If the gate were claimed
