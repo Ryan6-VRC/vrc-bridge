@@ -13,12 +13,14 @@ The live client is not needed for any of this. Whether VRChat accepts an inbound
 avatar id is a client behaviour no fake can answer -- `docs/design.md` rules that "only
 provable in a live client" is the ecosystem's property, not a defect here.
 """
+import threading
 import time
 from pathlib import Path
 
 import pytest
 from zeroconf import ServiceInfo
 
+import vrbridge.mappings.osc_wardrobe as osc_wardrobe
 from vrbridge.engine import VRBridge
 from vrbridge.mappings.osc_wardrobe import (AVATAR_CHANGE_ADDR, MARKER_ADDR,
                                             REPEAT_GUARD_SECS, SLOT_ADDR,
@@ -317,6 +319,13 @@ def test_a_throwing_target_listener_costs_neither_the_target_nor_the_thread():
 
 FAST = WardrobeSettings(fetch_timeout_secs=1.0)
 
+#: For the tests that park a read with `FakeVRChat.hold_next_node_get`. The timeout has to
+#: exceed the gate's 5s park bound, or the fetch unparks itself first: at FAST's 1.0s the
+#: parked thread returns FETCH_TRANSPORT on its own, the rendezvous the test was built on is
+#: gone, and the abandoned handler's write to a closed socket surfaces as a traceback against
+#: whichever test runs next. The gate must be the only thing controlling the park.
+GATED = WardrobeSettings(fetch_timeout_secs=10.0)
+
 
 class Harness:
     """A bridge + fake VRChat + a registered wardrobe, driven without a router.
@@ -354,6 +363,19 @@ class Harness:
         repeat-press dedupe while never exercising it.
         """
         self.bridge.osc._update_cache_and_fire(address, value)
+
+    def deliver_threaded(self, address, value, name="deliver"):
+        """Deliver on its own thread, as the OSC server's thread-per-datagram dispatch does.
+
+        Every other delivery helper here runs the whole handler -- guard, the blocking read,
+        the send -- on the calling thread, so delivery n finishes before n+1 starts and no
+        interleaving is reachable. Pair this with `FakeVRChat.hold_next_node_get` to make one
+        deterministic, rather than racing two threads and hoping.
+        """
+        t = threading.Thread(target=self.deliver, args=(address, value),
+                             name=name, daemon=True)
+        t.start()
+        return t
 
     def sent(self):
         return self.vrc.values_for(AVATAR_CHANGE_ADDR)
@@ -566,6 +588,99 @@ def test_a_genuine_repeat_after_the_guard_window_still_swaps(tmp_path):
             time.sleep(REPEAT_GUARD_SECS * 1.5)
             h.deliver(SLOT_ADDR, 1)
             assert vrc.wait_for_count(2), "the guard outlived its own window"
+        finally:
+            h.close()
+
+
+# --------------------------------------------------------------------------
+# Interleaved delivery
+#
+# Everything above delivers on the calling thread, so delivery n completes -- guard, the
+# blocking read, the send, forget() -- before n+1 begins. Two defects live in what a *stalled*
+# read does on return to state a later press established, and neither is reachable that way.
+# `FakeVRChat.hold_next_node_get` parks the read; `Harness.deliver_threaded` puts it on its own
+# thread, as thread-per-datagram dispatch does.
+#
+# One production fact bounds what this can be aimed at, and it is worth stating because it
+# invalidates the obvious test. `_update_cache_and_fire` computes `old` and writes the cache in
+# one locked block, and forget() runs only after a successful send -- so a *duplicate copy of
+# one press* cannot reach _on_slot while that press is still mid-read; the change filter eats
+# it. The duplicate guard's live window opens at forget(), ~1 ms after arrival. A test that
+# parks a press and then re-delivers the same slot is therefore testing the change filter, and
+# passes against code that arms the guard on either side of the read. Both tests below drive
+# the Button's real release-to-0 first, which is what makes the next value a change at all.
+# --------------------------------------------------------------------------
+
+def test_a_stalled_read_does_not_disarm_a_later_presss_guard(tmp_path, monkeypatch):
+    """Intended: a press that failed to read releases its own guard and nobody else's.
+
+    `_on_slot` releases the guard when it could not read a manifest, so that the wearer's
+    retry of a transport failure is not swallowed as a duplicate. That release matched on the
+    slot alone, and a read can outlast REPEAT_GUARD_SECS by an order of magnitude
+    (`fetch_timeout_secs`) -- so a stalled press returning could clear a guard a *later* press
+    of the same slot had armed, and that later press's duplicate copy then swapped again. One
+    press, two swaps, and the wearer sees the client's "you are already using this avatar"
+    error on a press that worked.
+
+    Two conditions are stated rather than raced. REPEAT_GUARD_SECS is widened so the duplicate
+    at the end lands well inside press 2's window, and press 1's own stamp is backdated so its
+    window has expired while it sat parked. Sleeping for both instead would put a real
+    duplicate-swap report at the mercy of a scheduling hiccup.
+    """
+    monkeypatch.setattr(osc_wardrobe, "REPEAT_GUARD_SECS", 0.5)
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path, tuning=GATED)
+        try:
+            vrc.node_404_first = 1        # press 1's read 404s, taking it to the release path
+            with vrc.hold_next_node_get() as gate:
+                stalled = h.deliver_threaded(SLOT_ADDR, 1)
+                assert gate.wait_until_parked(), "press 1 never reached its marker read"
+                with h.m._lock:
+                    # Press 1's guard window expired while it was stalled. Backdated rather
+                    # than slept for: the condition is the point, not the wall clock.
+                    h.m._last_slot_at -= 1.0
+                h.deliver(SLOT_ADDR, 0)   # the Button's release, press 1 still stalled
+                h.deliver(SLOT_ADDR, 1)   # press 2: a genuine second press of the same slot
+                # Press 2 must be the press that read successfully. If the gate were claimed
+                # before the 404 count were consumed, press 2 would take the 404 instead and
+                # this test would exercise a different mechanism that the fix does not cure.
+                assert vrc.wait_for_count(1), "press 2 did not swap"
+                gate.release()
+            stalled.join(2)
+            assert not stalled.is_alive(), "press 1's thread outlived its read"
+            h.deliver(SLOT_ADDR, 0)
+            h.deliver(SLOT_ADDR, 1)       # press 2's duplicate copy, delivered late
+            time.sleep(0.3)
+            assert h.sent() == [A_ID], \
+                f"a stalled press disarmed a later press's guard: {len(h.sent())} swaps"
+        finally:
+            h.close()
+
+
+def test_a_stalled_press_does_not_swap_over_a_later_one(tmp_path):
+    """Intended: the wearer ends on the last slot they pressed.
+
+    The guard is one `_last_slot` field, so a later press silently supersedes an in-flight one
+    and nothing checks on return whether the press still holds it. Measured against the
+    unfixed mapping, the sends arrive B then A: the wearer presses slot 1, presses slot 3
+    while slot 1's read is still open, and ends up wearing slot 1's avatar. This needs no
+    duplicate delivery and no failed read -- an ordinary slow OSCQuery answer is enough.
+    """
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path, tuning=GATED)
+        try:
+            with vrc.hold_next_node_get() as gate:
+                stalled = h.deliver_threaded(SLOT_ADDR, 1)
+                assert gate.wait_until_parked(), "slot 1 never reached its marker read"
+                h.deliver(SLOT_ADDR, 0)
+                h.deliver(SLOT_ADDR, 3)   # the wearer presses slot 3; this is the live one
+                assert vrc.wait_for_count(1), "slot 3 did not swap"
+                gate.release()
+            stalled.join(2)
+            assert not stalled.is_alive(), "slot 1's thread outlived its read"
+            time.sleep(0.3)
+            assert h.sent() == [B_ID], \
+                f"a stalled press swapped over a later one: {h.sent()}"
         finally:
             h.close()
 

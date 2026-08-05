@@ -126,6 +126,13 @@ class WardrobeMapping(Mapping):
         # The last slot acted on and when, for REPEAT_GUARD_SECS.
         self._last_slot: Optional[int] = None
         self._last_slot_at: float = 0.0
+        # Identity for the press that armed the guard. A press blocks on its marker read for up
+        # to `fetch_timeout_secs`, an order of magnitude past REPEAT_GUARD_SECS, so a press
+        # returning from that read cannot assume the state it left is still its own: the slot
+        # and the timestamp describe whoever armed last, which may be a later press. Everything
+        # a press does after its read is gated on this token still matching.
+        self._press_seq = 0
+        self._last_press: Optional[int] = None
 
     # ---- construction helpers --------------------------------------------
 
@@ -217,17 +224,18 @@ class WardrobeMapping(Mapping):
                     "is delivered twice, and a real second press cannot be this fast.",
                     slot, (now - self._last_slot_at) * 1000)
                 return
+            self._press_seq += 1
+            token = self._press_seq
             self._last_slot = slot
             self._last_slot_at = now
+            self._last_press = token
 
         manifest = self._read_manifest()
         if manifest is None:
             # Nothing was sent, so release the guard: the wearer pressing again is the retry
             # for a transport failure, and holding a guard set by an attempt that did nothing
             # would make that retry look like a duplicate and swallow it.
-            with self._lock:
-                if self._last_slot == slot:
-                    self._last_slot = None
+            self._release_guard(token)
             return
 
         row = manifest.avatar_for(slot)
@@ -245,6 +253,19 @@ class WardrobeMapping(Mapping):
         # acknowledgement of our own request. Suppressing on it would mean that after a swap
         # the client declined, the wearer's retry of that very slot is swallowed in silence.
 
+        # A marker read blocks, so the wearer can press a different slot while this one is
+        # still reading -- and that press is the live one: it arrived later, and its own swap
+        # has already gone out. Sending ours now would land the wearer on the avatar they
+        # pressed *first*, which is what they will read as the wardrobe picking at random.
+        # Abandon instead. Last press wins, which is the only rule a menu can express.
+        with self._lock:
+            still_ours = self._last_press == token
+        if not still_ours:
+            self.log.info(
+                "Wardrobe slot %d was superseded by a later press while its marker was being "
+                "read; not swapping to %s.", slot, row.avatar_id)
+            return
+
         label = f" ({row.label})" if row.label else ""
         self.log.info("Wardrobe slot %d -> %s%s", slot, row.avatar_id, label)
         if ctx.send(AVATAR_CHANGE_ADDR, row.avatar_id):
@@ -254,6 +275,28 @@ class WardrobeMapping(Mapping):
             # would be filtered before it ever reached us -- a dead button until a different
             # slot is pressed. Forgetting the value makes the repeat a change again.
             self.bridge.osc.forget(SLOT_ADDR)
+        else:
+            # Nothing reached the wire, so release the guard for the same reason an unreadable
+            # manifest does. Deliberately no matching forget(): forget answers a *successful*
+            # swap eating the Button's release-to-0, because the outgoing avatar stops emitting
+            # first. Here the avatar did not change, so the release arrives normally and the
+            # change filter needs no help. `send` has already logged the drop at WARNING.
+            self._release_guard(token)
+
+    def _release_guard(self, token: int) -> None:
+        """Disarm the duplicate guard, but only if this press is still the one holding it.
+
+        Matching on the slot alone is not enough. This runs after a read that can block for
+        `fetch_timeout_secs`, an order of magnitude past REPEAT_GUARD_SECS, so by the time a
+        stalled press arrives here a *later* press of the same slot may have armed the guard
+        and swapped. Clearing that one lets its duplicate copy through as a second swap -- one
+        press, two swaps, and the client answers the second with the "you are already using
+        this avatar" error the guard exists to prevent the wearer ever seeing.
+        """
+        with self._lock:
+            if self._last_press == token:
+                self._last_slot = None
+                self._last_press = None
 
     # ---- arming ----------------------------------------------------------
 
