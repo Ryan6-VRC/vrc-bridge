@@ -161,6 +161,8 @@ The narrow residual is closed: a contact-flippable latch could chatter, and two 
 
 **A read is cached until the worn avatar changes**, so a wardrobe costs one HTTP round trip per avatar rather than one per press, and the blocking read sits on the OSC datagram path where §The blocking-sleep ruling sanctions it.
 
+**A successful swap immediately un-arms the wardrobe, and that is correct rather than a leak.** Our own send is echoed within milliseconds, the echo is indistinguishable from any other avatar change, and the avatar really did change — so the manifest is dropped and the next press re-reads. Expect arming to be *transient* when observing it from outside: a probe polling `_active` after a swap will usually see `None`, and the log line is the evidence that a manifest was adopted. Do not "fix" this by filtering our own id out of the echo: the same address is also how a change made from VRChat's own menu arrives, and telling them apart would mean trusting the id we sent, which §There is no echo watchdog forbids.
+
 **A 404 settles the question; a transport failure does not.** An avatar that declares no marker carries no wardrobe — normal, reported once at INFO, and not re-queried until a change could make the answer different. A failed read says nothing about the avatar, so it stays unsettled and the wearer pressing again is the retry.
 
 **The `/avatar/change` handler is registered ungated, and that is load-bearing.** It is what drops a manifest that no longer describes the worn avatar. Gated, a router-disabled wardrobe would hold a stale table across every avatar change and act on it the instant it was re-enabled.

@@ -41,6 +41,7 @@ and `design.md` descopes discovery.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Dict, Optional
 
 from vrbridge import VRBridge
@@ -63,6 +64,23 @@ AVATAR_CHANGE_ADDR = "/avatar/change"
 #: and an avatar load initialises the parameter here, so acting on it would swap on every
 #: avatar load.
 REST_SLOT = 0
+
+#: Ignore a repeat of the same slot arriving within this long, as a duplicate delivery
+#: rather than a second press.
+#:
+#: Two facts make this a contract rather than a feel value, so it lives in source. First,
+#: `design.md` records that every inbound message is delivered twice; measured live, the two
+#: copies of one press arrived **1 ms** apart. Second, the SDK holds a menu Button active for
+#: a minimum 200 ms (`menus.md`), measured live at exactly that -- so the wearer's next press
+#: of the same slot cannot begin sooner than ~200 ms after this one did. The gap between
+#: "duplicate" and "genuine repeat" is therefore two orders of magnitude, and anything in the
+#: middle separates them. Raising this past the Button floor would start eating real presses.
+#:
+#: Not solvable by the change-filter alone: `forget()` below deliberately clears the cached
+#: slot so a repeat press is deliverable at all, which is exactly what lets the duplicate
+#: through. The two mechanisms answer different failures -- forget restores deliverability,
+#: this restores idempotence -- and removing either brings back a dead button or a double swap.
+REPEAT_GUARD_SECS = 0.15
 
 
 # ----------------------------- Mapping ------------------------------------
@@ -91,6 +109,9 @@ class WardrobeMapping(Mapping):
         # the discipline _consider_service already follows.
         self._lock = threading.RLock()
         self._active: Optional[Manifest] = None
+        # The last slot acted on and when, for REPEAT_GUARD_SECS.
+        self._last_slot: Optional[int] = None
+        self._last_slot_at: float = 0.0
         # Set once a read has established that the worn avatar carries no usable marker, so
         # a wardrobe-less avatar is not re-queried on every press. Cleared by any avatar
         # change, which is the only thing that can make the answer different.
@@ -141,6 +162,10 @@ class WardrobeMapping(Mapping):
         with self._lock:
             self._active = None
             self._marker_settled = False
+            # The duplicate-delivery window belongs to one press on one avatar. Clearing it
+            # means a press of the same slot on the *new* avatar is never mistaken for the
+            # previous avatar's echo.
+            self._last_slot = None
 
     def _on_slot(self, ctx, address: str, value) -> None:
         try:
@@ -152,8 +177,30 @@ class WardrobeMapping(Mapping):
         if slot == REST_SLOT:
             return
 
+        # Reject the second copy of one press before doing anything else. Acting twice is
+        # not merely redundant: the client answers the duplicate with a visible "you are
+        # already using this avatar" error and then completes the swap, so the wearer sees a
+        # failure on every successful press.
+        now = time.monotonic()
+        with self._lock:
+            if (self._last_slot == slot
+                    and (now - self._last_slot_at) < REPEAT_GUARD_SECS):
+                self.log.debug(
+                    "Ignoring a repeat of wardrobe slot %d %.0f ms after the first: inbound "
+                    "is delivered twice, and a real second press cannot be this fast.",
+                    slot, (now - self._last_slot_at) * 1000)
+                return
+            self._last_slot = slot
+            self._last_slot_at = now
+
         manifest = self._arm()
         if manifest is None:
+            # Nothing was sent, so release the guard: the wearer pressing again is the retry
+            # for a transport failure, and holding a guard set by an attempt that did nothing
+            # would make that retry look like a duplicate and swallow it.
+            with self._lock:
+                if self._last_slot == slot:
+                    self._last_slot = None
             return
 
         row = manifest.avatar_for(slot)

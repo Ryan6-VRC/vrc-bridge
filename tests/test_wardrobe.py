@@ -12,6 +12,7 @@ The live client is not needed for any of this. Whether VRChat accepts an inbound
 avatar id is a client behaviour no fake can answer -- `docs/design.md` rules that "only
 provable in a live client" is the ecosystem's property, not a defect here.
 """
+import time
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,8 @@ from zeroconf import ServiceInfo
 
 from vrbridge.engine import VRBridge
 from vrbridge.mappings.osc_wardrobe import (AVATAR_CHANGE_ADDR, MARKER_ADDR,
-                                            SLOT_ADDR, WardrobeMapping)
+                                            REPEAT_GUARD_SECS, SLOT_ADDR,
+                                            WardrobeMapping)
 from vrbridge.osc_manager import (FETCH_MALFORMED, FETCH_NO_PEER,
                                   FETCH_NOT_FOUND, FETCH_TRANSPORT, OSCManager)
 from vrbridge.settings import ConfigError, WardrobeSettings
@@ -394,6 +396,9 @@ def test_the_same_slot_twice_swaps_twice_through_the_real_change_filter(tmp_path
         try:
             h.deliver(SLOT_ADDR, 1)
             h.deliver(SLOT_ADDR, 0)
+            # A real Button holds 200 ms, so two rising edges cannot be closer than that.
+            # Pressing faster than the hardware can is what the duplicate guard rejects.
+            time.sleep(REPEAT_GUARD_SECS * 1.5)
             h.deliver(SLOT_ADDR, 1)
             assert vrc.wait_for_count(2)
             assert h.sent() == [A_ID, A_ID]
@@ -411,8 +416,47 @@ def test_a_repeat_press_survives_a_lost_release(tmp_path):
         try:
             h.deliver(SLOT_ADDR, 1)
             assert vrc.wait_for_count(1)
+            time.sleep(REPEAT_GUARD_SECS * 1.5)
             h.deliver(SLOT_ADDR, 1)      # no release-to-0 at all
             assert vrc.wait_for_count(2), "the repeat press was filtered away"
+        finally:
+            h.close()
+
+
+def test_one_press_delivered_twice_swaps_once(tmp_path):
+    """Intended: one press is one swap, even though `design.md` records that every inbound
+    message is delivered twice.
+
+    Found live, not here: acting on both copies makes the client answer the second with a
+    visible "you are already using this avatar" error and *then* complete the swap, so the
+    wearer sees a failure on every successful press. The change filter does not save us --
+    `forget()` deliberately clears the cached slot so a genuine repeat is deliverable, and
+    that is exactly what lets the duplicate through. Measured, the two copies arrive 1 ms
+    apart while a real repeat cannot beat the Button's 200 ms hold."""
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path)
+        try:
+            h.deliver(SLOT_ADDR, 1)
+            h.deliver(SLOT_ADDR, 1)      # the duplicate delivery, immediately
+            assert vrc.wait_for_count(1)
+            time.sleep(0.3)
+            assert h.sent() == [A_ID], f"one press produced {len(h.sent())} swaps"
+        finally:
+            h.close()
+
+
+def test_the_duplicate_guard_does_not_outlive_an_avatar_change(tmp_path):
+    """Intended: the guard covers one press on one avatar. After a change the same slot is a
+    genuine new press -- swapping back to where you were is an ordinary thing to do, and it
+    must not be read as the previous press's duplicate."""
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path)
+        try:
+            h.slot(1)
+            assert vrc.wait_for_count(1)
+            h.change(B_ID)
+            h.slot(1)                    # immediately, but on a different avatar
+            assert vrc.wait_for_count(2), "the guard swallowed a press after an avatar change"
         finally:
             h.close()
 
