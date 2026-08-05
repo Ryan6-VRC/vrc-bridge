@@ -26,7 +26,8 @@ from vrbridge.mappings.osc_wardrobe import (AVATAR_CHANGE_ADDR, MARKER_ADDR,
                                             REPEAT_GUARD_SECS, SLOT_ADDR,
                                             WardrobeMapping)
 from vrbridge.osc_manager import (FETCH_MALFORMED, FETCH_NO_PEER,
-                                  FETCH_NOT_FOUND, FETCH_TRANSPORT, OSCManager)
+                                  FETCH_NOT_FOUND, FETCH_PEER_GONE,
+                                  FETCH_TRANSPORT, OSCManager)
 from vrbridge.settings import ConfigError, WardrobeSettings
 from vrbridge.wardrobe import discover_manifests, load_manifest
 
@@ -236,8 +237,73 @@ def test_a_removed_service_stops_fetch_answering_from_its_tree():
 
         OSCManager._BrowserListener(mgr).remove_service(
             None, "_oscjson._tcp.local.", name)
-        assert mgr.fetch(MARKER_ADDR).reason == FETCH_NO_PEER, \
+        gone = mgr.fetch(MARKER_ADDR)
+        assert gone.reason == FETCH_PEER_GONE, \
             "fetch still had a peer after the service backing it went away"
+        assert "withdrew" in gone.detail
+
+
+def test_a_withdrawn_peer_is_not_reported_as_one_never_found():
+    """Intended: fetch's named-failure vocabulary separates "nothing was ever there" from
+    "what was there went away", because the remedies differ -- the first is answered by
+    waiting for discovery, the second only by the client coming back. `target_is_pinned`'s
+    docstring promises a caller can tell all three of these apart, and while both withdrawal
+    and a cold start answered FETCH_NO_PEER it could tell two."""
+    mgr = OSCManager(advertise=False)
+    assert mgr.fetch(MARKER_ADDR).reason == FETCH_NO_PEER, "a cold manager lost nothing"
+
+    with FakeVRChat() as vrc:
+        name = "VRChat-Client-1._oscjson._tcp.local."
+        info = ServiceInfo("_oscjson._tcp.local.", name,
+                           addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                           properties={}, server="h.local.")
+        mgr._consider_service(name, info)
+        OSCManager._BrowserListener(mgr).remove_service(
+            None, "_oscjson._tcp.local.", name)
+        assert mgr.fetch(MARKER_ADDR).reason == FETCH_PEER_GONE
+
+        # A rediscovery clears it, or one dropped client would mislabel the rest of the run.
+        mgr._consider_service(name, info)
+        assert mgr.fetch(MARKER_ADDR).reason != FETCH_PEER_GONE
+
+
+def test_an_unrelated_service_withdrawing_leaves_our_peer_alone():
+    """Intended: only the withdrawal of the service backing *our* target says the peer went
+    away. VRCFaceTracking closing is an unrelated service removal, and reporting it as our
+    peer's departure would send a wardrobe press chasing a client that never left."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        name = "VRChat-Client-1._oscjson._tcp.local."
+        info = ServiceInfo("_oscjson._tcp.local.", name,
+                           addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                           properties={}, server="h.local.")
+        mgr._consider_service(name, info)
+        vrc.set_node(MARKER_ADDR, 3)
+
+        OSCManager._BrowserListener(mgr).remove_service(
+            None, "_oscjson._tcp.local.", "VRCFaceTracking._oscjson._tcp.local.")
+        assert mgr.fetch(MARKER_ADDR).ok, "an unrelated removal took our peer down"
+
+
+def test_a_stopped_manager_reports_its_peer_as_gone_not_as_never_found():
+    """Intended: a stopped manager must not answer from the tree of a peer it no longer
+    serves -- the rule remove_service already states -- and it had a peer, so the honest
+    answer is that it went away."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        mgr.start()
+        try:
+            name = "VRChat-Client-1._oscjson._tcp.local."
+            info = ServiceInfo("_oscjson._tcp.local.", name,
+                               addresses=[bytes([127, 0, 0, 1])], port=vrc.http_port,
+                               properties={}, server="h.local.")
+            mgr._consider_service(name, info)
+            vrc.set_node(MARKER_ADDR, 3)
+            assert mgr.fetch(MARKER_ADDR).ok
+        finally:
+            mgr.stop()
+        assert mgr.fetch(MARKER_ADDR).reason == FETCH_PEER_GONE, \
+            "a stopped manager still answered from the peer it stopped serving"
 
 
 def test_target_selection_fires_the_hook():

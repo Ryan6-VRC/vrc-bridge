@@ -31,7 +31,8 @@ _SERVE_POLL_SECS = 0.05
 #: worth reporting once rather than retrying. _host_info swallows all three into None,
 #: and a caller inheriting that cannot keep CLAUDE.md rule 7's named-offender promise.
 FETCH_OK = "ok"
-FETCH_NO_PEER = "no-peer"        # no discovered OSCQuery peer to ask (a pinned target has none)
+FETCH_NO_PEER = "no-peer"        # nothing has ever been resolved (a pinned target never will)
+FETCH_PEER_GONE = "peer-gone"    # a peer was resolved, then withdrew its service
 FETCH_NOT_FOUND = "not-found"    # 404: the peer serves no such node
 FETCH_TRANSPORT = "transport"    # timeout, refused, or a non-404 HTTP status
 FETCH_MALFORMED = "malformed"    # answered 200, but not a JSON node carrying VALUE
@@ -96,6 +97,12 @@ class OSCManager:
         # Stays None under a pinned target, which advertises nothing and serves no tree --
         # so fetch() answers FETCH_NO_PEER there rather than appearing to work.
         self._peer_http: Optional[tuple[str, int]] = None
+        # Whether the peer above was resolved and then withdrew, as against never having been
+        # resolved at all. Both leave _peer_http None, and collapsing them cost fetch() the
+        # named-failure vocabulary it otherwise keeps: "press again once VRChat is found" is
+        # wrong advice for a client that was found and crashed. Guarded by _client_lock, with
+        # _peer_http, so a reader sees the pair consistently.
+        self._peer_lost = False
         # Fired once a discovered send target is chosen. See add_target_listener.
         self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
         self._cache: Dict[str, Any] = {}
@@ -175,6 +182,12 @@ class OSCManager:
         self._target_listeners.append(fn)
 
     def start(self):
+        # A fresh session has lost nothing. start()'s own bind_port failure invites an
+        # embedder to stop() and start() again on another port, and without this reset that
+        # second session would report a withdrawn peer it never had.
+        with self._client_lock:
+            self._peer_lost = False
+
         # Start HTTP first on a free port so we can advertise the correct port
         self._httpd = http.server.ThreadingHTTPServer((self.host, 0), self._make_http_handler())
         self.http_port = self._httpd.server_address[1]
@@ -293,6 +306,23 @@ class OSCManager:
             self._srv = None
             self._srv_thread = None
 
+        # Drop the readable peer, for the reason remove_service already states: fetch() must
+        # not keep querying the HTTP endpoint of a peer we have stopped serving and report its
+        # answers as the worn avatar's. A stopped manager had one and no longer does, so this
+        # reads as FETCH_PEER_GONE rather than as a peer that was never there.
+        #
+        # `_client` is deliberately left alone. A pulse caught between its value and its
+        # trailing zero needs a live sender or /input/Voice stays latched and keys the mic
+        # open; VRBridge.stop() drains pulses before calling this, but a library embedder
+        # calling stop() directly does not, and a dropped trailing zero is worse than a send
+        # into a torn-down session.
+        with self._client_lock:
+            if self._peer_http is not None:
+                # Conditional: a session that never resolved a peer has not lost one, and
+                # saying otherwise would be the same conflation this exists to end.
+                self._peer_lost = True
+            self._peer_http = None
+
     def watch(self, address: str):
         """Track an OSC address: cache each value, and fire the listener on a change.
 
@@ -402,6 +432,11 @@ class OSCManager:
                     # endpoint of a peer we have stopped sending to and report its answers
                     # as current.
                     self.outer._peer_http = None
+                    # Set here, inside the "this was *our* target" branch, and not merely
+                    # under the lock: an unrelated service withdrawing -- VRCFaceTracking
+                    # closing, say -- must not make fetch() report that the peer we are
+                    # reading from went away while VRChat is still live.
+                    self.outer._peer_lost = True
                     self.outer._current_service_name = None
                     # Kept consistent with the fields it describes rather than
                     # load-bearing: _consider_service reads the rank only while a
@@ -475,6 +510,8 @@ class OSCManager:
             self._client = udp_client.SimpleUDPClient(host, osc_port)
             self._client_target = (host, osc_port)
             self._peer_http = (host, info.port)
+            # A peer is readable again, so a previous withdrawal is no longer the answer.
+            self._peer_lost = False
             self._current_service_name = name
             self._current_rank = rank
         if self.log: self.log.info("VRChat target set to %s:%d (via %s)", host, osc_port, name)
@@ -547,11 +584,22 @@ class OSCManager:
         """
         with self._client_lock:
             peer = self._peer_http
+            lost = self._peer_lost
         if peer is None:
-            why = ("the send target was pinned, and a pinned peer serves no tree"
-                   if self.target_is_pinned
-                   else "no OSCQuery peer has been discovered yet")
-            return FetchResult(FETCH_NO_PEER, detail=why)
+            if self.target_is_pinned:
+                return FetchResult(
+                    FETCH_NO_PEER,
+                    detail="the send target was pinned, and a pinned peer serves no tree")
+            if lost:
+                # Separated from "never discovered" because the remedies differ: this one
+                # needs the client to come back, and no amount of waiting on discovery to
+                # finish will help. target_is_pinned's docstring promises a caller can tell
+                # these three states apart; without this it could tell two.
+                return FetchResult(
+                    FETCH_PEER_GONE,
+                    detail="the OSCQuery peer we were reading from withdrew its service")
+            return FetchResult(FETCH_NO_PEER,
+                               detail="no OSCQuery peer has been discovered yet")
 
         import urllib.error
         import urllib.parse

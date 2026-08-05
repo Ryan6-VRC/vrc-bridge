@@ -57,7 +57,7 @@ from typing import Dict, Optional
 from vrbridge import VRBridge
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.osc_manager import (FETCH_NO_PEER, FETCH_NOT_FOUND, FETCH_OK,
-                                  FetchResult)
+                                  FETCH_PEER_GONE, FetchResult)
 from vrbridge.settings import settings
 from vrbridge.wardrobe import Manifest
 
@@ -336,6 +336,13 @@ class WardrobeMapping(Mapping):
                 self._report(("no-peer", "undiscovered"), "warning",
                              "No OSCQuery peer discovered yet, so %s cannot be read; press "
                              "again once VRChat has been found.", MARKER_ADDR)
+            return None
+        if result.reason == FETCH_PEER_GONE:
+            # Distinct from never having found one: waiting on discovery to finish is the
+            # wrong advice here, because it finished and the client then went away.
+            self._report(("peer-gone",), "warning",
+                         "The client we were reading %s from withdrew; press again once "
+                         "VRChat is running and rediscovered.", MARKER_ADDR)
             return None
         if result.reason != FETCH_OK:
             self._report(("fetch", result.reason), "warning",
