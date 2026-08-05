@@ -79,6 +79,10 @@ def test_a_manifest_loads_its_id_and_slot_table(tmp_path):
     (f'id = 1\n[[slots]]\nslot=9\nid="{A_ID}"\n', "1-8"),
     (f'id = 1\n[[slots]]\nslot=2\nid="{A_ID}"\n[[slots]]\nslot=2\nid="{B_ID}"\n', "already used"),
     ('id = 1\n[[slots]]\nslot=1\nid="avtr_nope"\n', "not an avatar id"),
+    # A TOML multi-line string keeps the trailing newline. `$` matches just before one, so
+    # under `.match()` this passed validation and put "avtr_...\n" on the wire -- which
+    # VRChat ignores silently, the exact dead button the check exists to turn into an error.
+    (f'id = 1\n[[slots]]\nslot=1\nid="""{A_ID}\n"""\n', "not an avatar id"),
     (f'id = 1\nrevision = 2\n[[slots]]\nslot=1\nid="{A_ID}"\n', "unknown key"),
     (f'id = 1\n[[slots]]\nslot=1\nname="x"\nid="{A_ID}"\n', "unknown key"),
 ])
@@ -168,6 +172,46 @@ def test_fetch_reports_a_malformed_node():
         assert mgr.fetch(MARKER_ADDR).reason == FETCH_MALFORMED
 
 
+def test_fetch_percent_encodes_the_address():
+    """Intended: the address is data, not URL syntax.
+
+    Spliced in raw, a `#` in a parameter name is stripped client-side as a fragment and the
+    GET returns 200 for a *different* node -- a silently wrong answer, which is the one
+    outcome this function's named-failure vocabulary cannot express. A space would instead
+    report FETCH_TRANSPORT ("ask again") for a node that is there.
+
+    Asserted on the URL rather than through a live server, because a fake would have to
+    reproduce the exact fragment handling to make the wrong version fail.
+    """
+    seen = {}
+
+    class FakeResp:
+        def read(self): return b'{"FULL_PATH": "/x", "VALUE": [1]}'
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    mgr = OSCManager(advertise=False)
+    mgr._peer_http = ("127.0.0.1", 9999)
+
+    import urllib.request
+    real = urllib.request.urlopen
+
+    def spy(url, timeout=None):
+        seen["url"] = url
+        return FakeResp()
+
+    urllib.request.urlopen = spy
+    try:
+        mgr.fetch("/avatar/parameters/Wardrobe#2")
+        assert seen["url"].endswith("/avatar/parameters/Wardrobe%232"), seen["url"]
+        mgr.fetch("/avatar/parameters/Has Space")
+        assert seen["url"].endswith("/avatar/parameters/Has%20Space"), seen["url"]
+        # The separators must survive, or every address becomes one flat node name.
+        assert "%2F" not in seen["url"]
+    finally:
+        urllib.request.urlopen = real
+
+
 def test_fetch_without_a_discovered_peer_says_so():
     """Intended: a pinned target advertises nothing and serves no tree, so there is no one
     to ask -- distinct from asking and being refused."""
@@ -251,8 +295,8 @@ class Harness:
         self.m = WardrobeMapping(self.bridge, manifests, tuning=tuning, **kw)
         self.m.register()
         # `enabled` is the router's and the mapping never writes its own, so something has
-        # to switch it on -- exactly as a user's router does. Arming (`_active`) is a
-        # separate axis, and comes only from a marker read at press time.
+        # to switch it on -- exactly as a user's router does. Whether a press finds a
+        # manifest is a separate question, settled by the marker read at press time.
         self.m.activate()
 
     def close(self):
@@ -356,6 +400,11 @@ def test_an_avatar_change_forces_the_next_press_to_re_read(tmp_path):
             assert not h.read_ok(), "an avatar change must drop the last read"
             assert len(vrc.node_gets) == 1, "the change itself must not read anything"
 
+            # Past the duplicate window before pressing the same slot again. The guard now
+            # survives an avatar change, because the change is also how our own echo arrives
+            # (see test_our_own_echo_does_not_disarm_the_duplicate_guard). A wearer cannot
+            # press twice this fast anyway -- a Button holds for 200 ms.
+            time.sleep(REPEAT_GUARD_SECS * 1.5)
             h.slot(1)
             assert vrc.wait_for_count(2)
             assert len(vrc.node_gets) == 2, "the next press should have read again"
@@ -453,18 +502,68 @@ def test_one_press_delivered_twice_swaps_once(tmp_path):
             h.close()
 
 
-def test_the_duplicate_guard_does_not_outlive_an_avatar_change(tmp_path):
-    """Intended: the guard covers one press on one avatar. After a change the same slot is a
-    genuine new press -- swapping back to where you were is an ordinary thing to do, and it
-    must not be read as the previous press's duplicate."""
+def test_our_own_echo_does_not_disarm_the_duplicate_guard(tmp_path):
+    """Intended: the guard survives the `/avatar/change` echo of the swap that armed it.
+
+    This test replaces one that asserted the opposite. That test pressed the same slot
+    immediately after an avatar change and demanded a second swap -- a sequence the live
+    measurements say cannot occur, because a Button holds for 200 ms and a loading wearer is
+    the placeholder, which emits no OSC at all. Pinning it cost the guard its life: clearing
+    `_last_slot` on invalidate meant our own echo, back within 5 ms, destroyed the 150 ms
+    window from the inside. `forget()` has already reopened the change filter by then, so the
+    second copy of the press swaps again -- the doubled swap `58a70a5` fixed.
+
+    Ordering here is the real one: press, then the echo carrying the id *we sent*, then the
+    delayed duplicate. Against the old code this produced two swaps."""
     with FakeVRChat() as vrc:
         h = rig(vrc, tmp_path)
         try:
-            h.slot(1)
+            h.deliver(SLOT_ADDR, 1)
+            assert vrc.wait_for_count(1)
+            h.change(A_ID)               # the echo of our own swap, ~5 ms later live
+            h.deliver(SLOT_ADDR, 1)      # the duplicate copy, dispatched late
+            time.sleep(0.3)
+            assert h.sent() == [A_ID], f"the echo re-opened the guard: {len(h.sent())} swaps"
+        finally:
+            h.close()
+
+
+def test_a_genuine_repeat_after_the_guard_window_still_swaps(tmp_path):
+    """Intended: keeping the guard across an avatar change does not wedge the button.
+
+    The guard is time-bounded, so the press that the replaced test was reaching for -- the
+    wearer swapping back to where they were -- still works; it just has to arrive after the
+    window, which at 200 ms per Button press it always does."""
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path)
+        try:
+            h.deliver(SLOT_ADDR, 1)
             assert vrc.wait_for_count(1)
             h.change(B_ID)
-            h.slot(1)                    # immediately, but on a different avatar
-            assert vrc.wait_for_count(2), "the guard swallowed a press after an avatar change"
+            time.sleep(REPEAT_GUARD_SECS * 1.5)
+            h.deliver(SLOT_ADDR, 1)
+            assert vrc.wait_for_count(2), "the guard outlived its own window"
+        finally:
+            h.close()
+
+
+@pytest.mark.parametrize("bogus", [True, 1.9, "1", float("inf")])
+def test_a_slot_that_is_not_a_whole_number_is_ignored(tmp_path, bogus):
+    """Intended: the slot path tests the type instead of coercing it, exactly as the marker
+    read does eleven lines below it.
+
+    `int()` truncates and bool is an int subclass, so `True`, `1.9` and `"1"` all used to
+    become slot 1 and swap the avatar; `int(inf)` raises OverflowError, which the old
+    `except (TypeError, ValueError)` did not catch at all. A `Slot` parameter mis-authored as
+    Bool is a live authoring risk -- the entry README warns about the adjacent MA sync-type
+    trap -- and it would have swapped on every toggle-on.
+    """
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path)
+        try:
+            h.slot(bogus)
+            time.sleep(0.1)
+            assert h.sent() == [], f"{bogus!r} was accepted as a slot"
         finally:
             h.close()
 

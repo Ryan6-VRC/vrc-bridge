@@ -134,7 +134,10 @@ def load_manifest(path: Path) -> Manifest:
         avatar_id = row.get("id")
         if not isinstance(avatar_id, str):
             raise ConfigError(f"{at}: id is {avatar_id!r}; expected an avatar id string")
-        if not _AVATAR_ID_RE.match(avatar_id):
+        # fullmatch, not match: `$` also matches just before a trailing newline, so a TOML
+        # multi-line string would otherwise put "avtr_...\n" on the wire -- which VRChat
+        # ignores silently, the exact dead button this check exists to turn into an error.
+        if not _AVATAR_ID_RE.fullmatch(avatar_id):
             raise ConfigError(
                 f"{at}: id is {avatar_id!r}, which is not an avatar id "
                 f"(expected avtr_ and a UUID, e.g. "

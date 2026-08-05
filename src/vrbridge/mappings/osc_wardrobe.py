@@ -33,9 +33,9 @@ holds for 200 ms and then returns to 0 -- matching the SDK's documented floor --
 is exactly one swap, and the release edge is what makes a second press of the same slot a
 second event rather than a repeat the change filter drops.
 
-**`_active` is the arm state; `enabled` belongs to the router.** This mapping never writes
-its own `enabled`. Conflating them let the ungated avatar-change handler re-enable a mapping
-its router had deliberately switched off.
+**`enabled` belongs to the router, and this mapping never writes it.** The ungated
+avatar-change handler below only ever invalidates, so it cannot re-enable a mapping its router
+had deliberately switched off -- which is the confusion this note exists to prevent.
 
 **It cannot verify that a swap happened, and that is a property of the channel.** Measured:
 VRChat echoes `/avatar/change` carrying the id we sent within 5 ms, does so identically for
@@ -176,18 +176,26 @@ class WardrobeMapping(Mapping):
         with self._lock:
             self._last_manifest = None
             self._reported = None
-            # The duplicate-delivery window belongs to one press on one avatar. Clearing it
-            # means a press of the same slot on the *new* avatar is never mistaken for the
-            # previous avatar's echo.
-            self._last_slot = None
+            # `_last_slot` is deliberately NOT cleared here. This handler is bound to
+            # /avatar/change, and the echo of our own swap arrives within 5 ms (measured) --
+            # inside the 150 ms duplicate window the swap itself just armed. Clearing it here
+            # destroyed the guard from within: once ctx.send's forget() has reopened the
+            # change filter, a second copy of the press whose dispatch thread starts late
+            # meets an empty guard and swaps again, which is the doubled swap 58a70a5 fixed.
+            # Nothing is lost by keeping it: a genuine same-slot press on the new avatar
+            # cannot arrive inside 150 ms, because a Button holds for 200 ms (measured) and
+            # the loading wearer is the placeholder, which emits no OSC at all.
 
     def _on_slot(self, ctx, address: str, value) -> None:
-        try:
-            slot = int(value)
-        except (TypeError, ValueError):
+        # Same guard as the marker read below, and for the same reason: bool is an int
+        # subclass and int() truncates, so a T or a 1.9 would otherwise become slot 1 and
+        # swap the avatar. int() also raises OverflowError on an infinity, which the old
+        # (TypeError, ValueError) clause did not catch. Test the type instead of coercing.
+        if isinstance(value, bool) or not isinstance(value, int):
             self.log.warning("Wardrobe slot %s is %r, which is not a whole number; ignored.",
                              address, value)
             return
+        slot = value
         if slot == REST_SLOT:
             return
 
