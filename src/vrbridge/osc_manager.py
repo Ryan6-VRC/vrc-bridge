@@ -472,6 +472,17 @@ class OSCManager:
                 self.wfile.write(body)
         return Handler
 
+    @property
+    def target_is_pinned(self) -> bool:
+        """True when the send target was named rather than discovered.
+
+        Exists so a caller can tell the three states behind a missing OSCQuery peer apart:
+        a pin (which serves no tree and never will), discovery that has not resolved yet
+        (normal for the first seconds of any run), and a target that went away. They need
+        different messages, and only the first has `pinned_manifest_id` as its answer.
+        """
+        return self._pinned_target is not None
+
     def fetch(self, address: str, timeout: float = 2.0) -> FetchResult:
         """Read one parameter node's live VALUE from the peer's OSCQuery server.
 
@@ -490,8 +501,10 @@ class OSCManager:
         with self._client_lock:
             peer = self._peer_http
         if peer is None:
-            return FetchResult(FETCH_NO_PEER,
-                               detail="no discovered OSCQuery peer (a pinned target serves none)")
+            why = ("the send target was pinned, and a pinned peer serves no tree"
+                   if self.target_is_pinned
+                   else "no OSCQuery peer has been discovered yet")
+            return FetchResult(FETCH_NO_PEER, detail=why)
 
         import urllib.error
         import urllib.request

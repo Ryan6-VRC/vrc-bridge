@@ -128,7 +128,7 @@ bridge.start()
 
 `activate()` is not optional — a registered but inactive wardrobe ignores every press.
 
-The manifest is read off the worn avatar **on your first press after each avatar change**, not when the avatar changes. That is deliberate: a cold avatar download can take a minute, so anything that read on the change would be asking about an avatar that does not exist yet. Pressing a button is proof the avatar is loaded, so the read is always about what you are actually wearing — and a slow load costs nothing.
+The manifest is read off the worn avatar **on every press**, not when the avatar changes. That is deliberate: a cold avatar download can take a minute, so anything reading on the change would be asking about an avatar that does not exist yet — and anything *remembering* the answer would still be holding the previous avatar's wardrobe when the new one finally arrives, because VRChat never announces that it did. Reading each press costs a millisecond and is always about the avatar the button belongs to.
 
 **If you pin the send target** with `--osc-port` — at the Av3Emulator, or anything else that advertises nothing — there is no OSCQuery tree to read the marker from, so the wardrobe can never arm on its own. Name the manifest instead:
 
