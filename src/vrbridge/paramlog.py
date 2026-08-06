@@ -15,11 +15,19 @@ selection: a pin governs the send side only).
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from vrbridge import VRBridge
 from vrbridge.cli import DEFAULT_OSC_HOST, _listen_port, _port, osc_target
 from vrbridge.mappings.osc_paramlog import ParamLogMapping
+
+
+def default_path() -> str:
+    """Second resolution alone collides when two loggers launch together —
+    the documented two-clients-one-PC shape — and "w" mode makes the loser
+    silent. The pid keeps them apart."""
+    return time.strftime(f"paramlog_%Y%m%d_%H%M%S_{os.getpid()}.csv")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,10 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--params", action="append", required=True, metavar="NAME_OR_GLOB",
         help=("Parameter to record; repeatable, at least one required. A bare name or "
               "glob names an avatar parameter (SyncProbe/*); a leading / names a full "
-              "address (/avatar/change). Full traffic is deliberately not recordable."))
+              "address (/avatar/change). Globs are fnmatch, so * crosses / segments. "
+              "There is no log-everything default: you name the shapes you record."))
     parser.add_argument(
         "--file", default=None, metavar="CSV",
-        help="Output CSV path. Default: paramlog_<timestamp>.csv in the working directory.")
+        help="Output CSV path. Default: paramlog_<timestamp>_<pid>.csv in the working "
+             "directory (the pid keeps two same-second launches apart).")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--osc-port", type=_port, default=None, metavar="PORT",
@@ -54,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    path = args.file or time.strftime("paramlog_%Y%m%d_%H%M%S.csv")
+    path = args.file or default_path()
 
     bridge = VRBridge(
         log_level=args.log_level,
@@ -67,14 +77,20 @@ def main(argv: list[str] | None = None) -> None:
     mapping.register()
     mapping.activate()
 
-    bridge.start()
+    started = False
     try:
+        # Inside the try: an occupied --osc-bind-port raises the named OSError
+        # here (the likeliest two-client-run failure), and the header-only CSV
+        # still gets closed and the row count still gets reported.
+        bridge.start()
+        started = True
         while True:
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
-        bridge.stop()
+        if started:
+            bridge.stop()
         mapping.close()
         bridge.log.info("osc_paramlog wrote %d rows to %s", mapping.rows, path)
 

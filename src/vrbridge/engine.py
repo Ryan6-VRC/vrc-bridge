@@ -171,6 +171,12 @@ class VRBridge:
             cbs = list(self._osc_callbacks.get(address, ()))
             cbs.extend(cb for pat, cb in self._osc_pattern_callbacks
                        if fnmatch.fnmatchcase(address, pat))
+        # One callback object fires once per event however many registrations
+        # match — an exact name plus an overlapping glob is the most natural
+        # whitelist a logger user writes, and double-firing it doubled every
+        # row in a log whose purpose was rate measurement.
+        seen: set[int] = set()
+        cbs = [cb for cb in cbs if not (id(cb) in seen or seen.add(id(cb)))]
         for cb in cbs:
             if self._log_callbacks and self.log.isEnabledFor(logging.INFO):
                 self.log.info("VRChat %s -> %s(%s)", address, self._cb_name(cb), self._short(value))

@@ -19,6 +19,9 @@ clock), and shaped by two standing rulings:
 CSV schema: `time,address,value,type` -- time.time() to microseconds (the
 cross-log join key; both loggers of a two-client run share one machine
 clock), the concrete address, the value, and the OSC-side Python type name.
+The stamp is taken per datagram thread before the write lock, so under load
+rows can land in the file out of timestamp order: the TIME COLUMN is the
+ordering key, and analysis sorts on it rather than trusting row order.
 """
 
 from __future__ import annotations

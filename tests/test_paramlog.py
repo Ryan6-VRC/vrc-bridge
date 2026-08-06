@@ -96,7 +96,10 @@ def test_a_glob_admits_matching_names_and_nothing_else(tmp_path):
 
 def test_a_repeated_identical_value_is_one_row(tmp_path):
     """Intended (a pin on the shared change filter, stated as logger behavior):
-    only transitions are rows. The doubled inbound delivery folds away with it."""
+    only transitions are rows. Sends are sequenced through the row count because
+    thread-per-datagram dispatch does not preserve processing order between
+    unsynchronized sends; the fold of the doubled inbound delivery is the design
+    record's inference from this same filter, not separately exercised here."""
     out = tmp_path / "log.csv"
     bridge = _bridge()
     m = ParamLogMapping(bridge, params=["Thing"], path=out)
@@ -105,16 +108,41 @@ def test_a_repeated_identical_value_is_one_row(tmp_path):
     bridge.osc.start()
     try:
         _send(bridge.osc.osc_port, "/avatar/parameters/Thing", 1.0)
+        assert _wait_rows(m, 1) == 1
         _send(bridge.osc.osc_port, "/avatar/parameters/Thing", 1.0)
+        time.sleep(0.1)  # the repeat would land within this window if it were coming
+        assert m.rows == 1
         _send(bridge.osc.osc_port, "/avatar/parameters/Thing", 2.0)
         assert _wait_rows(m, 2) == 2
-        time.sleep(0.1)  # the duplicate would land within this window if it were coming
-        assert m.rows == 2
     finally:
         bridge.osc.stop()
         m.close()
     values = [float(r[2]) for r in _read_csv(out)[1:]]
     assert values == [pytest.approx(1.0), pytest.approx(2.0)]
+
+
+def test_an_overlapping_whitelist_is_still_one_row_per_change(tmp_path):
+    """Intended: the engine dedupes one callback object across exact and pattern
+    registrations, so naming a channel AND one of its members — the most natural
+    whitelist — does not double the apparent rate the log exists to measure."""
+    out = tmp_path / "log.csv"
+    bridge = _bridge()
+    m = ParamLogMapping(bridge, params=["SyncProbe/*", "SyncProbe/Reset", "SyncProbe/Rx/*"],
+                        path=out)
+    m.register()
+    m.activate()
+    bridge.osc.start()
+    try:
+        _send(bridge.osc.osc_port, "/avatar/parameters/SyncProbe/Reset", True)
+        assert _wait_rows(m, 1) == 1
+        _send(bridge.osc.osc_port, "/avatar/parameters/SyncProbe/Rx/R05", 0.5)
+        assert _wait_rows(m, 2) == 2
+        time.sleep(0.1)  # duplicates would land within this window
+        assert m.rows == 2
+    finally:
+        bridge.osc.stop()
+        m.close()
+    assert len(_read_csv(out)) == 3  # header + one row per change
 
 
 def test_rows_after_close_are_dropped_not_raised(tmp_path):
