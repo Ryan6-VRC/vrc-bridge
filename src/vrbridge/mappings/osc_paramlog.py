@@ -14,7 +14,10 @@ clock), and shaped by two standing rulings:
   is one row (OSCManager suppresses it), which also folds the doubled inbound
   delivery (docs/design.md §Inbound delivery semantics) into one row. A
   parameter that re-sends its current value is therefore invisible here --
-  fine for measurement, where only transitions carry information.
+  fine for measurement, where only transitions carry information. The fold
+  needs a value to compare: an argument-less message caches None, which that
+  filter reads as never-seen, so it lands once per datagram. VRChat parameters
+  always carry a value; a bare address from another sender is the exception.
 
 CSV schema: `time,address,value,type` -- time.time() to microseconds (the
 cross-log join key; both loggers of a two-client run share one machine

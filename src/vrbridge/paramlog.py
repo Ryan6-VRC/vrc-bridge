@@ -39,8 +39,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--params", action="append", required=True, metavar="NAME_OR_GLOB",
         help=("Parameter to record; repeatable, at least one required. A bare name or "
               "glob names an avatar parameter (SyncProbe/*); a leading / names a full "
-              "address (/avatar/change). Globs are fnmatch, so * crosses / segments. "
-              "There is no log-everything default: you name the shapes you record."))
+              "address (/avatar/change). Globs are fnmatch, so * crosses / segments, "
+              "and a name containing ? or [ is still recorded under its literal "
+              "spelling as well. There is no log-everything default: you name the "
+              "shapes you record — /* is how you spell all of them."))
     parser.add_argument(
         "--file", default=None, metavar="CSV",
         help="Output CSV path. Default: paramlog_<timestamp>_<pid>.csv in the working "
@@ -77,20 +79,25 @@ def main(argv: list[str] | None = None) -> None:
     mapping.register()
     mapping.activate()
 
-    started = False
     try:
-        # Inside the try: an occupied --osc-bind-port raises the named OSError
-        # here (the likeliest two-client-run failure), and the header-only CSV
-        # still gets closed and the row count still gets reported.
-        bridge.start()
-        started = True
-        while True:
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if started:
+        try:
+            # Inside the try: an occupied --osc-bind-port raises the named OSError
+            # here (the likeliest two-client-run failure), and the header-only CSV
+            # still gets closed and the row count still gets reported.
+            #
+            # stop() unconditionally, including after a failed start(): start() brings
+            # the HTTP server up before the OSC bind that raises, and OSCManager's
+            # contract is that stop() walks each block independently and takes down
+            # whichever ones came up. Guarding on a `started` flag instead leaked the
+            # HTTP thread and its socket for anything calling main() in-process.
+            bridge.start()
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
             bridge.stop()
+    finally:
         mapping.close()
         bridge.log.info("osc_paramlog wrote %d rows to %s", mapping.rows, path)
 

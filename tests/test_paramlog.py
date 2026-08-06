@@ -155,3 +155,45 @@ def test_rows_after_close_are_dropped_not_raised(tmp_path):
     m.close()
     m._on_value(None, "/avatar/parameters/Thing", 1.0)  # must not raise
     assert m.rows == 0
+
+
+def test_a_name_containing_glob_chars_records_under_its_own_spelling(tmp_path):
+    """Intended: naming a parameter records *that* parameter. Nothing distinguishes
+    a literal name containing `?` or `[` from a pattern, and reading `Foo[1]` only
+    as a pattern logged `/avatar/parameters/Foo1` — an address the caller never
+    named — while logging nothing for the one they did. A pattern therefore admits
+    its own literal spelling too; the extra match is visible in the CSV, the loss
+    was not."""
+    out = tmp_path / "log.csv"
+    bridge = _bridge()
+    m = ParamLogMapping(bridge, params=["Foo[1]"], path=out)
+    m.register()
+    m.activate()
+    bridge.osc.start()
+    try:
+        _send(bridge.osc.osc_port, "/avatar/parameters/Foo[1]", 0.9)
+        assert _wait_rows(m, 1) == 1
+    finally:
+        bridge.osc.stop()
+        m.close()
+    assert [r[1] for r in _read_csv(out)[1:]] == ["/avatar/parameters/Foo[1]"]
+
+
+def test_one_bound_method_on_both_halves_of_the_seam_fires_once():
+    """Intended: one callback fires once per event however many registrations match
+    (design record §The parameter logger). `self.method` builds a fresh bound method
+    per attribute access, so the two registrations below are distinct objects that
+    compare equal — dedupe by identity let both fire and doubled every row."""
+    class Listener:
+        def __init__(self):
+            self.calls = []
+
+        def on_value(self, ctx, address, value):
+            self.calls.append((address, value))
+
+    bridge = _bridge()
+    listener = Listener()
+    bridge.on_osc("/avatar/parameters/SyncProbe/Reset", listener.on_value)
+    bridge.on_osc_pattern("/avatar/parameters/SyncProbe/*", listener.on_value)
+    bridge._on_osc_event("/avatar/parameters/SyncProbe/Reset", 1.0)
+    assert listener.calls == [("/avatar/parameters/SyncProbe/Reset", 1.0)]
