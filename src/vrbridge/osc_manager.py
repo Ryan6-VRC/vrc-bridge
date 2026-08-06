@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import http.server
 import ipaddress
 import json
@@ -107,6 +108,10 @@ class OSCManager:
         self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
         self._cache: Dict[str, Any] = {}
         self._watched: Set[str] = set()
+        # fnmatch-style patterns admitted by _default_handler, which every datagram not
+        # explicitly mapped already reaches. This admits named shapes of traffic; it
+        # enumerates nothing, so the parameter-discovery descope (docs/design.md) holds.
+        self._watched_patterns: Set[str] = set()
         self._cache_lock = threading.Lock()
 
         # A target we were told to use rather than one we found. Held so
@@ -339,6 +344,22 @@ class OSCManager:
         self._disp.map(address, _handler)
         if self.log: self.log.debug("Watching OSC address %s", address)
 
+    def watch_pattern(self, pattern: str) -> None:
+        """Watch every address matching an fnmatch pattern (`*`, `?`, `[seq]`).
+
+        Same cache, change filter, and listener as watch(); the concrete arriving
+        address is what is cached and fired, never the pattern. Kept out of the
+        dispatcher: python-osc compiles mapped addresses through its own OSC-pattern
+        translation, and this repo's contract is fnmatch — one grammar, ours.
+
+        A pattern also admits its own literal spelling. Nothing tells a name containing
+        `?` or `[` apart from a pattern, and reading `Foo[1]` only as a pattern silently
+        logged `Foo1` — an address the caller never named — while logging nothing for the
+        one they did. Over-admitting is visible in the output; the loss was not.
+        """
+        self._watched_patterns.add(pattern)
+        if self.log: self.log.debug("Watching OSC pattern %s", pattern)
+
     def get_cached(self, address: str, default=None):
         with self._cache_lock:
             return self._cache.get(address, default)
@@ -380,7 +401,13 @@ class OSCManager:
 
     # internals
     def _default_handler(self, addr, *args):
-        if addr in self._watched:
+        # Snapshot: watch_pattern may add on another thread, and a set cannot be
+        # iterated across a mutation (_watched is only ever membership-tested, so it
+        # never had this constraint). Equality admits a pattern entry that is really a
+        # literal name -- see watch_pattern's contract.
+        if addr in self._watched or any(
+                addr == p or fnmatch.fnmatchcase(addr, p)
+                for p in tuple(self._watched_patterns)):
             val = args[0] if args else None
             self._update_cache_and_fire(addr, val)
         else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import logging
 import threading
 from dataclasses import dataclass
@@ -77,6 +78,7 @@ class VRBridge:
             self.log.info("SteamVR is disabled.")
 
         self._osc_callbacks: Dict[str, list[Callable[[CallbackContext, str, Any], None]]] = {}
+        self._osc_pattern_callbacks: list[tuple[str, Callable[[CallbackContext, str, Any], None]]] = []
         self._ctl_callbacks: Dict[tuple[str, Hand], list[Callable[[CallbackContext, ControllerEvent], None]]] = {}
         self._target_callbacks: list[Callable[[CallbackContext, tuple[str, int]], None]] = []
         self._lock = threading.RLock()
@@ -121,6 +123,18 @@ class VRBridge:
             for addr in watch:
                 self.osc.watch(addr)
 
+    def on_osc_pattern(self, pattern: str, callback: Callable[[CallbackContext, str, Any], None]):
+        """on_osc for an fnmatch pattern (`*`, `?`, `[seq]`) over full addresses.
+
+        The callback receives each concrete arriving address that matches. Same
+        change-filtered stream as on_osc — a repeated identical value never fires
+        (OSCManager._update_cache_and_fire), which also folds the doubled inbound
+        delivery (docs/design.md §Inbound delivery semantics) into one call.
+        """
+        with self._lock:
+            self._osc_pattern_callbacks.append((pattern, callback))
+        self.osc.watch_pattern(pattern)
+
     def on_controller(self, event_type: str, hand: Hand, callback: Callable[[CallbackContext, ControllerEvent], None], *, watch: Iterable[str] | None = None):
         with self._lock:
             self._ctl_callbacks.setdefault((event_type, hand), []).append(callback)
@@ -155,6 +169,16 @@ class VRBridge:
     def _on_osc_event(self, address: str, value):
         with self._lock:
             cbs = list(self._osc_callbacks.get(address, ()))
+            cbs.extend(cb for pat, cb in self._osc_pattern_callbacks
+                       if address == pat or fnmatch.fnmatchcase(address, pat))
+        # One callback fires once per event however many registrations match — an
+        # exact name plus an overlapping glob is the most natural whitelist a logger
+        # user writes, and double-firing it doubled every row in a log whose purpose
+        # was rate measurement. Compare by equality, not id(): `self.method` builds a
+        # fresh bound method per attribute access, so registering one on both halves
+        # of the seam yields two objects that are equal and would both fire.
+        seen: set = set()
+        cbs = [cb for cb in cbs if not (cb in seen or seen.add(cb))]
         for cb in cbs:
             if self._log_callbacks and self.log.isEnabledFor(logging.INFO):
                 self.log.info("VRChat %s -> %s(%s)", address, self._cb_name(cb), self._short(value))

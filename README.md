@@ -55,6 +55,7 @@ A **router** decides which mapping is active at any moment.
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
 - **Wardrobe** — changes your worn avatar from a button on your own expression menu. Needs the [`osc-wardrobe`](#wardrobe) prefab on the avatar and a manifest listing the avatars each button means; it is opt-in, so register it from your own router. VRChat only accepts avatars in your favorites, recents, uploads or purchases.
+- **Parameter logger** — records whitelisted avatar parameters (names or globs) to a timestamped CSV as they change; runs standalone as `vrbridge-paramlog --params "MyThing/*" [--file out.csv]`. The whitelist is required — full traffic is too noisy to log raw. For two VRChat clients on one PC (each launched with `--osc=inPort:ip:outPort`), run one logger per client with `--osc-port`/`--osc-bind-port` naming that client's ports and `--no-advertise` so the other client's discovery does not also land here.
 - **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
 ## Extending vrc-bridge
