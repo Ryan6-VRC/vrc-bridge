@@ -34,6 +34,7 @@ dev = ["pytest>=8", "vrc-bridge[remy]"]
 
 [project.scripts]
 vrbridge = "vrbridge.cli:main"
+vrbridge-paramlog = "vrbridge.paramlog:main"
 
 [project.urls]
 Homepage = "https://github.com/Ryan6-VRC/vrc-bridge"

@@ -90,6 +90,20 @@ Two claims about that reference are wrong in the *other* direction and should no
 
 `watch()` does not reach the served tree either, whatever address it is given — the tree is a hardcoded two-node constant, and nothing turns on the difference for the same one-consumer reason.
 
+## The parameter logger
+
+`osc_paramlog` records whitelisted parameter changes to a timestamped CSV, runnable standalone as `vrbridge-paramlog`. It is a product feature — a recording instrument for anyone measuring an avatar over its own OSC surface — not the workspace's verification surface wearing a costume; the rulings that shape it:
+
+**The whitelist is required, and log-everything is not offerable.** Full OSC traffic is far too noisy to log raw, and an enumerate-everything default would be the parameter discovery §Settled decisions descopes. The pattern seam (`OSCManager.watch_pattern`, `VRBridge.on_osc_pattern`) admits *named shapes* of traffic by fnmatch and enumerates nothing — the descope holds.
+
+**Patterns are fnmatch, deliberately not python-osc's dispatcher grammar.** The seam lives in `_default_handler`, which every unmapped datagram already reaches; routing patterns through `dispatcher.map` instead would make the matching grammar whatever python-osc's OSC-pattern translation is, and this repo's contract is one grammar, ours.
+
+**The logged stream is the change-filtered stream, and that is a feature with a name.** One row per *transition*: a repeated identical value never lands (`_update_cache_and_fire` suppresses it), which also folds the doubled inbound delivery (§Inbound delivery semantics) into one row. A consumer needing every datagram — measuring the doubling itself, say — cannot use this tool, by design; the open measurement above keeps its own harness.
+
+**A measurement logger runs `--no-advertise`.** A pin governs the send side only (§Target selection), so an advertising logger still receives from whichever client discovers it — on a two-clients-one-PC run (each client launched `--osc=inPort:ip:outPort`, one logger per client on `--osc-port`/`--osc-bind-port`), that is the *other* client's parameters landing in the wrong log with nothing to say so.
+
+**`time.time()` to microseconds is the row key.** Both loggers of a two-client run share one machine clock, so cross-log joins need no clock reconciliation; sub-millisecond spacing fidelity was already measured on this wire (§The camera facts: pulse spacing tracked to half a millisecond).
+
 ## The warrant criterion
 
 The repo holds a few hundred externally-sourced facts, none derivable from first principles: the OSC addresses come from those products' documentation, the SteamVR action-manifest and binding JSON is a hardware contract discovered against SteamVR's binding UI, and the tuned constants are feel-tuned against real hardware under `runtime.md`'s 90% rule. Do not count them by hand: `tests/test_addresses.py` is the census and pins every address verbatim, and `tests/test_settings.py` pins every tuned default.

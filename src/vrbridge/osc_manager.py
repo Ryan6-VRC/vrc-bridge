@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import http.server
 import ipaddress
 import json
@@ -107,6 +108,10 @@ class OSCManager:
         self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
         self._cache: Dict[str, Any] = {}
         self._watched: Set[str] = set()
+        # fnmatch-style patterns admitted by _default_handler, which every datagram not
+        # explicitly mapped already reaches. This admits named shapes of traffic; it
+        # enumerates nothing, so the parameter-discovery descope (docs/design.md) holds.
+        self._watched_patterns: Set[str] = set()
         self._cache_lock = threading.Lock()
 
         # A target we were told to use rather than one we found. Held so
@@ -339,6 +344,17 @@ class OSCManager:
         self._disp.map(address, _handler)
         if self.log: self.log.debug("Watching OSC address %s", address)
 
+    def watch_pattern(self, pattern: str) -> None:
+        """Watch every address matching an fnmatch pattern (`*`, `?`, `[seq]`).
+
+        Same cache, change filter, and listener as watch(); the concrete arriving
+        address is what is cached and fired, never the pattern. Kept out of the
+        dispatcher: python-osc compiles mapped addresses through its own OSC-pattern
+        translation, and this repo's contract is fnmatch — one grammar, ours.
+        """
+        self._watched_patterns.add(pattern)
+        if self.log: self.log.debug("Watching OSC pattern %s", pattern)
+
     def get_cached(self, address: str, default=None):
         with self._cache_lock:
             return self._cache.get(address, default)
@@ -380,7 +396,8 @@ class OSCManager:
 
     # internals
     def _default_handler(self, addr, *args):
-        if addr in self._watched:
+        if addr in self._watched or any(
+                fnmatch.fnmatchcase(addr, p) for p in self._watched_patterns):
             val = args[0] if args else None
             self._update_cache_and_fire(addr, val)
         else:
