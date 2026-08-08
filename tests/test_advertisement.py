@@ -1,14 +1,13 @@
-"""The mDNS advertisement is pinned to the interface we actually serve on.
+"""The one mDNS instance is unpinned, for announcing and browsing alike.
 
-A bare Zeroconf() means InterfaceChoice.All: one announce socket per interface
-that comes up. Measured on a host with loopback, a Hyper-V switch, Ethernet and
-Tailscale up, that is 4 sockets carrying 4 copies of the same loopback-only
-address record -- and a client opening one UDP sender per announcement is the
-leading explanation for the doubled inbound in docs/design.md.
+Multicast does not traverse the loopback interface in either direction, so a
+Zeroconf pinned to 127.0.0.1 browses deaf AND announces into silence -- and the
+announce half is the dangerous one, because it fails without a symptom: sends
+keep landing while discovery-path inbound is simply absent. docs/design.md
+SecInbound delivery semantics holds the live-client measurements, including why
+the doubled inbound is no license to re-pin.
 
-Intent, not observation: we announce on exactly the interface we serve, because
-announcing a loopback address to the LAN advertises an endpoint no LAN peer can
-reach. Asserted on the constructor argument rather than on
+Asserted on the constructor argument rather than on
 len(zeroconf.engine.senders), because the socket count is 1 on a
 single-interface host either way -- a machine-shaped assertion would pass
 vacuously in CI and prove nothing about the code.
@@ -33,39 +32,36 @@ def _recording_zeroconf(monkeypatch):
     return seen
 
 
-def test_announcement_is_pinned_to_the_served_interface(monkeypatch):
+def test_the_mdns_instance_is_unpinned(monkeypatch):
+    """Intended: no interfaces= pin, ever -- a loopback-pinned announcement is one no
+    client hears, and it fails silent: outbound stays healthy while discovery-path
+    inbound is simply absent."""
     seen = _recording_zeroconf(monkeypatch)
 
     mgr = OSCManager(advertise=False, discover=False)  # no register_service: costs ~1.7s
     mgr.start()
     try:
-        assert seen == [[mgr.host]]
+        assert seen == ["<default: InterfaceChoice.All>"]
     finally:
         mgr.stop()
 
 
 @pytest.mark.real_mdns
-def test_the_browser_is_not_pinned_to_the_served_interface(monkeypatch):
-    """Intended: browsing gets its own Zeroconf, on all interfaces.
+def test_announce_and_browse_share_one_unpinned_instance(monkeypatch):
+    """Intended: one Zeroconf serves both halves. The old announce/browse split existed
+    only to keep the browser off the announcement's interface pin; with the pin gone a
+    second instance is only a second set of sockets.
 
-    A Zeroconf pinned to the loopback interface receives no multicast, so sharing the
-    announcement's instance made discovery impossible on any host. Measured with VRChat
-    running: pinned to 127.0.0.1 saw nothing over 30 s, while InterfaceChoice.All saw
-    VRChat-Client-<id>._oscjson._tcp, whose /?HOST_INFO then answered 200. That is what made
-    the client look like it had never advertised OSCQuery.
-
-    Asserted on the constructor arguments, so it stays honest on a single-interface CI host
-    where a socket count would pass vacuously. `Zeroconf` is patched out above, so despite the
-    real_mdns marker nothing here touches the network.
+    `Zeroconf` is patched out above, so despite the real_mdns marker nothing here
+    touches the network.
     """
     seen = _recording_zeroconf(monkeypatch)
 
     mgr = OSCManager(advertise=False, discover=True)
     mgr.start()
     try:
-        announce, browse = seen
-        assert announce == [mgr.host], "the announcement must stay pinned"
-        assert browse == "<default: InterfaceChoice.All>", "a pinned browser is a deaf browser"
+        assert seen == ["<default: InterfaceChoice.All>"]
+        assert mgr._browser is not None
     finally:
         mgr.stop()
 
@@ -77,7 +73,7 @@ def test_discovery_off_builds_no_browser(monkeypatch):
     mgr = OSCManager(advertise=False, discover=False)
     mgr.start()
     try:
-        assert len(seen) == 1, "discovery was off, so only the announcement instance is built"
+        assert len(seen) == 1
         assert mgr._browser is None
     finally:
         mgr.stop()
