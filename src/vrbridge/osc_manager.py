@@ -227,12 +227,11 @@ class OSCManager:
         # deaf, and a loopback-pinned *announcement* is one no client ever hears -- and
         # because browsing fails loud (no target, sends dropped) while an unheard
         # announcement fails silent (outbound healthy, inbound simply absent), a re-pin
-        # of the announce half is the error that survives daily use. docs/design.md
-        # SecInbound holds both live-client measurements, including why the doubled
-        # inbound is no reason to pin: the client opens exactly two senders per
-        # advertisement whether we announce on one interface or four. All's real cost is
-        # cosmetic -- one announce socket per interface, each carrying this loopback-only
-        # address record onto a LAN that cannot reach it.
+        # of the announce half is the error that survives daily use. Neither the doubled
+        # inbound nor the announce-socket count is a license to pin -- docs/design.md
+        # SecInbound delivery semantics holds the measurements. All's cost is cosmetic:
+        # one announce socket per interface, each carrying this loopback-only address
+        # record onto a LAN that cannot reach it.
         self._zeroconf = Zeroconf()
         if self._advertise:
             self._service_info = ServiceInfo(
