@@ -137,9 +137,6 @@ class OSCManager:
         # OSCQuery
         self._advertise = advertise
         self._zeroconf: Optional[Zeroconf] = None
-        # Separate from _zeroconf: announcing is pinned to the serve interface, browsing
-        # must not be. See the comment where the browser is built.
-        self._browse_zeroconf: Optional[Zeroconf] = None
         self._browser: Optional[ServiceBrowser] = None
         self._service_info: Optional[ServiceInfo] = None
         self._current_service_name: Optional[str] = None
@@ -224,17 +221,19 @@ class OSCManager:
         self._srv_thread.start()
         if self.log: self.log.info("OSC UDP server on %s:%d", self.host, self.osc_port)
 
-        # mDNS. Pin the announcement to the one interface we actually serve on.
-        #
-        # A bare Zeroconf() means InterfaceChoice.All, which opens one announce
-        # socket per interface that comes up -- measured 4 on a host with
-        # loopback, a Hyper-V switch, Ethernet and Tailscale up, and 1 when
-        # pinned. Every one of those announcements carries the same
-        # loopback-only address record, so the extra copies advertise an
-        # endpoint the receiving LAN cannot reach, and a client that opens a UDP
-        # sender per announcement then sends us each message once per interface.
-        # That is the leading explanation for the doubled inbound in docs/design.md.
-        self._zeroconf = Zeroconf(interfaces=[self.host])
+        # mDNS. One bare Zeroconf() -- InterfaceChoice.All -- announcing AND browsing,
+        # and neither half tolerates an interface pin. Multicast does not traverse the
+        # loopback interface in either direction: a Zeroconf pinned to 127.0.0.1 browses
+        # deaf, and a loopback-pinned *announcement* is one no client ever hears -- and
+        # because browsing fails loud (no target, sends dropped) while an unheard
+        # announcement fails silent (outbound healthy, inbound simply absent), a re-pin
+        # of the announce half is the error that survives daily use. docs/design.md
+        # SecInbound holds both live-client measurements, including why the doubled
+        # inbound is no reason to pin: the client opens exactly two senders per
+        # advertisement whether we announce on one interface or four. All's real cost is
+        # cosmetic -- one announce socket per interface, each carrying this loopback-only
+        # address record onto a LAN that cannot reach it.
+        self._zeroconf = Zeroconf()
         if self._advertise:
             self._service_info = ServiceInfo(
                 "_oscjson._tcp.local.",
@@ -246,22 +245,8 @@ class OSCManager:
             )
             self._zeroconf.register_service(self._service_info)
 
-        # The browser gets its OWN unpinned Zeroconf, and that is the whole point of the
-        # split. The pin above is about what we *announce*; a browser inherits nothing good
-        # from it, because a Zeroconf pinned to the loopback interface receives no multicast
-        # at all and therefore discovers nothing, ever.
-        #
-        # Measured, two arms over the same 30 s window with VRChat running: pinned to
-        # 127.0.0.1 saw nothing, while InterfaceChoice.All saw
-        # VRChat-Client-<id>._oscjson._tcp advertising 127.0.0.1:<port>, whose /?HOST_INFO
-        # then answered 200. Sharing the pinned instance is what made VRChat look like it
-        # never advertised OSCQuery; discovery could not have succeeded on any host.
-        #
-        # Announcing stays pinned, so the one-announce-socket-per-interface duplication that
-        # docs/design.md names as the leading explanation for the doubled inbound is unchanged.
         if self._discover:
-            self._browse_zeroconf = Zeroconf()
-            self._browser = ServiceBrowser(self._browse_zeroconf, "_oscjson._tcp.local.",
+            self._browser = ServiceBrowser(self._zeroconf, "_oscjson._tcp.local.",
                                            self._BrowserListener(self))
         if self.log:
             self.log.info("mDNS service %s; %s",
@@ -281,15 +266,6 @@ class OSCManager:
                 except Exception as e:
                     if self.log: self.log.debug("zeroconf.close failed: %s", e)
             self._zeroconf = None
-            # The browse instance owns its own sockets and dispatch thread, so it has to be
-            # closed too or stop() leaks both. Closed after the announce instance so an
-            # unregister failure above cannot skip it.
-            if self._browse_zeroconf:
-                try:
-                    self._browse_zeroconf.close()
-                except Exception as e:
-                    if self.log: self.log.debug("browse zeroconf.close failed: %s", e)
-            self._browse_zeroconf = None
         if self._httpd:
             try:
                 self._httpd.shutdown()
