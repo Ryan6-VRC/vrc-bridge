@@ -25,6 +25,14 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 _SERVE_POLL_SECS = 0.05
 
 
+#: The scores _service_rank hands out. Named because the VRChat score is no longer only an
+#: input to target selection: fetch() reports it out as PeerIdentity.is_vrchat, so
+#: `_current_rank == _RANK_VRCHAT` has to read as an identity test rather than arithmetic.
+_RANK_SELF = 0
+_RANK_OTHER = 1
+_RANK_VRCHAT = 3
+
+
 #: Why every fetch() outcome is named rather than collapsed to None: the caller has to
 #: act differently on each. A 404 means the worn avatar does not declare the node, which
 #: is a normal state and not an error; a transport failure means we learned nothing and
@@ -40,11 +48,42 @@ FETCH_MALFORMED = "malformed"    # answered 200, but not a JSON node carrying VA
 
 
 @dataclass(frozen=True)
+class PeerIdentity:
+    """Which peer answered a fetch, by the mDNS service that holds the target slot.
+
+    Exists because a 404 is ambiguous without it. `FETCH_NOT_FOUND` from VRChat says the
+    worn avatar does not declare the node; the same 404 from any other OSCQuery app says
+    only that we asked a tree with no avatar parameters in it. A caller that phrases a
+    message about the avatar needs to know which of those it is holding.
+
+    `is_vrchat` is what the advertisement *claims*, not what the peer is. It comes from the
+    rank the service scored, and `_service_rank` reads the instance name **and the mDNS
+    server string** -- so a service whose own name says nothing, advertised from a host
+    called VRChat-Client, reads as VRChat here. Whoever registers a service chooses both.
+    A browse offers no better signal, so anything written from this says what the peer
+    identifies itself as, never what it is.
+
+    Do not re-derive `is_vrchat` from `name` alone. The rank is stored rather than
+    recomputed precisely because the server string is not retained, and a fresh derivation
+    would disagree with the selection that actually happened.
+    """
+    name: str
+    is_vrchat: bool
+
+
+@dataclass(frozen=True)
 class FetchResult:
-    """One OSCQuery single-node read. `reason` is one of the FETCH_* constants above."""
+    """One OSCQuery single-node read. `reason` is one of the FETCH_* constants above.
+
+    `peer` names the target whose endpoint was queried -- not necessarily one that answered,
+    since a refusal or a timeout reports FETCH_TRANSPORT against a peer that said nothing.
+    It is None only where there was no target to ask: a pin, discovery that has not
+    resolved, and a peer that withdrew.
+    """
     reason: str
     value: Any = None
     detail: str = ""
+    peer: Optional[PeerIdentity] = None
 
     @property
     def ok(self) -> bool:
@@ -441,20 +480,22 @@ class OSCManager:
                     self.outer._peer_lost = True
                     self.outer._current_service_name = None
                     # Kept consistent with the fields it describes rather than
-                    # load-bearing: _consider_service reads the rank only while a
-                    # client exists, so a stale value here is currently unreachable.
+                    # load-bearing. Two readers now: _consider_service reads the rank only
+                    # while a client exists, and fetch() reads it only while _peer_http is
+                    # set -- which this same block clears. A stale value is unreachable
+                    # from either, so keep the census current if a third reader appears.
                     self.outer._current_rank = -1
                     if self.outer.log: self.outer.log.warning("Target %s removed; awaiting replacement...", name)
 
     def _service_rank(self, name: str, server: str | None) -> int:
         s = (name or "") + " " + (server or "")
         if self._service_info and name == self._service_info.name:
-            return 0  # ourselves -> never target
+            return _RANK_SELF  # ourselves -> never target
         if "VRChat-Client" in s or "VRChat Client" in s or "VRChat" in s:
-            return 3  # the one we want
+            return _RANK_VRCHAT  # the one we want
         if "VRCFT" in s or "FaceTracking" in s:
-            return 1  # not what we want for /input/*
-        return 1       # generic other OSC apps
+            return _RANK_OTHER  # not what we want for /input/*
+        return _RANK_OTHER      # generic other OSC apps
 
     def _consider_service(self, name, info):
         # A pinned target is an instruction, not a bid. Ranking exists to choose among
@@ -522,7 +563,15 @@ class OSCManager:
             self._peer_lost = False
             self._current_service_name = name
             self._current_rank = rank
-        if self.log: self.log.info("VRChat target set to %s:%d (via %s)", host, osc_port, name)
+        if self.log:
+            # Says "OSC", not "VRChat": ranking fills an empty slot with the best peer on
+            # offer, and until a VRChat client is discovered that is whatever else advertises
+            # -- VRCFaceTracking and VRCOSC both do. Asserting VRChat here made the one log
+            # line that could explain a stranger holding the slot claim the opposite.
+            self.log.info("OSC target set to %s:%d (via %s)%s", host, osc_port, name,
+                          "" if rank == _RANK_VRCHAT else
+                          "; this peer does not identify itself as VRChat, so sends and "
+                          "OSCQuery reads go to it until a VRChat client is discovered")
         # Outside the lock deliberately: a listener that reaches back into OSCManager --
         # fetch() takes the same lock to read _peer_http -- would deadlock on a
         # non-reentrant Lock. The early-return above means this fires only on a real
@@ -591,9 +640,26 @@ class OSCManager:
         for one blocking query per record refresh.
         """
         with self._client_lock:
-            peer = self._peer_http
+            # `endpoint`, not `peer`: this is where to ask. Who is answering is `identity`,
+            # and both appear below.
+            endpoint = self._peer_http
             lost = self._peer_lost
-        if peer is None:
+            # Read here, with the endpoint, and carried on the result rather than offered as
+            # a property to ask afterwards. The lock is dropped for the whole GET below, and
+            # a rank-3 VRChat displacing a rank-1 stranger mid-read is exactly the transient
+            # this identity exists to describe -- so a caller asking after the fact could be
+            # told about a peer that did not answer it.
+            identity = (PeerIdentity(self._current_service_name,
+                                     self._current_rank == _RANK_VRCHAT)
+                        if endpoint is not None and self._current_service_name is not None
+                        else None)
+
+        if endpoint is None:
+            # These three name nobody, and `identity` is None here by construction: there is
+            # no endpoint to have asked. They build a FetchResult directly, which is why
+            # `_result` is defined below them rather than above -- its promise is about the
+            # returns that follow it, and a helper whose scope overshot its docstring would
+            # be the same trap it exists to close.
             if self.target_is_pinned:
                 return FetchResult(
                     FETCH_NO_PEER,
@@ -609,10 +675,19 @@ class OSCManager:
             return FetchResult(FETCH_NO_PEER,
                                detail="no OSCQuery peer has been discovered yet")
 
+        def _result(reason, **kw) -> FetchResult:
+            """Every outcome from here on names the target it queried, without each site
+            remembering to.
+
+            A branch added later that forgot `peer=` would silently restore the defect this
+            field was added to fix, and no test would go red.
+            """
+            return FetchResult(reason, peer=identity, **kw)
+
         import urllib.error
         import urllib.parse
         import urllib.request
-        host, http_port = peer
+        host, http_port = endpoint
         # Bracket an IPv6 literal, as _host_info does; a bare colon parses as a port.
         base = f"http://[{host}]:{http_port}" if ":" in host else f"http://{host}:{http_port}"
         # Percent-encode the address. Unencoded, a `#` in a parameter name is stripped as a
@@ -628,17 +703,17 @@ class OSCManager:
             # HTTPError subclasses URLError, so it has to be caught first or a 404 would
             # read as a transport failure and the caller would retry a settled answer.
             if e.code == 404:
-                return FetchResult(FETCH_NOT_FOUND, detail=f"{url} -> 404")
-            return FetchResult(FETCH_TRANSPORT, detail=f"{url} -> HTTP {e.code}")
+                return _result(FETCH_NOT_FOUND, detail=f"{url} -> 404")
+            return _result(FETCH_TRANSPORT, detail=f"{url} -> HTTP {e.code}")
         except Exception as e:
-            return FetchResult(FETCH_TRANSPORT, detail=f"{url} -> {type(e).__name__}: {e}")
+            return _result(FETCH_TRANSPORT, detail=f"{url} -> {type(e).__name__}: {e}")
 
         try:
             node = json.loads(body)
         except Exception as e:
-            return FetchResult(FETCH_MALFORMED, detail=f"{url} -> not JSON: {e}")
+            return _result(FETCH_MALFORMED, detail=f"{url} -> not JSON: {e}")
         if not isinstance(node, dict) or "VALUE" not in node:
-            return FetchResult(FETCH_MALFORMED, detail=f"{url} -> no VALUE attribute")
+            return _result(FETCH_MALFORMED, detail=f"{url} -> no VALUE attribute")
         value = node["VALUE"]
         # OSCQuery types VALUE as an array -- one entry per type tag -- and VRChat's
         # parameter nodes carry exactly one. Unwrap a single-element list so callers
@@ -646,7 +721,7 @@ class OSCManager:
         # a multi-tag node is not a parameter and the caller should see that it isn't.
         if isinstance(value, list) and len(value) == 1:
             value = value[0]
-        return FetchResult(FETCH_OK, value=value)
+        return _result(FETCH_OK, value=value)
 
     @staticmethod
     def _host_info(host: str, http_port: int):
