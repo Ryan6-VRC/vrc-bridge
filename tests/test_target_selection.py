@@ -281,3 +281,69 @@ def test_discovery_still_observes_while_pinned():
 
         assert mgr.is_service_running("VRCFT")
         assert mgr._client_target == ("127.0.0.1", peer.osc_port)
+
+
+# --------------------------------------------------------------------------
+# Who answered the read
+# --------------------------------------------------------------------------
+# A fetch's 404 is ambiguous without this: from VRChat it says the worn avatar declares
+# no such node, from anything else it says only that we asked a tree with no avatar
+# parameters in it. The identity rides on the result rather than being offered as a
+# property to ask afterwards, because fetch() drops the lock for the whole GET and the
+# rank-3-displaces-rank-1 transient below is exactly when a later question gets a
+# different answer than the read did.
+
+def test_a_fetch_names_the_service_that_answered_it():
+    """Intended: a caller can attribute the answer, and a VRChat-named service reads as
+    VRChat so today's avatar-facing 404 message keeps firing where it is right."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        vrc.set_node("/avatar/parameters/OscWardrobe/Manifest", 7)
+
+        result = mgr.fetch("/avatar/parameters/OscWardrobe/Manifest")
+        assert result.ok
+        assert result.peer is not None, "a read that reached a peer named nobody"
+        assert result.peer.name == VRCHAT
+        assert result.peer.is_vrchat
+
+
+def test_a_fetch_from_a_stranger_is_marked_as_not_vrchat():
+    """Intended: the 404 a stranger returns must be attributable to the stranger.
+
+    VRCFaceTracking and VRCOSC both advertise `_oscjson._tcp` and both serve OSC_PORT in
+    their HOST_INFO, so either satisfies `_consider_service` and takes an empty slot until
+    a VRChat client is discovered. Neither serves avatar parameters.
+    """
+    with FakeVRChat() as vrcft:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(VRCFT, service(VRCFT, vrcft.http_port))
+
+        result = mgr.fetch("/avatar/parameters/OscWardrobe/Manifest")
+        assert result.reason == "not-found"
+        assert result.peer is not None
+        assert result.peer.name == VRCFT
+        assert not result.peer.is_vrchat, \
+            "a peer that never claimed to be VRChat was reported as VRChat"
+
+
+def test_a_stopped_manager_names_nobody_though_it_remembers_the_service():
+    """Intended: identity follows the readable endpoint, not the leftover service name.
+
+    The only state where a service name outlives the peer: `stop()` drops `_peer_http` and
+    deliberately leaves `_current_service_name` standing, so this is the one case that
+    exercises the endpoint half of the guard -- a cold, pinned or withdrawn manager has
+    both cleared and would pass whatever the guard said.
+    """
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        mgr.start()
+        try:
+            mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+            assert mgr.fetch("/avatar/parameters/OscWardrobe/Manifest").peer is not None
+        finally:
+            mgr.stop()
+
+        assert mgr._current_service_name == VRCHAT, \
+            "stop() began clearing the service name, so this no longer tests the guard"
+        assert mgr.fetch("/avatar/parameters/OscWardrobe/Manifest").peer is None

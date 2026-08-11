@@ -131,12 +131,23 @@ def test_a_missing_manifest_directory_is_empty_not_an_error(tmp_path):
 # fetch: the OSCQuery single-node read
 # --------------------------------------------------------------------------
 
-def peer(mgr: OSCManager, vrc: FakeVRChat) -> None:
-    """Point a manager at a fake's OSC and HTTP endpoints without going through mDNS."""
+def peer(mgr: OSCManager, vrc: FakeVRChat,
+         name: str = "VRChat-Client-1._oscjson._tcp.local.") -> None:
+    """Point a manager at a fake's OSC and HTTP endpoints without going through mDNS.
+
+    Sets the identity fields too, and scores the rank through the real `_service_rank`
+    rather than assigning a number. Without them `fetch()` reports `peer=None`, and a test
+    asserting that a 404 from VRChat still blames the *avatar* would pass because nobody
+    was identified -- staying green with `is_vrchat` inverted, which is the half of that
+    branch a wrong answer is invisible in. Hand-assigning the rank would be little better:
+    it asserts an identity `_consider_service` may never build.
+    """
     from pythonosc import udp_client
     mgr._client = udp_client.SimpleUDPClient("127.0.0.1", vrc.osc_port)
     mgr._client_target = ("127.0.0.1", vrc.osc_port)
     mgr._peer_http = ("127.0.0.1", vrc.http_port)
+    mgr._current_service_name = name
+    mgr._current_rank = mgr._service_rank(name, None)
 
 
 def test_fetch_reads_a_node_value_and_unwraps_the_array(tmp_path):
@@ -1001,3 +1012,75 @@ def test_the_tested_module_is_this_checkout():
     import vrbridge.wardrobe as w
     print(f"\nvrbridge.wardrobe resolved to: {w.__file__}")
     assert Path(w.__file__).is_file()
+
+
+STRANGER = "VRCFT-NHM5HG._oscjson._tcp.local."
+
+
+def test_a_404_from_a_peer_that_is_not_vrchat_does_not_blame_the_avatar(tmp_path, caplog):
+    """Intended: name the peer that actually answered, because the wearer cannot act on the
+    wrong offender.
+
+    Ranking fills an empty target slot with the best peer advertising, and VRCFaceTracking
+    and VRCOSC both advertise `_oscjson._tcp` with OSC_PORT in their HOST_INFO -- so either
+    holds the slot until a VRChat client is discovered, and neither serves avatar
+    parameters. Reporting that 404 as "the worn avatar declares no wardrobe marker" sends
+    the wearer to check a marker that is set correctly, and the absence assertion below is
+    what fails against code that does.
+    """
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path, marker=None)
+        peer(h.bridge.osc, vrc, name=STRANGER)
+        try:
+            with caplog.at_level("INFO"):
+                h.slot(1)
+            assert h.sent() == []
+            assert "declares no wardrobe marker" not in caplog.text, \
+                "a stranger's 404 was reported as a fact about the worn avatar"
+            assert STRANGER in caplog.text, "the peer that answered was not named"
+            assert "does not identify itself as VRChat" in caplog.text
+        finally:
+            h.close()
+
+
+def test_a_404_from_vrchat_still_blames_the_avatar(tmp_path, caplog):
+    """Intended: the avatar-facing message must survive, because it is the one a real
+    authoring mistake needs.
+
+    The `osc-wardrobe` entry documents the trap: an MA parameter set to "Not Synced" is
+    never registered, so the marker 404s over OSCQuery forever and this line is what tells
+    the author. A live VRChat serving a genuine 404 must therefore still be read as a fact
+    about the avatar -- which is why the fixture scores its rank through `_service_rank`
+    rather than leaving the peer unidentified, where this would pass for the wrong reason.
+    """
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path, marker=None)
+        try:
+            with caplog.at_level("INFO"):
+                h.slot(1)
+            assert h.sent() == []
+            assert "declares no wardrobe marker" in caplog.text
+            assert "does not identify itself as VRChat" not in caplog.text
+        finally:
+            h.close()
+
+
+def test_the_avatar_message_survives_an_earlier_foreign_peer_report(tmp_path, caplog):
+    """Intended: the once-only report must not let a stranger's press swallow the real
+    answer once VRChat takes the target -- the two states are different findings, and the
+    second is the one the wearer can act on."""
+    with FakeVRChat() as vrc:
+        h = rig(vrc, tmp_path, marker=None)
+        peer(h.bridge.osc, vrc, name=STRANGER)
+        try:
+            with caplog.at_level("INFO"):
+                h.slot(1)
+            assert "declares no wardrobe marker" not in caplog.text
+
+            peer(h.bridge.osc, vrc)  # a VRChat client takes the slot
+            with caplog.at_level("INFO"):
+                h.slot(3)
+            assert "declares no wardrobe marker" in caplog.text, \
+                "the foreign-peer report suppressed the avatar's own answer"
+        finally:
+            h.close()

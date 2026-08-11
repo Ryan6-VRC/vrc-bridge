@@ -331,6 +331,21 @@ class WardrobeMapping(Mapping):
             MARKER_ADDR, timeout=self.tuning.fetch_timeout_secs)
 
         if result.reason == FETCH_NOT_FOUND:
+            if result.peer is not None and not result.peer.is_vrchat:
+                # The 404 is about the peer, not the avatar. Ranking fills an empty target
+                # slot with the best peer advertising, so before a VRChat client is
+                # discovered that slot can hold VRCFaceTracking or VRCOSC -- both advertise
+                # themselves -- and their trees carry no avatar parameters at all. Blaming
+                # the worn avatar here sends the wearer to check a marker that is set
+                # correctly. The hedged wording is deliberate: PeerIdentity.is_vrchat is
+                # what the advertisement claims, so this says what the peer identifies
+                # itself as and never what it is.
+                self._report(("foreign-peer", result.peer.name), "warning",
+                             "%s was read from %s, which does not identify itself as "
+                             "VRChat, so its 404 says nothing about the worn avatar; press "
+                             "again once a VRChat client is discovered and takes the "
+                             "target.", MARKER_ADDR, result.peer.name)
+                return None
             # No marker on whatever is worn right now. Normal on any avatar without the
             # prefab, and normal *transiently* in the gap between avatars -- which is why it
             # only suppresses the log line and never suppresses the next read.
