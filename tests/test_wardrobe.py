@@ -451,7 +451,13 @@ class Harness:
 
     def __init__(self, vrc: FakeVRChat, manifests, tuning=FAST, **kw):
         self.vrc = vrc
-        self.bridge = VRBridge(enable_steamvr=False, advertise=False)
+        # `discover=False` for the reason design.md gives it: a live browse is running
+        # otherwise, and a real VRChat on this machine outranks the identity these tests
+        # hand-set -- `_consider_service` rewrites the name, the rank and the endpoint
+        # together, so a stranger test would silently become a VRChat test and assert the
+        # opposite of what it was written for. Timing has been keeping it green, not
+        # isolation.
+        self.bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
         self.bridge.osc.start()
         peer(self.bridge.osc, vrc)
         self.m = WardrobeMapping(self.bridge, manifests, tuning=tuning, **kw)

@@ -13,7 +13,7 @@ against what the code did would have frozen it.
 """
 from zeroconf import ServiceInfo
 
-from vrbridge.osc_manager import OSCManager
+from vrbridge.osc_manager import FETCH_NOT_FOUND, OSCManager
 
 from .fake_vrchat import FakeVRChat
 
@@ -320,7 +320,7 @@ def test_a_fetch_from_a_stranger_is_marked_as_not_vrchat():
         mgr._consider_service(VRCFT, service(VRCFT, vrcft.http_port))
 
         result = mgr.fetch("/avatar/parameters/OscWardrobe/Manifest")
-        assert result.reason == "not-found"
+        assert result.reason == FETCH_NOT_FOUND
         assert result.peer is not None
         assert result.peer.name == VRCFT
         assert not result.peer.is_vrchat, \

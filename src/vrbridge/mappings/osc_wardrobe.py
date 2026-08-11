@@ -339,12 +339,17 @@ class WardrobeMapping(Mapping):
                 # the worn avatar here sends the wearer to check a marker that is set
                 # correctly. The hedged wording is deliberate: PeerIdentity.is_vrchat is
                 # what the advertisement claims, so this says what the peer identifies
-                # itself as and never what it is.
+                # itself as and never what it is -- which is also why the remedy names the
+                # other way this can read: an unrecognised real client scores as a stranger
+                # too, and "wait for discovery" is useless advice to someone already running
+                # one.
                 self._report(("foreign-peer", result.peer.name), "warning",
                              "%s was read from %s, which does not identify itself as "
                              "VRChat, so its 404 says nothing about the worn avatar; press "
                              "again once a VRChat client is discovered and takes the "
-                             "target.", MARKER_ADDR, result.peer.name)
+                             "target. If one is already running, its service is not being "
+                             "recognised -- docs/design.md, Target selection.",
+                             MARKER_ADDR, result.peer.name)
                 return None
             # No marker on whatever is worn right now. Normal on any avatar without the
             # prefab, and normal *transiently* in the gap between avatars -- which is why it

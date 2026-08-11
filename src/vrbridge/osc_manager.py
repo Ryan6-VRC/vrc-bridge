@@ -75,8 +75,10 @@ class PeerIdentity:
 class FetchResult:
     """One OSCQuery single-node read. `reason` is one of the FETCH_* constants above.
 
-    `peer` names who answered, and is None for the reasons where nobody did -- a pinned
-    target, discovery that has not resolved, and a peer that withdrew.
+    `peer` names the target whose endpoint was queried -- not necessarily one that answered,
+    since a refusal or a timeout reports FETCH_TRANSPORT against a peer that said nothing.
+    It is None only where there was no target to ask: a pin, discovery that has not
+    resolved, and a peer that withdrew.
     """
     reason: str
     value: Any = None
@@ -652,15 +654,12 @@ class OSCManager:
                         if endpoint is not None and self._current_service_name is not None
                         else None)
 
-        def _result(reason, **kw) -> FetchResult:
-            """Every outcome from here on names its peer, without each site remembering to.
-
-            A branch added later that forgot `peer=` would silently restore the defect this
-            field was added to fix, and no test would go red.
-            """
-            return FetchResult(reason, peer=identity, **kw)
-
         if endpoint is None:
+            # These three name nobody, and `identity` is None here by construction: there is
+            # no endpoint to have asked. They build a FetchResult directly, which is why
+            # `_result` is defined below them rather than above -- its promise is about the
+            # returns that follow it, and a helper whose scope overshot its docstring would
+            # be the same trap it exists to close.
             if self.target_is_pinned:
                 return FetchResult(
                     FETCH_NO_PEER,
@@ -675,6 +674,15 @@ class OSCManager:
                     detail="the OSCQuery peer we were reading from withdrew its service")
             return FetchResult(FETCH_NO_PEER,
                                detail="no OSCQuery peer has been discovered yet")
+
+        def _result(reason, **kw) -> FetchResult:
+            """Every outcome from here on names the target it queried, without each site
+            remembering to.
+
+            A branch added later that forgot `peer=` would silently restore the defect this
+            field was added to fix, and no test would go red.
+            """
+            return FetchResult(reason, peer=identity, **kw)
 
         import urllib.error
         import urllib.parse
