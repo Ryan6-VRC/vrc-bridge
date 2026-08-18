@@ -162,6 +162,22 @@ def test_wardrobe_settings_carry_no_timing_schedule():
         WardrobeSettings(fetch_timeout_secs=0.0).validate("wardrobe")
 
 
+def test_quantchannel_settings_carry_a_location_and_a_timeout_only():
+    """Intended: the wardrobe's shape, for the wardrobe's reason -- the directory reads on
+    use rather than on a schedule, so there is no settling window to size and no timing
+    knob to grow. The manifest *tables* are quant_manifest's generated files, not tuning;
+    the re-arm floor is a source constant (osc_quant.REARM_FLOOR_SECS), because it prices
+    a controller-rate consumer against an HTTP server, which is a contract, not feel."""
+    from vrbridge.settings import QuantChannelSettings
+    q = Settings().quantchannel
+    assert q.manifest_dir == ""
+    assert q.fetch_timeout_secs == 2.0
+    assert q.resolved_manifest_dir().name == "manifests"
+
+    with pytest.raises(ConfigError):
+        QuantChannelSettings(fetch_timeout_secs=0.0).validate("quantchannel")
+
+
 def test_exposure_ladder_keeps_its_top_rung():
     """int(span / (1/3)) can land one under. Counting in whole steps cannot.
 
@@ -183,3 +199,14 @@ def test_log_unlerp_spans_its_endpoints():
     assert log_unlerp(20.0, 20.0, 150.0) == 0.0
     assert log_unlerp(150.0, 20.0, 150.0) == 1.0
     assert log_unlerp(1000.0, 20.0, 150.0) == 1.0  # clamps rather than extrapolating
+
+
+def test_puppet_quant_level_is_bounded_by_the_codec():
+    """Intended: the codec caps bits at 8 (QuantChannel raises ValueError past it), so an
+    out-of-range quant_level must die here as a ConfigError naming the key, not as a
+    traceback inside IndexPuppetMapping's constructor."""
+    from vrbridge.settings import PuppetSettings
+    with pytest.raises(ConfigError, match="quant_level"):
+        PuppetSettings(quant_level=9).validate("puppet")
+    PuppetSettings(quant_level=0).validate("puppet")
+    PuppetSettings(quant_level=8).validate("puppet")

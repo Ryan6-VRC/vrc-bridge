@@ -3,19 +3,24 @@ Index Puppet — two-axis puppet via Index touchpads (VRBridge).
 
 Uses absolute touchpad position (evt.ax, evt.ay) provided by VRBridge
 for TOUCHPAD_SCROLL_RAW samples, so the finger can start anywhere on the pad
-and still register as off-center. On TOUCHPAD_LIFT, values ease back to (0, 0).
+and still register as off-center. On TOUCHPAD_LIFT, one zero sample runs through
+the live filter — the eased hand-off the remote smoother continues from.
 
-Supports OSCmooth-style boolean quantization alongside the original
-float parameters.
+The codec and the smoothed-float/raw-bits split live in `vrbridge.quant_channel`,
+of which this mapping is the first consumer; each axis address holds its own
+`QuantChannel` so `single_touch_mode: "together"` mirrors one raw value into two
+independent filters.
 """
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal
 
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.quant_channel import ChannelSpec, QuantChannel
+from vrbridge.quant_channel import derive_bool_addrs as _derive_bool_addrs
+from vrbridge.quant_channel import encode_unit as _quant_encode_unit
 from vrbridge.settings import PuppetSettings, settings
 from vrbridge import ControllerEventType, VRBridge
 
@@ -46,90 +51,20 @@ TOUCH_ACTIVE_ADDR = "/avatar/parameters/IndexPuppet/Enable"
 #                          Quantized booleans are always raw and immediate.
 
 # --------------------------- Quantization ---------------------------------
+# `_derive_bool_addrs` and `_quant_encode_unit` are `quant_channel`'s, imported
+# under the names this module always exported: `tests/test_addresses.py` reaches
+# the census through them, and the aliases keep one implementation under both.
 
-def _derive_bool_addrs(base_addr: str, n: int) -> dict:
-    """Given a float address like '/.../Left_X', return boolean addr mapping."""
-    if n <= 0:
-        return {'neg': None, 'bits': []}
-    root, name = base_addr.rsplit('/', 1)
-    root = root + '/'
-    return {
-        'neg': f"{root}{name}Negative",
-        'bits': [f"{root}{name}{1<<i}" for i in range(n)]
-    }
+AXIS_ADDRS = (LEFT_X_ADDR, LEFT_Y_ADDR, RIGHT_X_ADDR, RIGHT_Y_ADDR)
 
-def _quant_encode_unit(x: float, n: int) -> Tuple[bool, int]:
-    """Encode x in [-1,1] as (negative_flag, integer code k in [0, 2^n-1])."""
-    if n <= 0:
-        return (False, 0)
-    # Clamp to [-1,1]
-    if x < -1.0: x = -1.0
-    if x >  1.0: x =  1.0
-    D = (1 << n) - 1
-    k = int(round(abs(x) * D))
-    neg = (x < 0.0) and (k > 0)  # avoid a negative zero
-    return neg, k
 
 def quant_addr_map(n: int) -> dict:
     """Boolean address map for all four axes at quant level n."""
-    return {addr: _derive_bool_addrs(addr, n)
-            for addr in (LEFT_X_ADDR, LEFT_Y_ADDR, RIGHT_X_ADDR, RIGHT_Y_ADDR)}
+    return {addr: _derive_bool_addrs(addr, n) for addr in AXIS_ADDRS}
 
-def _send_axis_float(ctx, base_addr: str, value: float):
-    """Send only the float axis value."""
-    ctx.send(base_addr, value)
-
-def _send_axis_bits(ctx, base_addr: str, value: float, n: int, addr_map: dict):
-    """Send only quantized booleans derived from the provided raw value."""
-    if n <= 0:
-        return
-    addrs = addr_map.get(base_addr)
-    if not addrs or not addrs["bits"]:
-        return
-    neg, k = _quant_encode_unit(value, n)
-    ctx.send(addrs["neg"], 1 if neg else 0)
-    for i, addr in enumerate(addrs["bits"]):
-        ctx.send(addr, (k >> i) & 1)
 
 def _clamp_unit(v: float) -> float:
     return -1.0 if v < -1.0 else 1.0 if v > 1.0 else v
-
-
-@dataclass
-class AxisFilterState:
-    value: float = 0.0
-    last_ts: float = 0.0
-    initialized: bool = False
-
-
-class FloatAxisSmoother:
-    """Per-address first-order low-pass smoothing for float axis outputs."""
-
-    def __init__(self, tau_secs: float):
-        self.tau_secs = max(0.0, float(tau_secs))
-        self._state: Dict[str, AxisFilterState] = {}
-
-    def reset_axis(self, addr: str, value: float, now: float) -> float:
-        st = self._state.setdefault(addr, AxisFilterState())
-        st.value = _clamp_unit(value)
-        st.last_ts = now
-        st.initialized = True
-        return st.value
-
-    def filter(self, addr: str, target: float, now: float) -> float:
-        target = _clamp_unit(target)
-        if self.tau_secs <= 0.0:
-            return self.reset_axis(addr, target, now)
-
-        st = self._state.setdefault(addr, AxisFilterState())
-        if not st.initialized:
-            return self.reset_axis(addr, target, now)
-
-        dt = now - st.last_ts
-        alpha = 1.0 if dt <= 0.0 else (1.0 - math.exp(-dt / self.tau_secs))
-        st.value = _clamp_unit(st.value + (target - st.value) * alpha)
-        st.last_ts = now
-        return st.value
 
 # ----------------------------- Mapping ------------------------------------
 
@@ -143,11 +78,19 @@ class IndexPuppetMapping(Mapping):
     def __init__(self, bridge: VRBridge, tuning: PuppetSettings | None = None):
         super().__init__(bridge)
         self._tune = tuning if tuning is not None else settings().puppet
-        self._quant_addrs = quant_addr_map(self._tune.quant_level)
         self._state: Dict[Hand, HandState] = {"left": HandState(), "right": HandState()}
         self._last_contact_ts: float = 0.0
         self._touch_active: bool = False
-        self._float_smoother = FloatAxisSmoother(self._tune.float_smooth_tau_secs)
+        # One QuantChannel per address, built here from self._tune rather than at
+        # def time -- a def-time default would freeze the config's values at import
+        # (design.md's frozen-range failure). Per-address instances are what keep the
+        # "together" mirror's two filters independent.
+        self._channels: Dict[str, QuantChannel] = {
+            addr: QuantChannel(ChannelSpec(
+                name=addr.removeprefix("/avatar/parameters/"), address=addr,
+                bits=self._tune.quant_level, signed=True,
+                float_tau=self._tune.float_smooth_tau_secs))
+            for addr in AXIS_ADDRS}
 
     # -- helpers --
 
@@ -170,14 +113,9 @@ class IndexPuppetMapping(Mapping):
         return _clamp_unit(x), _clamp_unit(y)
 
     def _send_axis(self, ctx, base_addr: str, raw_value: float, now: float):
-        """
-        Send axis with split paths:
-        - booleans: raw/immediate
-        - float: always smoothed
-        """
-        _send_axis_bits(ctx, base_addr, raw_value, self._tune.quant_level, self._quant_addrs)
-        float_value = self._float_smoother.filter(base_addr, raw_value, now)
-        _send_axis_float(ctx, base_addr, float_value)
+        """Send one axis sample: raw/immediate booleans, smoothed float -- the
+        split QuantChannel.send owns."""
+        self._channels[base_addr].send(ctx.send, raw_value, now)
 
     def _send_for_hand(self, ctx, hand: Hand, x: float, y: float, now: float):
         """Send axis values honoring single_touch_mode."""
@@ -208,24 +146,27 @@ class IndexPuppetMapping(Mapping):
         self._send_for_hand(ctx, hand, 0.0, 0.0, now)
 
     def _reset_all(self, ctx):
-        """Reset internal state and send zero OSC values (e.g., on avatar change)."""
+        """Reset internal state and send exact zeros (e.g., on avatar change).
+
+        The zeros here are a hard reset -- each filter is re-seated at 0 before its
+        send, so what lands on the wire is 0.0 exactly. The previous behavior eased
+        the float toward 0 through live filter state, which left the incoming avatar
+        holding a nonzero remnant of the outgoing avatar's last gesture; an avatar
+        change is a discontinuity, not a motion to smooth. (A *lift* still eases:
+        that is the same hand on the same avatar returning to rest.)
+        """
         self.bridge.log.info("IndexPuppet: Resetting state due to avatar change.")
-        
+
         # Reset master enable
         self._touch_active = False
         ctx.send(TOUCH_ACTIVE_ADDR, 0)
-        
+
         # Reset hand states and zero outputs
         now = time.time()
-        for hand in ("left", "right"):
-            self._state[hand] = HandState() # Reset active flags
-            # We explicitly zero specific addresses to ensure no stale values remain
-            if hand == "left":
-                self._send_axis(ctx, LEFT_X_ADDR, 0.0, now)
-                self._send_axis(ctx, LEFT_Y_ADDR, 0.0, now)
-            else:
-                self._send_axis(ctx, RIGHT_X_ADDR, 0.0, now)
-                self._send_axis(ctx, RIGHT_Y_ADDR, 0.0, now)
+        self._state = {"left": HandState(), "right": HandState()}
+        for channel in self._channels.values():
+            channel.reset(0.0, now)
+            channel.send(ctx.send, 0.0, now)
 
     # -- controller handlers --
 

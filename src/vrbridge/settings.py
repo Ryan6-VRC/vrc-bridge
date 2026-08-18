@@ -92,7 +92,13 @@ class PuppetSettings:
     float_smooth_tau_secs: float = 0.12  # <= 0 disables float smoothing
 
     def validate(self, at: str) -> None:
-        _non_negative(self.quant_level, f"{at}.quant_level")
+        # Bounded by the codec, and enforced here so a bad value is a ConfigError naming
+        # the key -- unbounded, it would surface as QuantChannel's ValueError traceback
+        # inside IndexPuppetMapping's constructor instead.
+        from vrbridge.quant_channel import MAX_BITS
+        if not 0 <= self.quant_level <= MAX_BITS:
+            raise ConfigError(f"{at}.quant_level is {self.quant_level!r}; expected "
+                              f"0-{MAX_BITS} (0 = float only)")
         _non_negative(self.touch_active_idle_secs, f"{at}.touch_active_idle_secs")
         _one_of(self.single_touch_mode, ("together", "separate"), f"{at}.single_touch_mode")
         _one_of(self.invert_x, (-1, 1), f"{at}.invert_x")
@@ -252,6 +258,26 @@ class WardrobeSettings:
 
 
 @dataclass(frozen=True)
+class QuantChannelSettings:
+    """Where quant-channel manifests live, and how long one sentinel read may block.
+
+    The manifest tables themselves are `quant_manifest`'s -- generated files, not tuning --
+    and the id ranges are that module's docstring's. Named apart from the wardrobe's
+    `manifest_dir` on purpose: `wardrobe/` also holds manifests, and the two kinds share
+    neither a directory nor a schema."""
+    manifest_dir: str = ""               # empty -> app_base_dir()/manifests
+    fetch_timeout_secs: float = 2.0
+
+    def validate(self, at: str) -> None:
+        _positive(self.fetch_timeout_secs, f"{at}.fetch_timeout_secs")
+
+    def resolved_manifest_dir(self) -> Path:
+        if self.manifest_dir:
+            return Path(self.manifest_dir).expanduser()
+        return app_base_dir() / "manifests"
+
+
+@dataclass(frozen=True)
 class RemySettings:
     base_url: str = "http://127.0.0.1:8000"
     http_timeout_sec: float = 1.0
@@ -285,6 +311,7 @@ class Settings:
     muteproxy: MuteProxySettings = MuteProxySettings()
     vrcft: VRCFTSettings = VRCFTSettings()
     wardrobe: WardrobeSettings = WardrobeSettings()
+    quantchannel: QuantChannelSettings = QuantChannelSettings()
     remy: RemySettings = RemySettings()
 
     def validate(self) -> None:

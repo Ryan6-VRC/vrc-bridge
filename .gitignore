@@ -7,6 +7,11 @@ vrbridge.toml
 # Wardrobe manifests: they hold your own avatar ids (see wardrobe.example.toml)
 wardrobe/
 
+# Quant-channel manifests: installed copies of files the quant-channel generator
+# emits (in a source checkout app_base_dir() is the repo root, so the default
+# [quantchannel] manifest_dir lands here)
+manifests/
+
 # Python cache / build
 __pycache__/
 *.py[cod]

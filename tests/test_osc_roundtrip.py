@@ -156,16 +156,19 @@ def test_a_mappings_sends_land_at_the_addresses_it_declares(wired):
     mgr, vrc = wired
     ctx = CallbackContext(osc=mgr)
 
-    from vrbridge.mappings.index_puppet import (LEFT_X_ADDR, _send_axis_bits,
-                                                quant_addr_map)
-    _send_axis_bits(ctx, LEFT_X_ADDR, -1.0, 3, quant_addr_map(3))
+    from vrbridge.mappings.index_puppet import LEFT_X_ADDR
+    from vrbridge.quant_channel import ChannelSpec, QuantChannel
+    ch = QuantChannel(ChannelSpec(name="IndexPuppet/Left_X", address=LEFT_X_ADDR,
+                                  bits=3, signed=True, float_tau=0.0))
+    ch.send(ctx.send, -1.0, now=0.0)
 
-    assert vrc.wait_for_count(4), f"expected sign + 3 bits, got {vrc.messages}"
+    assert vrc.wait_for_count(5), f"expected sign + 3 bits + float, got {vrc.messages}"
     got = dict(vrc.messages)
     assert got["/avatar/parameters/IndexPuppet/Left_XNegative"] == 1
     assert got["/avatar/parameters/IndexPuppet/Left_X1"] == 1
     assert got["/avatar/parameters/IndexPuppet/Left_X2"] == 1
     assert got["/avatar/parameters/IndexPuppet/Left_X4"] == 1   # -1.0 -> code 7
+    assert got["/avatar/parameters/IndexPuppet/Left_X"] == pytest.approx(-1.0)
 
 
 def test_inbound_osc_updates_a_watched_mirror(wired):

@@ -139,6 +139,49 @@ wardrobe = WardrobeMapping.load_from_settings(bridge, pinned_manifest_id=1)
 
 `vrbridge.wardrobe` is the manifest loader if you would rather build the table in code: `load_manifest(path)`, `load_manifests(paths)` and `discover_manifests(dir)` all return validated `Manifest` objects and raise `ConfigError` naming the offending key and file.
 
+## Quant channels
+
+Send a continuous value to an avatar two ways at once: a full-precision float for the wearer's own client, plus OSCmooth-shaped quantized booleans (`<Name>1/2/4…` + `<Name>Negative`) that are the only part remote players see. The avatar-side decode/smoothing layers come from the `quant-channel` entry in [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns); this repo owns the sender half: the codec (`vrbridge.quant_channel`), the manifest loader (`vrbridge.quant_manifest`), and the directory mapping that learns which manifest describes the worn avatar (`vrbridge.mappings.QuantChannelDirectory`). `index_puppet` is the shipped consumer.
+
+**The manifest is the extension surface.** The generator emits one JSON manifest per avatar module; install it into `manifests/` next to your `vrbridge.toml` (or point `[quantchannel] manifest_dir` elsewhere). One file per module:
+
+```json
+{
+  "schema": 1, "id": 1, "revision": 1,
+  "channels": [
+    {"name": "QDemo/LX", "address": "/avatar/parameters/QDemo/LX",
+     "bits": 3, "signed": true, "floatTau": 0.12,
+     "declaredWidths": {"bools": 4}}
+  ],
+  "gates": [{"name": "QDemo/Enable", "address": "/avatar/parameters/QDemo/Enable"}]
+}
+```
+
+- `id` is identity and `revision` is content: a manifest keeps its id when its channels change, and `revision` bumps on any channel change so a stale installed copy is at least visible in the log line the directory prints when it arms. Valid ids are **1 and up — there is no 255 ceiling here** (this sentinel is emitted straight into the avatar's parameter asset, and ids above 255 are live-validated). The range convention: **1–999 belong to vrc-patterns entries, 1000+ to third parties**; the quant-channel entry README's registry table is the ledger.
+- `address` is a checked echo of `name` (`/avatar/parameters/` + name): kept so your consumer never derives it, verified so it can never drift into a second source of truth.
+- `bits: 0` declares a float-only channel (the float itself is synced); `signed` is illegal there. `floatTau` is the sender-side smoothing time constant for the float companion — bits are always raw and immediate.
+- The loader refuses unknown keys, unknown `schema` values, and duplicate ids across the loaded set, always naming the offending key and file.
+
+**Which manifest applies is the avatar's own statement**: the entry declares an unsynced Int `QuantChannel/Manifest` whose *default value* is the manifest id, and the directory reads it over OSCQuery. Like the wardrobe, it never reads on the avatar change itself — a cold avatar download runs 30–60 s while the client acknowledges the change immediately, so the directory clears on the change and re-reads when a consumer next asks, retrying at most every 2 s until the loaded avatar answers.
+
+The directory is opt-in — no shipped router registers it:
+
+```python
+from vrbridge import VRBridge
+from vrbridge.mappings import QuantChannelDirectory
+
+bridge = VRBridge()
+directory = QuantChannelDirectory.load_from_settings(bridge)
+directory.register()
+directory.activate()
+bridge.start()
+# a consumer asks:  table = directory.active_manifest()   # None until armed
+```
+
+**If you pin the send target** with `--osc-port` (the Av3Emulator advertises nothing and serves no tree), name the manifest instead: `QuantChannelDirectory.load_from_settings(bridge, pinned_manifest_id=1)`. There is deliberately no CLI flag for this — the mapping is only reachable from code that already holds the constructor.
+
+One guard worth knowing: a manifest that declares channels at `index_puppet`'s own addresses must agree with your `[puppet]` settings (`quant_level`, `float_smooth_tau_secs`), or the directory refuses to arm it and the log names both values. The manifest and the settings describe the same wire; when they diverge, one of them is stale.
+
 ## Interoperates with
 
 vrc-bridge speaks to these projects over OSC. None of their code is vendored here — the parameter names their mappings drive are each project's own contract, and their documentation is the authority on them.
