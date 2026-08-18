@@ -146,6 +146,16 @@ def test_wardrobe_addresses():
     assert wd.REST_SLOT == 0
 
 
+def test_quant_directory_addresses():
+    """The quant-channel sentinel is a contract with the `quant-channel` vrc-patterns
+    entry, whose generator emits the parameter -- the same class of cross-repo contract as
+    the wardrobe's marker, with the same failure mode: renamed here alone, every fetch
+    404s and the directory reports every avatar as having no channels."""
+    from vrbridge.mappings import osc_quant as qc
+    assert qc.MARKER_ADDR == "/avatar/parameters/QuantChannel/Manifest"
+    assert qc.AVATAR_CHANGE_ADDR == "/avatar/change"
+
+
 def test_router_selector_addresses():
     """The parameters the routers switch on. Two of these duplicate a mapping's
     own constant; the pin catches an edit that moves one copy and not the other."""

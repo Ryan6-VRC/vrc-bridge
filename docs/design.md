@@ -157,6 +157,20 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **A successful swap immediately un-arms the wardrobe, and that is correct.** Our own send is echoed, the echo is indistinguishable from any other avatar change, and the avatar really did change. Do not "fix" it by filtering our own id out of the echo: the same address carries a change made from VRChat's own menu, and telling them apart would mean trusting the id we sent, which the ruling above forbids.
 
+## The quant-channel directory: the rulings, not the mechanism
+
+`osc_quant` arms the manifest describing the worn avatar's quant channels; `quant_channel` is the codec and `quant_manifest` the loader. Only the decisions live here — the manifest schema and id-range convention are `quant_manifest`'s module docstring's, the wire contract and sentinel facts are the `quant-channel` entry README's, and how the mapping works is its own module docstring.
+
+**Read-on-use replaced fetch-on-change, and the cold avatar load is why.** The client acknowledges `/avatar/change` immediately while a cold download runs 30–60 s, so any fetch fired *on* the change either 404s mid-download (and a latch-on-change design stays dark until some future change) or reads the outgoing avatar's tree and arms the wrong manifest. The events therefore only invalidate; the read happens when a consumer next asks, floored at `REARM_FLOOR_SECS` — not a timer, so an untouched bridge fetches nothing. The wardrobe reads per press instead of latching because presses are rare and self-proving; a quant consumer asks at controller rate, which is why this one latches and the floor exists.
+
+**Every fetch runs on the one worker thread, and never inline in a handler.** The target-selected leg fires on zeroconf's single dispatch thread, which §Target selection prices at one blocking query for selection itself; the avatar-change leg fires on datagram dispatch, where a block is survivable but a latch taken there meets the cold-load problem above. An invalidation clears, bumps the sequence token, and wakes the worker — nothing more.
+
+**A completed fetch arms only if its token is still current.** Two avatar changes can be in flight across one slow fetch, and the older fetch's answer describes an avatar no longer worn. Same discipline as the wardrobe's press token, at avatar-change scale.
+
+**The puppet cross-check is what keeps the manifest authoritative rather than ceremonial.** A manifest declaring channels at `index_puppet`'s addresses must match the `[puppet]` settings that actually drive that wire (`quant_level`, `float_smooth_tau_secs`), or the arm is refused naming both values — otherwise the same numbers live in two homes that diverge silently.
+
+**No CLI flag names a manifest.** The CLI constructs routers with nothing else and no shipped router registers this mapping, so a flag would configure nothing reachable; `pinned_manifest_id=` on the constructor serves the embedder who actually holds the mapping, and an `<id-or-path>` flag grammar is ambiguous besides.
+
 ## Provenance
 
 `osc_leash` was a literal port of OSCLeash (MIT, © 2022 ZenithVal) carrying no notice. The evidence is the finding, so it is recorded rather than summarised: the same movement formula, the same `Y_Combined` up/down deadzone, the same divide-by-`Y_Modifier` compensation, the same three `/input/` outputs, and two of three tuning constants identical. Deleting it ends the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. Its replacement is a `vrc-patterns` entry rebuilding the leash on face-proximity box receivers rather than OSCLeash's six-sphere direction cage: `box-tracker` establishes the mechanism, and the open design question is how far below six contacts an axis-separable readout gets. Until that ships there is no leash in this repo.

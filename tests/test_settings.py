@@ -162,6 +162,22 @@ def test_wardrobe_settings_carry_no_timing_schedule():
         WardrobeSettings(fetch_timeout_secs=0.0).validate("wardrobe")
 
 
+def test_quantchannel_settings_carry_a_location_and_a_timeout_only():
+    """Intended: the wardrobe's shape, for the wardrobe's reason -- the directory reads on
+    use rather than on a schedule, so there is no settling window to size and no timing
+    knob to grow. The manifest *tables* are quant_manifest's generated files, not tuning;
+    the re-arm floor is a source constant (osc_quant.REARM_FLOOR_SECS), because it prices
+    a controller-rate consumer against an HTTP server, which is a contract, not feel."""
+    from vrbridge.settings import QuantChannelSettings
+    q = Settings().quantchannel
+    assert q.manifest_dir == ""
+    assert q.fetch_timeout_secs == 2.0
+    assert q.resolved_manifest_dir().name == "manifests"
+
+    with pytest.raises(ConfigError):
+        QuantChannelSettings(fetch_timeout_secs=0.0).validate("quantchannel")
+
+
 def test_exposure_ladder_keeps_its_top_rung():
     """int(span / (1/3)) can land one under. Counting in whole steps cannot.
 

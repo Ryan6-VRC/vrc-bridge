@@ -14,7 +14,7 @@ import math
 
 import pytest
 
-from vrbridge.mappings.index_puppet import (FloatAxisSmoother, _derive_bool_addrs,
+from vrbridge.mappings.index_puppet import (_derive_bool_addrs,
                                             _quant_encode_unit, quant_addr_map)
 from vrbridge.mappings.index_virtuallens import (aperture_f_to_x, aperture_ladder, ev_map_x,
                                                  exposure_ladder, zoom_ladder, zoom_mm_to_x)
@@ -92,44 +92,10 @@ def test_quant_addr_map_covers_all_four_axes():
         "/avatar/parameters/IndexPuppet/Right_X", "/avatar/parameters/IndexPuppet/Right_Y"}
 
 
-# ------------------------------ FloatAxisSmoother ----------------------------
-
-def test_float_smoother_first_sample_is_not_smoothed():
-    """Intended: with no prior state there is nothing to ease from, so the first
-    sample lands exactly. Easing from an implicit 0.0 would make every gesture
-    start with a phantom sweep from centre."""
-    s = FloatAxisSmoother(0.12)
-    assert s.filter("/a", 0.8, now=100.0) == 0.8
-
-
-def test_float_smoother_approaches_the_target_without_overshooting():
-    """Intended: a first-order low pass -- each step closes a fraction of the gap,
-    monotonically, never past the target."""
-    s = FloatAxisSmoother(0.12)
-    s.filter("/a", 0.0, now=0.0)
-    prev, t = 0.0, 0.0
-    for _ in range(50):
-        t += 0.02
-        v = s.filter("/a", 1.0, now=t)
-        assert prev <= v <= 1.0
-        prev = v
-    assert v == pytest.approx(1.0, abs=1e-3)
-
-
-def test_float_smoother_tau_zero_disables_smoothing():
-    """Intended: the documented "<= 0 disables" contract."""
-    s = FloatAxisSmoother(0.0)
-    s.filter("/a", 0.0, now=0.0)
-    assert s.filter("/a", 1.0, now=0.01) == 1.0
-
-
-def test_float_smoother_keeps_axes_independent():
-    """Intended: state is per-address; two axes smoothing into each other would
-    couple X and Y."""
-    s = FloatAxisSmoother(0.12)
-    s.filter("/x", 1.0, now=0.0)
-    assert s.filter("/y", -1.0, now=0.0) == -1.0
-
+# The float-axis smoother now lives inside `vrbridge.quant_channel.QuantChannel`
+# (per-instance state, one instance per address); its semantics -- first-sample
+# seat, tau <= 0 passthrough, monotone approach, per-address independence -- are
+# pinned in tests/test_quant_channel.py.
 
 # -------------------------------- SmoothScroller -----------------------------
 

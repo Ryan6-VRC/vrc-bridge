@@ -252,6 +252,26 @@ class WardrobeSettings:
 
 
 @dataclass(frozen=True)
+class QuantChannelSettings:
+    """Where quant-channel manifests live, and how long one sentinel read may block.
+
+    The manifest tables themselves are `quant_manifest`'s -- generated files, not tuning --
+    and the id ranges are that module's docstring's. Named apart from the wardrobe's
+    `manifest_dir` on purpose: `wardrobe/` also holds manifests, and the two kinds share
+    neither a directory nor a schema."""
+    manifest_dir: str = ""               # empty -> app_base_dir()/manifests
+    fetch_timeout_secs: float = 2.0
+
+    def validate(self, at: str) -> None:
+        _positive(self.fetch_timeout_secs, f"{at}.fetch_timeout_secs")
+
+    def resolved_manifest_dir(self) -> Path:
+        if self.manifest_dir:
+            return Path(self.manifest_dir).expanduser()
+        return app_base_dir() / "manifests"
+
+
+@dataclass(frozen=True)
 class RemySettings:
     base_url: str = "http://127.0.0.1:8000"
     http_timeout_sec: float = 1.0
@@ -285,6 +305,7 @@ class Settings:
     muteproxy: MuteProxySettings = MuteProxySettings()
     vrcft: VRCFTSettings = VRCFTSettings()
     wardrobe: WardrobeSettings = WardrobeSettings()
+    quantchannel: QuantChannelSettings = QuantChannelSettings()
     remy: RemySettings = RemySettings()
 
     def validate(self) -> None:
