@@ -226,6 +226,20 @@ def test_an_unsigned_channel_never_emits_a_negative_address():
     assert not any(a.endswith("Negative") for a, _ in wire.sent)
 
 
+def test_an_unsigned_channel_clamps_negative_input_to_zero():
+    """Intended: the unsigned domain is [0, 1] and out-of-domain input clamps to the
+    edge, same as over-full-scale. Without the clamp, encode_unit's abs() would put the
+    magnitude on the bits (remote reads +4/7) while the float companion carried -0.5 --
+    local and remote silently disagreeing in sign."""
+    wire = Wire()
+    ch = QuantChannel(spec(signed=False))
+    ch.send(wire, -0.5, now=1.0)
+    for a, v in wire.sent:
+        if a != ADDR:
+            assert v == 0, f"{a} carried {v}; a negative on an unsigned channel is 0"
+    assert wire.values_for(ADDR) == [0.0]
+
+
 def test_a_float_only_channel_emits_exactly_the_float():
     """Intended: bits == 0 puts nothing on the bool wire at all -- the float itself is the
     synced carrier there, and stray Negative/bit sends would hit undeclared parameters."""

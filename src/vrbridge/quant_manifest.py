@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 from vrbridge.quant_channel import MAX_BITS, ChannelSpec
+from vrbridge.quant_channel import derive_bool_addrs as _derive_bool_addrs
 from vrbridge.settings import ConfigError
 
 #: The one schema this loader understands; a different value is refused rather than
@@ -137,6 +138,10 @@ def load_manifest(path: Path) -> QuantManifest:
             raise ConfigError(f"{at} has unknown key(s) {', '.join(row_unknown)}. "
                               f"Valid keys: {', '.join(sorted(row_known))}")
         name = _require_str(row.get("name"), f"{at}: name")
+        if " " in name:
+            raise ConfigError(f"{at}: name {name!r} contains a space -- the client "
+                              f"rewrites it to '_' on the wire, so one name would mean "
+                              f"two addresses")
         if name in seen:
             raise ConfigError(f"{at}: name {name!r} appears twice in this manifest")
         seen.add(name)
@@ -154,6 +159,17 @@ def load_manifest(path: Path) -> QuantManifest:
         tau = row.get("floatTau", 0.0)
         if isinstance(tau, bool) or not isinstance(tau, (int, float)) or tau < 0:
             raise ConfigError(f"{at}: floatTau is {tau!r}; expected a number >= 0")
+        widths = row.get("declaredWidths")
+        if widths is not None:
+            # A checked echo, like `address`: derivable from bits/signed, kept for the
+            # reader, verified so it cannot drift into a second source of truth.
+            want = bits + (1 if signed and bits else 0)
+            if (not isinstance(widths, dict) or set(widths) != {"bools"}
+                    or widths["bools"] != want):
+                raise ConfigError(
+                    f"{at}: declaredWidths is {widths!r} but bits={bits}/signed={signed} "
+                    f"derives {{'bools': {want}}}. It is a checked echo, not a knob -- "
+                    f"fix whichever side is wrong.")
         channels.append(ChannelSpec(name=name, address=address, bits=bits,
                                     signed=signed, float_tau=float(tau)))
 
@@ -170,9 +186,43 @@ def load_manifest(path: Path) -> QuantManifest:
             raise ConfigError(f"{at} has unknown key(s) {', '.join(row_unknown)}. "
                               f"Valid keys: address, name")
         name = _require_str(row.get("name"), f"{at}: name")
+        if " " in name:
+            raise ConfigError(f"{at}: name {name!r} contains a space -- the client "
+                              f"rewrites it to '_' on the wire, so one name would mean "
+                              f"two addresses")
+        if name in seen:
+            raise ConfigError(f"{at}: name {name!r} is already a channel or gate name "
+                              f"in this manifest")
+        seen.add(name)
         address = _require_str(row.get("address"), f"{at}: address")
         _check_echo(name, address, at)
         gates.append(GateSpec(name=name, address=address))
+
+    # The derived-address sweep: the checked echo proves each row's address individually,
+    # but the wire also carries each channel's DERIVED bool addresses (<Name>1/2/4...,
+    # <Name>Negative when signed), and a manifest that never passed the generator's name
+    # lint can land another row's address on one of them -- two rows writing one address
+    # with different meanings, invisible to every per-row check.
+    claimed: Dict[str, str] = {}
+
+    def claim(addr: str, owner: str) -> None:
+        other = claimed.get(addr)
+        if other is not None:
+            raise ConfigError(
+                f"{path}: {owner} and {other} both emit the wire address {addr!r}; "
+                f"rename one -- the generator's name lint (no trailing digits, no "
+                f"Negative/digit suffix collisions) exists to make this impossible.")
+        claimed[addr] = owner
+
+    for ch in channels:
+        claim(ch.address, f"channel {ch.name!r}")
+        derived = _derive_bool_addrs(ch.address, ch.bits)
+        for baddr in derived["bits"]:
+            claim(baddr, f"channel {ch.name!r} (a derived bit bool)")
+        if ch.signed and derived["neg"]:
+            claim(derived["neg"], f"channel {ch.name!r} (its Negative bool)")
+    for g in gates:
+        claim(g.address, f"gate {g.name!r}")
 
     return QuantManifest(id=manifest_id, revision=revision,
                          channels=tuple(channels), gates=tuple(gates), source=path)

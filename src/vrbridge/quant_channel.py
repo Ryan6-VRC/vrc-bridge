@@ -27,6 +27,7 @@ plus the decode codebook, not sender rounding, and round is the more accurate en
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
@@ -123,7 +124,6 @@ class QuantChannel:
             return self._reset(target, now)
         if not self._initialized:
             return self._reset(target, now)
-        import math
         dt = now - self._last_ts
         alpha = 1.0 if dt <= 0.0 else (1.0 - math.exp(-dt / self.spec.float_tau))
         self._value = _clamp_unit(self._value + (target - self._value) * alpha)
@@ -143,6 +143,12 @@ class QuantChannel:
         `send` is `ctx.send` / `OSCManager.send`; `now` is the caller's clock -- pass the
         event's own timestamp, not `time.time()` (module docstring).
         """
+        if not self.spec.signed and x < 0.0:
+            # The unsigned domain is [0, 1]; out-of-domain input clamps to the domain edge,
+            # exactly as over-full-scale does. Without this, encode_unit's abs() would put
+            # |x| on the bits while the float companion carried the negative -- local and
+            # remote disagreeing in sign.
+            x = 0.0
         if self._bit_addrs:
             neg, k = encode_unit(x, self.spec.bits)
             if self._neg_addr is not None:

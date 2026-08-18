@@ -155,3 +155,48 @@ def test_a_missing_manifest_directory_is_empty_not_an_error(tmp_path):
     reports having nothing when something actually asks it to arm, because only then has
     anyone asked."""
     assert discover_manifests(tmp_path / "absent") == {}
+
+
+def test_declared_widths_is_a_checked_echo(tmp_path):
+    """Intended: `declaredWidths` is derivable from bits/signed, so like `address` it is
+    verified rather than trusted -- accepted-and-ignored, it would be a second source of
+    truth for the wire width that nothing checks."""
+    body = json.loads(json.dumps(GOOD))
+    body["channels"][0]["declaredWidths"] = {"bools": 9}
+    with pytest.raises(ConfigError, match="checked echo"):
+        load_manifest(write(tmp_path, body))
+    body = json.loads(json.dumps(GOOD))
+    del body["channels"][1]["floatTau"]          # optional keys stay optional
+    assert load_manifest(write(tmp_path, body)).channel("QDemo/LY").float_tau == 0.0
+
+
+def test_colliding_derived_addresses_are_refused_naming_both(tmp_path):
+    """Intended: the checked echo proves each row individually, but a channel also owns
+    its DERIVED bool addresses -- `QDemo/LX` (bits 3) already emits `QDemo/LX1`, so a
+    second channel or gate by that name writes the same wire address with a different
+    meaning. Hand-written manifests never pass the generator's name lint, so the loader
+    is the only gate."""
+    body = json.loads(json.dumps(GOOD))
+    body["channels"][1] = {"name": "QDemo/LX1",
+                           "address": "/avatar/parameters/QDemo/LX1", "bits": 0}
+    with pytest.raises(ConfigError, match="both emit the wire address"):
+        load_manifest(write(tmp_path, body))
+
+    body = json.loads(json.dumps(GOOD))
+    body["gates"].append({"name": "QDemo/LXNegative",
+                          "address": "/avatar/parameters/QDemo/LXNegative"})
+    with pytest.raises(ConfigError, match="both emit the wire address"):
+        load_manifest(write(tmp_path, body))
+
+
+def test_duplicate_and_spacey_gate_names_are_refused(tmp_path):
+    body = json.loads(json.dumps(GOOD))
+    body["gates"].append(dict(body["gates"][0]))
+    with pytest.raises(ConfigError, match="already a channel or gate name"):
+        load_manifest(write(tmp_path, body))
+
+    body = json.loads(json.dumps(GOOD))
+    body["channels"][0].update(name="QDemo/L X",
+                               address="/avatar/parameters/QDemo/L X")
+    with pytest.raises(ConfigError, match="contains a space"):
+        load_manifest(write(tmp_path, body))

@@ -15,10 +15,12 @@ change: the client acknowledges `/avatar/change` immediately while a cold downlo
 until some future change) or reads the *outgoing* avatar's tree and arms the wrong manifest.
 Hence, in order:
 
-* **Invalidation is inline and cheap.** `/avatar/change` and target-selected only clear the
-  armed state, bump a sequence token, and wake the worker. The target-selected leg runs on
-  zeroconf's single dispatch thread, which `docs/design.md` prices at one blocking query for
-  target *selection* itself -- an inline fetch there is not ours to add.
+* **Invalidation is inline and cheap -- and fires no fetch.** `/avatar/change` and
+  target-selected only clear the armed state and bump a sequence token; a fetch kicked here
+  would race the cold load and could arm the *outgoing* avatar's manifest, which then
+  latches with no later event to correct it. The target-selected leg runs on zeroconf's
+  single dispatch thread, which `docs/design.md` prices at one blocking query for target
+  *selection* itself -- an inline fetch there is not ours to add either.
 * **All fetches run on one daemon worker thread** (the `press_pulse` single-worker shape).
   A completed fetch arms only if its token is still current: two avatar changes in flight
   must not let the older fetch latch the older avatar's manifest.
@@ -126,23 +128,27 @@ class QuantChannelDirectory(Mapping):
         # cannot resurrect a mapping its router switched off -- and a disabled directory
         # passing through avatar changes must not re-arm with stale state on re-enable.
         self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_invalidate)
-        # Runs on zeroconf's dispatch thread; clearing plus an Event.set is the whole cost.
+        # Runs on zeroconf's dispatch thread; clearing the latch is the whole cost.
         self.bridge.on_target_selected(lambda ctx, target: self._on_invalidate(ctx, "", None))
 
     # ---- events ----------------------------------------------------------
 
     def _on_invalidate(self, ctx, address: str, value) -> None:
-        """The worn avatar (or the client behind the target) changed: disarm, and let the
-        worker ask again. Idempotent under the doubled inbound delivery -- clearing twice
-        and bumping twice both leave the same state: unarmed, newest token wins."""
+        """The worn avatar (or the client behind the target) changed: disarm, nothing more.
+        Idempotent under the doubled inbound delivery -- clearing twice and bumping twice
+        both leave the same state: unarmed, newest token wins.
+
+        Deliberately no kick: a fetch fired on the change races the cold load and can read
+        the OUTGOING avatar's tree -- and a wrong manifest armed here latches, because no
+        later event corrects it. The read happens when a consumer next asks (the floor is
+        zeroed below so that ask is prompt)."""
         with self._lock:
             self._armed = None
             self._seq += 1
             self._reported = None
-            # Not floored: this is an event, not a use, and the cold-load recovery counts
-            # on the change kicking a fresh read promptly.
+            # Zeroing the floor makes the next use fetch immediately -- the whole
+            # invalidation-to-rearm latency is one consumer poll.
             self._last_attempt = 0.0
-        self._kick()
 
     # ---- the consumer's door ---------------------------------------------
 
@@ -288,6 +294,11 @@ class QuantChannelDirectory(Mapping):
             if ch.bits != self._puppet_tune.quant_level:
                 return (f"channel {ch.name} declares bits={ch.bits} but "
                         f"[puppet] quant_level is {self._puppet_tune.quant_level}")
+            if ch.bits and not ch.signed:
+                # index_puppet hardcodes signed=True: its wire has a Negative address
+                # this manifest says does not exist.
+                return (f"channel {ch.name} declares signed=false but index_puppet "
+                        f"drives {ch.address} signed")
             if ch.float_tau != self._puppet_tune.float_smooth_tau_secs:
                 return (f"channel {ch.name} declares floatTau={ch.float_tau} but "
                         f"[puppet] float_smooth_tau_secs is "

@@ -163,14 +163,19 @@ def test_a_use_kicks_a_fetch_and_arms_the_manifest():
     assert bridge.osc.fetches == [MARKER_ADDR]
 
 
-def test_an_avatar_change_kicks_a_fetch_without_being_asked():
-    """Intended: the change is an event trigger, so a session where the consumer only asks
-    after the swap still finds the latch already armed (or arming)."""
+def test_an_avatar_change_fires_no_fetch_of_its_own():
+    """Intended: the change only invalidates. A fetch kicked on the change races the cold
+    load and can read the OUTGOING avatar's tree -- and a wrong manifest armed there
+    latches, because no later event corrects it. The next consumer use is the read, made
+    prompt by the invalidation zeroing the retry floor."""
     bridge, d = rig({1: manifest(1)})
     bridge.osc.script(FetchResult(FETCH_OK, value=1, peer=VRCHAT))
     bridge.change()
-    assert wait_for(lambda: len(bridge.osc.fetches) == 1)
+    time.sleep(0.1)
+    assert bridge.osc.fetches == [], "the change itself fetched"
+    d.active_manifest()
     assert wait_for(lambda: armed_id(d) == 1)
+    assert bridge.osc.fetches == [MARKER_ADDR]
 
 
 def test_an_armed_latch_is_not_re_fetched_per_use():
@@ -221,7 +226,7 @@ def test_a_change_to_an_avatar_without_channels_disarms():
 
 def test_a_target_change_disarms_like_an_avatar_change():
     """Intended: a different client means a different worn avatar; the target-selected leg
-    runs on zeroconf's dispatch thread, so all it may do is clear and kick."""
+    runs on zeroconf's dispatch thread, so all it may do is clear."""
     bridge, d = rig({1: manifest(1)})
     bridge.osc.script(FetchResult(FETCH_OK, value=1, peer=VRCHAT))
     d.active_manifest()
@@ -229,7 +234,8 @@ def test_a_target_change_disarms_like_an_avatar_change():
 
     bridge.osc.script(FetchResult(FETCH_OK, value=1, peer=VRCHAT))
     bridge.select_target()
-    # Re-arms, but only through a fresh read of the new client.
+    assert d.active_manifest() is None, "the old client's manifest answered past it"
+    # Re-arms, but only through a fresh use-triggered read of the new client.
     assert wait_for(lambda: len(bridge.osc.fetches) == 2)
     assert wait_for(lambda: armed_id(d) == 1)
 
@@ -248,6 +254,7 @@ def test_a_fetch_completing_after_a_later_invalidation_must_not_arm():
     bridge.osc.script(FetchResult(FETCH_OK, value=1, peer=VRCHAT))   # the stale answer
 
     bridge.change("avtr_first")
+    d.active_manifest()                           # the use that kicks fetch 1
     assert bridge.osc.parked.wait(3.0), "the first fetch never started"
 
     bridge.change("avtr_second")                  # invalidates while fetch 1 is in flight
@@ -416,6 +423,25 @@ def test_the_cross_check_also_covers_float_tau(caplog):
         d.active_manifest()
         assert wait_for(lambda: "Refusing to arm" in caplog.text)
     assert "floatTau=0.5" in caplog.text and "0.12" in caplog.text
+
+
+def test_the_cross_check_also_covers_signedness(caplog):
+    """Intended: index_puppet hardcodes signed=True, so a puppet-address manifest saying
+    signed=false describes a wire without the Negative address the mapping drives."""
+    m = QuantManifest(
+        id=1, revision=1,
+        channels=(ChannelSpec(name="IndexPuppet/Left_X",
+                              address="/avatar/parameters/IndexPuppet/Left_X",
+                              bits=3, signed=False, float_tau=0.12),),
+        gates=(), source=None)
+    bridge, d = rig({1: m}, puppet_tuning=PuppetSettings(quant_level=3,
+                                                         float_smooth_tau_secs=0.12))
+    bridge.osc.script(FetchResult(FETCH_OK, value=1, peer=VRCHAT))
+    with caplog.at_level("ERROR"):
+        d.active_manifest()
+        assert wait_for(lambda: "Refusing to arm" in caplog.text)
+    assert "signed=false" in caplog.text
+    assert d.active_manifest() is None
 
 
 def test_a_matching_puppet_manifest_arms():

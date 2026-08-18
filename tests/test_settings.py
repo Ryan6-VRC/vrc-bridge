@@ -199,3 +199,14 @@ def test_log_unlerp_spans_its_endpoints():
     assert log_unlerp(20.0, 20.0, 150.0) == 0.0
     assert log_unlerp(150.0, 20.0, 150.0) == 1.0
     assert log_unlerp(1000.0, 20.0, 150.0) == 1.0  # clamps rather than extrapolating
+
+
+def test_puppet_quant_level_is_bounded_by_the_codec():
+    """Intended: the codec caps bits at 8 (QuantChannel raises ValueError past it), so an
+    out-of-range quant_level must die here as a ConfigError naming the key, not as a
+    traceback inside IndexPuppetMapping's constructor."""
+    from vrbridge.settings import PuppetSettings
+    with pytest.raises(ConfigError, match="quant_level"):
+        PuppetSettings(quant_level=9).validate("puppet")
+    PuppetSettings(quant_level=0).validate("puppet")
+    PuppetSettings(quant_level=8).validate("puppet")

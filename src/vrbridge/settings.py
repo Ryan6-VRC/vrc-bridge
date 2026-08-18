@@ -92,7 +92,13 @@ class PuppetSettings:
     float_smooth_tau_secs: float = 0.12  # <= 0 disables float smoothing
 
     def validate(self, at: str) -> None:
-        _non_negative(self.quant_level, f"{at}.quant_level")
+        # Bounded by the codec, and enforced here so a bad value is a ConfigError naming
+        # the key -- unbounded, it would surface as QuantChannel's ValueError traceback
+        # inside IndexPuppetMapping's constructor instead.
+        from vrbridge.quant_channel import MAX_BITS
+        if not 0 <= self.quant_level <= MAX_BITS:
+            raise ConfigError(f"{at}.quant_level is {self.quant_level!r}; expected "
+                              f"0-{MAX_BITS} (0 = float only)")
         _non_negative(self.touch_active_idle_secs, f"{at}.touch_active_idle_secs")
         _one_of(self.single_touch_mode, ("together", "separate"), f"{at}.single_touch_mode")
         _one_of(self.invert_x, (-1, 1), f"{at}.invert_x")
