@@ -8,26 +8,29 @@ itself, and no shipped router registers it (opt-in, like the wardrobe).
 
 **Why this is not the wardrobe's read-on-every-press, although it copies everything else.**
 The wardrobe's marker read rides a human press: rare, and itself the proof the avatar is
-loaded. A quant consumer asks at controller rate, so the read latches (`arm`) -- and the
-whole trigger design is shaped by what a *cold avatar load* does to any read taken at the
-change: the client acknowledges `/avatar/change` immediately while a cold download runs
-30-60 s, so a fetch fired on the change either 404s (and a latch-on-change design stays dark
-until some future change) or reads the *outgoing* avatar's tree and arms the wrong manifest.
+loaded. A quant consumer asks at controller rate, so the read latches (`arm`), and a latch
+is only as good as the states it can recover from without one: a bridge started before the
+client, a foreign OSCQuery peer holding the target, an avatar whose tree is not up yet.
 Hence, in order:
 
 * **Invalidation is inline and cheap -- and fires no fetch.** `/avatar/change` and
-  target-selected only clear the armed state and bump a sequence token; a fetch kicked here
-  would race the cold load and could arm the *outgoing* avatar's manifest, which then
-  latches with no later event to correct it. The target-selected leg runs on zeroconf's
-  single dispatch thread, which `docs/design.md` prices at one blocking query for target
-  *selection* itself -- an inline fetch there is not ours to add either.
+  target-selected only clear the armed state and bump a sequence token. The target-selected
+  leg runs on zeroconf's single dispatch thread, which `docs/design.md` prices at one
+  blocking query for target *selection* itself -- an inline fetch there is not ours to add.
+  `/avatar/change` is measured to arrive at avatar *apply*, a second after a download
+  completes, so a fetch kicked here reads the incoming avatar rather than the outgoing one:
+  the cold-load race this design is often assumed to dodge is not what holds it up. What
+  does is that a wrong manifest armed here would latch with no later event to correct it,
+  and that the recovery states above need a re-read no avatar change ever fires.
 * **All fetches run on one daemon worker thread** (the `press_pulse` single-worker shape).
   A completed fetch arms only if its token is still current: two avatar changes in flight
   must not let the older fetch latch the older avatar's manifest.
 * **Re-arm on use, floored.** While unarmed, `active_manifest()` re-kicks the worker at most
-  once per `REARM_FLOOR_SECS`. This is what closes the cold load: the 404 taken mid-download
-  answers "right now", the next use after the avatar finishes loading asks again. It is not a
-  timer -- an untouched bridge fetches nothing.
+  once per `REARM_FLOOR_SECS`. This is what closes every window above: the failed read
+  answers "right now", the next use after the state clears asks again -- measured live from
+  a bridge started before the client, which warned once, then armed after discovery and a
+  stretch of 404s through the avatar's load, with no avatar change and no restart. It is not
+  a timer -- an untouched bridge fetches nothing.
 
 The armed manifest is trusted only after the **puppet cross-check**: where a manifest
 declares channels at `index_puppet`'s own addresses, its `bits`/`floatTau` must match the

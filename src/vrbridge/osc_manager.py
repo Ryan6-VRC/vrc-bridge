@@ -6,6 +6,7 @@ import ipaddress
 import json
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Set
 
@@ -23,6 +24,24 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 # Not a settings.py value: that file holds user-tunable mapping and hardware feel,
 # and nothing about this number is a matter of taste.
 _SERVE_POLL_SECS = 0.05
+
+
+#: Addresses where a repeated identical value is a real event, not a redundant echo, so the
+#: change filter's value-equality test is the wrong instrument. Re-wearing the same avatar
+#: id -- an OSC `/avatar/change` naming the worn avatar, a world rejoin, the in-client Reset
+#: Avatar -- resets every mapping's world, and the client announces it with the id it
+#: announced last time; suppressed, that reset reaches nobody. Listed per address rather
+#: than lifted to a setting: which addresses carry that meaning is a property of VRChat's
+#: wire, not a matter of taste, and `docs/design.md` §Inbound delivery semantics holds the
+#: measurement and what earns an address a place here.
+REFIRE_ON_REPEAT: Set[str] = {"/avatar/change"}
+
+#: How long an exempt address folds a repeat for -- the dedupe window `docs/design.md` rules
+#: out in general, scoped to the addresses above and sized from the doubling it still has to
+#: fold: the client's two sender sockets deliver their copies within a millisecond of each
+#: other. Do not widen it toward seconds, which is where a deliberate re-wear starts being
+#: eaten instead -- the failure this exists to fix.
+REFIRE_FOLD_WINDOW_SECS = 0.25
 
 
 #: The scores _service_rank hands out. Named because the VRChat score is no longer only an
@@ -146,6 +165,8 @@ class OSCManager:
         # Fired once a discovered send target is chosen. See add_target_listener.
         self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
         self._cache: Dict[str, Any] = {}
+        # monotonic stamp of the last fire per REFIRE_ON_REPEAT address; under _cache_lock.
+        self._last_fired: Dict[str, float] = {}
         self._watched: Set[str] = set()
         # fnmatch-style patterns admitted by _default_handler, which every datagram not
         # explicitly mapped already reaches. This admits named shapes of traffic; it
@@ -386,6 +407,9 @@ class OSCManager:
         blind spot: a consumer whose *action* changed the world can need the same value
         delivered twice. Forgetting is how it says so, and is cheaper than teaching the
         filter about consumers.
+
+        Not the lever for `REFIRE_ON_REPEAT` addresses: there a repeat is meaningful to
+        every listener rather than to one consumer, so the filter itself knows.
         """
         with self._cache_lock:
             self._cache.pop(address, None)
@@ -428,10 +452,22 @@ class OSCManager:
             if self.log: self.log.debug("OSC recv (unwatched): %s %s", addr, args)
 
     def _update_cache_and_fire(self, addr, val):
+        now = time.monotonic()
         with self._cache_lock:
             old = self._cache.get(addr)
             self._cache[addr] = val
-        if (old is None) or (val != old):
+            fire = (old is None) or (val != old)
+            if addr in REFIRE_ON_REPEAT:
+                if not fire:
+                    # A repeat on an address where a repeat means something: fire unless
+                    # this is the twin copy of the one the client just sent.
+                    fire = (now - self._last_fired.get(addr, float("-inf"))
+                            >= REFIRE_FOLD_WINDOW_SECS)
+                if fire:
+                    # Stamped on every fire, not only a folded one, so the window measures
+                    # time since the listener last ran rather than since the last repeat.
+                    self._last_fired[addr] = now
+        if fire:
             if self._listener:
                 try:
                     self._listener(addr, val)

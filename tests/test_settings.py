@@ -26,9 +26,13 @@ def test_defaults_are_the_shipped_values():
 
     # index_puppet.py
     p = s.puppet
-    assert (p.quant_level, p.touch_active_idle_secs) == (3, 0.5)
+    # A wear test on a live client is the one thing that may move a feel literal here --
+    # `touch_active_idle_secs` and `float_smooth_tau_secs` both came from one. Moving
+    # `float_smooth_tau_secs` also means regenerating the quant-channel entry's
+    # index-puppet manifest, which the directory cross-checks against it.
+    assert (p.quant_level, p.touch_active_idle_secs) == (3, 0.1)
     assert p.single_touch_mode == "together"
-    assert (p.invert_x, p.invert_y, p.float_smooth_tau_secs) == (1, 1, 0.12)
+    assert (p.invert_x, p.invert_y, p.float_smooth_tau_secs) == (1, 1, 0.05)
 
     # The five smooth-scroll values were triplicated verbatim across the three
     # camera mappings. They stay three separate tables because they are scaled

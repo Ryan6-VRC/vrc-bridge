@@ -85,11 +85,19 @@ class SmoothScrollSettings:
 @dataclass(frozen=True)
 class PuppetSettings:
     quant_level: int = 3                 # magnitude bits for the OSCmooth-style codec
-    touch_active_idle_secs: float = 0.5
+    # Feel values, tuned by wearing the rig rather than derived: both are wearer-side float
+    # behaviour only, since the quantized bools a remote decodes are always raw and
+    # immediate. Retuning either costs headset time, so they move on a wear test, not an
+    # argument. They govern different complaints and are worth separating before either
+    # moves: this one is how long `IndexPuppet/Enable` holds after the last pad contact.
+    touch_active_idle_secs: float = 0.1
     single_touch_mode: str = "together"  # "together" mirrors one pad to both sides
     invert_x: int = 1
     invert_y: int = 1
-    float_smooth_tau_secs: float = 0.12  # <= 0 disables float smoothing
+    # The float's easing toward rest, and mirrored by the quant-channel entry's index-puppet
+    # manifest, which the directory cross-checks against this value: retuning here without
+    # regenerating that manifest refuses the arm.
+    float_smooth_tau_secs: float = 0.05  # <= 0 disables float smoothing
 
     def validate(self, at: str) -> None:
         # Bounded by the codec, and enforced here so a bad value is a ConfigError naming
