@@ -282,3 +282,39 @@ def test_a_repeated_parameter_value_is_still_suppressed(monkeypatch):
     mgr._update_cache_and_fire("/avatar/parameters/Thing", 0.5)
 
     assert seen == [("/avatar/parameters/Thing", pytest.approx(0.5))]
+
+
+def test_a_swaps_twin_is_folded_against_the_swap_that_preceded_it(monkeypatch):
+    """The production sequence, and the one that pins where the stamp goes: the cache
+    already holds an avatar, a different one arrives twin-delivered, and the twin must
+    not reset every mapping a second time. Stamping only on a folded repeat passes every
+    other test here and double-fires this."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.05)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_one")
+    # The wearer wore that avatar a while: the swap must be folded against its OWN stamp,
+    # not against one left by the avatar before it, so the earlier stamp is aged out first.
+    time.sleep(0.06)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_two")   # the swap
+    mgr._update_cache_and_fire("/avatar/change", "avtr_two")   # its twin, ~1 ms behind
+
+    assert seen == [("/avatar/change", "avtr_two")]
+
+
+def test_a_folded_repeat_does_not_push_the_window_forward(monkeypatch):
+    """The fold rate-limits a repeat stream rather than silencing it: a repeat eaten at
+    W/2 must not buy the next one another full window, or a stream faster than the window
+    goes dark instead of arriving at window cadence."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.10)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # fires, stamps
+    time.sleep(0.05)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # folded
+    time.sleep(0.06)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # past the window: fires
+
+    assert len(seen) == 2

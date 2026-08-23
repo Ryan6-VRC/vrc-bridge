@@ -85,11 +85,11 @@ class SmoothScrollSettings:
 @dataclass(frozen=True)
 class PuppetSettings:
     quant_level: int = 3                 # magnitude bits for the OSCmooth-style codec
-    # Feel values, tuned by wearing the rig rather than derived: both are wearer-side float
-    # behaviour only, since the quantized bools a remote decodes are always raw and
-    # immediate. Retuning either costs headset time, so they move on a wear test, not an
-    # argument. They govern different complaints and are worth separating before either
-    # moves: this one is how long `IndexPuppet/Enable` holds after the last pad contact.
+    # Feel values, tuned by wearing the rig rather than derived, so they move on a wear
+    # test and not an argument. They answer different complaints and are worth separating
+    # before either moves: this one is how long `IndexPuppet/Enable` stays asserted after
+    # the last pad contact ("the ears keep responding after I let go"), while the tau below
+    # is the float's ease back to rest ("they drift back too slowly").
     touch_active_idle_secs: float = 0.1
     single_touch_mode: str = "together"  # "together" mirrors one pad to both sides
     invert_x: int = 1

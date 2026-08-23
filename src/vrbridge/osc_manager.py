@@ -408,8 +408,10 @@ class OSCManager:
         delivered twice. Forgetting is how it says so, and is cheaper than teaching the
         filter about consumers.
 
-        Not the lever for `REFIRE_ON_REPEAT` addresses: there a repeat is meaningful to
-        every listener rather than to one consumer, so the filter itself knows.
+        Not the lever for `REFIRE_ON_REPEAT` addresses, and actively wrong on one: there a
+        repeat is meaningful to every listener rather than to one consumer, so the filter
+        already knows -- and forgetting clears the `old is None` short-circuit that the
+        fold sits behind, so a twin copy arriving after it is delivered twice.
         """
         with self._cache_lock:
             self._cache.pop(address, None)
@@ -464,8 +466,11 @@ class OSCManager:
                     fire = (now - self._last_fired.get(addr, float("-inf"))
                             >= REFIRE_FOLD_WINDOW_SECS)
                 if fire:
-                    # Stamped on every fire, not only a folded one, so the window measures
-                    # time since the listener last ran rather than since the last repeat.
+                    # Stamped on a value *change* too, not only on a folded repeat, because
+                    # that is what arms the fold against the change's own twin copy: the
+                    # twin is a repeat, and with no stamp behind it the window has nothing
+                    # to measure from. Stamped before the listener runs, so it dates the
+                    # decision to deliver rather than the delivery.
                     self._last_fired[addr] = now
         if fire:
             if self._listener:
