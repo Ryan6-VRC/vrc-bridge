@@ -52,21 +52,26 @@ class _Bridge:
 
 
 def _armed(vrcft_running: bool = False):
-    """A registered, activated mapping with one avatar change already delivered."""
+    """A registered, activated mapping with one avatar change already delivered.
+
+    Returns the deadline the mapping actually stamped, not a wall-clock sample taken
+    beside it: the mapping reads `time.time()` itself, so a sample from before the call
+    is an unknown amount early and a tick placed off it can land short of the deadline
+    if the process is descheduled in between.
+    """
     bridge = _Bridge(vrcft_running)
     m = VRCFTMapping(bridge, tuning=TUNE)
     m.register()
     m.activate()
-    t0 = time.time()
     m._on_avatar_change(None, "/avatar/change", "avtr_first")
-    return bridge, m, t0
+    return bridge, m, m._due
 
 
 # --------------------------------------------------------------------------
 # The defect
 # --------------------------------------------------------------------------
 
-def test_a_handler_registered_behind_vrcft_is_not_delayed_by_its_load_delay():
+def test_a_handler_registered_behind_vrcft_is_not_delayed_by_its_load_delay(monkeypatch):
     """The reason this mapping has a tick at all.
 
     `engine._on_osc_event` runs one address's handlers serially on the datagram thread,
@@ -75,6 +80,14 @@ def test_a_handler_registered_behind_vrcft_is_not_delayed_by_its_load_delay():
     handler's own latency. Driven through the real fanout, because a stub of it could not
     fail the way production did.
     """
+    # Two oracles, because each catches what the other cannot: the sleep ban fails
+    # deterministically on a loaded machine where a wall-clock ceiling could flake, and
+    # the wall-clock check still catches a handler that blocks on something other than
+    # a sleep -- a fetch, a lock -- which a sleep ban would wave through.
+    def _banned(_secs):
+        raise AssertionError("osc_vrcft slept on the datagram dispatch thread")
+    monkeypatch.setattr(osc_vrcft.time, "sleep", _banned)
+
     bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
     try:
         vrcft = VRCFTMapping(bridge, tuning=TUNE)
@@ -89,10 +102,10 @@ def test_a_handler_registered_behind_vrcft_is_not_delayed_by_its_load_delay():
         elapsed = time.time() - t0
 
         assert ran_at, "the handler behind osc_vrcft never ran"
-        assert ran_at[0] - t0 < DELAY / 10, (
+        assert ran_at[0] - t0 < DELAY / 2, (
             f"handler behind osc_vrcft ran {ran_at[0] - t0:.3f}s late; it is paying "
             "osc_vrcft's load delay again")
-        assert elapsed < DELAY / 10, f"the fanout itself blocked for {elapsed:.3f}s"
+        assert elapsed < DELAY / 2, f"the fanout itself blocked for {elapsed:.3f}s"
     finally:
         bridge.osc.stop()
 
@@ -108,37 +121,37 @@ def test_the_callback_sends_nothing_of_its_own():
 # --------------------------------------------------------------------------
 
 def test_nothing_is_sent_before_the_delay_has_elapsed():
-    bridge, m, t0 = _armed()
-    m.update(t0 + DELAY / 2)
+    bridge, m, due = _armed()
+    m.update(due - DELAY / 2)
     assert bridge.osc.sent == []
 
 
 def test_the_inactive_set_is_sent_on_the_first_tick_past_the_delay():
-    bridge, m, t0 = _armed(vrcft_running=False)
-    m.update(t0 + DELAY + 0.01)
+    bridge, m, due = _armed(vrcft_running=False)
+    m.update(due)
     assert dict(bridge.osc.sent) == osc_vrcft.INACTIVE_PARAMS
 
 
 def test_the_active_set_is_sent_when_vrcft_is_running():
-    bridge, m, t0 = _armed(vrcft_running=True)
-    m.update(t0 + DELAY + 0.01)
+    bridge, m, due = _armed(vrcft_running=True)
+    m.update(due)
     assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
 
 
 def test_the_service_is_checked_at_fire_time_not_at_arm_time():
     """VRCFT can come up during the load delay; the whole point of waiting is to look
     at the world as it is once the avatar is there."""
-    bridge, m, t0 = _armed(vrcft_running=False)
+    bridge, m, due = _armed(vrcft_running=False)
     bridge.osc.vrcft_running = True
-    m.update(t0 + DELAY + 0.01)
+    m.update(due)
     assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
 
 
 def test_the_send_fires_once_and_not_on_every_later_tick():
     """An un-cleared deadline would re-send at update_hz -- 45 times a second."""
-    bridge, m, t0 = _armed()
+    bridge, m, due = _armed()
     for i in range(5):
-        m.update(t0 + DELAY + 0.01 + i)
+        m.update(due + i)
     assert len(bridge.osc.sent) == len(osc_vrcft.INACTIVE_PARAMS)
 
 
@@ -190,19 +203,58 @@ def test_a_disabled_mapping_does_not_arm():
     m.register()
     m.deactivate()
     _, gated = bridge.handlers[0]
-    t0 = time.time()
     gated(None, "/avatar/change", "avtr_first")
+    assert m._due is None, "a gated callback armed anyway"
     m.activate()
-    m.update(t0 + DELAY + 0.01)
+    m.update(time.time() + DELAY + 1.0)
     assert bridge.osc.sent == []
 
 
 def test_deactivating_between_arming_and_firing_drops_the_send():
-    bridge, m, t0 = _armed()
+    bridge, m, due = _armed()
     m.deactivate()
-    m.update(t0 + DELAY + 0.01)
+    m.update(due)
     assert bridge.osc.sent == []
     # And the dropped deadline does not fire on re-activation.
     m.activate()
-    m.update(t0 + DELAY + 1.0)
+    m.update(due + 1.0)
+    assert bridge.osc.sent == []
+
+
+def test_a_change_arriving_during_the_fire_cancels_that_fire():
+    """The supersession claim has to hold through the send, not just to the deadline.
+
+    `_apply` checks the VRCFT service outside the lock, so an avatar change can land
+    mid-fire; without the generation token the in-flight send wrote parameters during the
+    new avatar's load, which is the thing the delay exists to prevent.
+    """
+    bridge = _Bridge()
+    m = VRCFTMapping(bridge, tuning=TUNE)
+    m.register()
+    m.activate()
+    m._on_avatar_change(None, "/avatar/change", "avtr_first")
+
+    # Arm again from inside the service check -- where the real race lands.
+    def _racing_check(name):
+        m._on_avatar_change(None, "/avatar/change", "avtr_second")
+        return False
+    bridge.osc.is_service_running = _racing_check
+
+    m.update(m._due)
+    assert bridge.osc.sent == [], "sent for an avatar that had already been superseded"
+
+
+def test_a_deactivation_arriving_during_the_fire_cancels_that_fire():
+    bridge = _Bridge()
+    m = VRCFTMapping(bridge, tuning=TUNE)
+    m.register()
+    m.activate()
+    m._on_avatar_change(None, "/avatar/change", "avtr_first")
+
+    def _racing_check(name):
+        m.deactivate()
+        return False
+    bridge.osc.is_service_running = _racing_check
+
+    m.update(m._due)
     assert bridge.osc.sent == []

@@ -66,6 +66,9 @@ class VRCFTMapping(Mapping):
         # timer stamps the same clock from a callback. Mixing in monotonic here would
         # compare two unrelated epochs. None means nothing pending.
         self._due: float | None = None
+        # Bumped on every arm so a fire in flight can tell it has been superseded --
+        # osc_quant's `_seq` is the same idiom for the same reason.
+        self._gen: int = 0
         # Armed on a datagram thread, read and cleared on the router loop thread.
         self._lock = threading.Lock()
 
@@ -82,6 +85,7 @@ class VRCFTMapping(Mapping):
         guard -- two changes a second apart ran two independent waits and sent twice.
         """
         with self._lock:
+            self._gen += 1
             self._due = time.time() + self._tune.avatar_load_delay_secs
 
     def update(self, now: float) -> None:
@@ -99,15 +103,34 @@ class VRCFTMapping(Mapping):
             if now < due:
                 return
             self._due = None
+            gen = self._gen
 
-        self._apply()
+        self._apply(gen)
 
-    def _apply(self) -> None:
-        """Check for VRCFT and send the corresponding parameter set."""
+    def _apply(self, gen: int) -> None:
+        """Check for VRCFT and send the corresponding parameter set.
+
+        `gen` is the arm this fire belongs to. The service check runs unlocked -- it takes
+        OSCManager's own lock, and nesting ours around a foreign component's is what the
+        wardrobe's "never across a fetch" rule generalizes to -- so an avatar change can
+        land while we are in it. Re-checking under the lock before sending is what makes
+        the supersession claim hold through the send rather than only through the deadline:
+        parameters written during the *next* avatar's load are exactly what the delay
+        exists to prevent. The lock is held across the sends deliberately; two `sendto`
+        calls are the bounded cost of an exact claim, and design.md's rule bars holding a
+        lock across a *fetch*, which this is not.
+        """
         is_vrcft_running = self.bridge.osc.is_service_running(self._tune.service_name)
 
         params_to_set = ACTIVE_PARAMS if is_vrcft_running else INACTIVE_PARAMS
 
+        with self._lock:
+            if gen != self._gen or not self.enabled:
+                return
+            self._send(params_to_set, is_vrcft_running)
+
+    def _send(self, params_to_set: dict[str, int], is_vrcft_running: bool) -> None:
+        """Log and send. Called with `_lock` held."""
         if is_vrcft_running:
             self.bridge.log.info("VRCFT detected. Activating face tracking parameters.")
         else:
