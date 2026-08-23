@@ -129,9 +129,9 @@ class VRBridge:
         The callback receives each concrete arriving address that matches. Same
         change-filtered stream as on_osc — a repeated identical value never fires
         (OSCManager._update_cache_and_fire), which also folds the doubled inbound
-        delivery (docs/design.md §Inbound delivery semantics) into one call. A pattern
-        wide enough to match an `OSCManager.REFIRE_ON_REPEAT` address takes that
-        address's rule instead: repeats do fire there, folded by time rather than value.
+        delivery (docs/design.md §Inbound delivery semantics) into one call. A pattern wide
+        enough to match an `OSCManager.REFIRE_ON_REPEAT` address takes that address's rule
+        instead, where repeats fire and the fold is by time rather than value.
         """
         with self._lock:
             self._osc_pattern_callbacks.append((pattern, callback))

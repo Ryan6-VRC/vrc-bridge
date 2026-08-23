@@ -10,12 +10,12 @@ itself, and no shipped router registers it (opt-in, like the wardrobe).
 The wardrobe's marker read rides a human press: rare, and itself the proof the avatar is
 loaded. A quant consumer asks at controller rate, so the read latches (`arm`) -- and the
 whole trigger design is shaped by what an avatar load does to any read taken at the change.
-One swap announces `/avatar/change` twice (measured): once at request time, seconds before
-the avatar is applied, and again as it is applied. A fetch fired on the first reads the
-*outgoing* avatar's tree; through a cold download, which the client acknowledges immediately
-and serves over tens of seconds, it 404s instead. A latch is also only as good as the states
-it can recover from without any change at all: a bridge started before the client, a foreign
-OSCQuery peer holding the target, a tree not up yet. Hence, in order:
+A swap announces `/avatar/change` twice: at request time, seconds before the avatar is
+applied, and again as it is applied. A fetch fired on the first reads the *outgoing* avatar's
+tree, or 404s through a cold download the client acknowledges immediately and serves over
+tens of seconds. A latch is also only as good as the states it can recover from with no
+change at all: a bridge started before the client, a foreign OSCQuery peer holding the
+target, a tree not up yet. Hence, in order:
 
 * **Invalidation is inline and cheap -- and fires no fetch.** `/avatar/change` and
   target-selected only clear the armed state and bump a sequence token. The target-selected
@@ -30,10 +30,9 @@ OSCQuery peer holding the target, a tree not up yet. Hence, in order:
   must not let the older fetch latch the older avatar's manifest.
 * **Re-arm on use, floored.** While unarmed, `active_manifest()` re-kicks the worker at most
   once per `REARM_FLOOR_SECS`. This is what closes every window above: the failed read
-  answers "right now", the next use after the state clears asks again -- measured live from
-  a bridge started before the client, which warned once, then armed after discovery and a
-  stretch of 404s through the avatar's load, with no avatar change and no restart. It is not
-  a timer -- an untouched bridge fetches nothing.
+  answers "right now", and the next use once the state clears arms it -- no avatar change
+  and no restart required, which is the property to preserve if this is ever reworked. It is
+  not a timer: an untouched bridge fetches nothing.
 
 The armed manifest is trusted only after the **puppet cross-check**: where a manifest
 declares channels at `index_puppet`'s own addresses, its `bits`/`floatTau` must match the

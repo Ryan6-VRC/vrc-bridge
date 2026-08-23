@@ -26,23 +26,19 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 _SERVE_POLL_SECS = 0.05
 
 
-#: Addresses where a repeated identical value is a real event, not a redundant echo, so the
-#: change filter's value-equality test is the wrong instrument. Re-wearing the same avatar
-#: id -- the in-client Reset Avatar (measured: one announcement per press, same id), an OSC
-#: `/avatar/change` naming the worn avatar, a world rejoin -- resets every mapping's world,
-#: and the client announces it with the id it announced last time; suppressed, that reset
-#: reaches nobody. Listed per address rather
-#: than lifted to a setting: which addresses carry that meaning is a property of VRChat's
-#: wire, not a matter of taste, and `docs/design.md` §Inbound delivery semantics holds the
-#: measurement and what earns an address a place here.
+#: Addresses where the value repeating does not make the message redundant, so the change
+#: filter's value-equality test is the wrong instrument. On `/avatar/change` the repeat is
+#: the whole event: the in-client Reset Avatar, an OSC change naming the worn avatar, and a
+#: world rejoin each reset every mapping's world while announcing the id already cached.
+#: Kept per address rather than lifted to a setting -- which addresses carry that meaning is
+#: a property of VRChat's wire, not a matter of taste. `docs/design.md` §Inbound delivery
+#: semantics holds the measurements and what earns an address a place here.
 REFIRE_ON_REPEAT: Set[str] = {"/avatar/change"}
 
-#: How long an exempt address folds a repeat for -- the dedupe window `docs/design.md` rules
-#: out in general, scoped to the addresses above and sized from the doubling it still has to
-#: fold: where the client doubles at all (`docs/design.md` -- it depends on which process
-#: started first), its two sender sockets deliver their copies within a millisecond of each
-#: other. Do not widen it toward seconds, which is where a deliberate re-wear starts being
-#: eaten instead -- the failure this exists to fix.
+#: How long an exempt address folds a repeat for: long enough to swallow the client's twin
+#: copies, which arrive within a millisecond of each other where it doubles at all. Do not
+#: widen it toward seconds -- that is where a deliberate re-wear starts being eaten, the
+#: failure the carve-out exists to prevent.
 REFIRE_FOLD_WINDOW_SECS = 0.25
 
 
@@ -410,10 +406,9 @@ class OSCManager:
         delivered twice. Forgetting is how it says so, and is cheaper than teaching the
         filter about consumers.
 
-        Not the lever for `REFIRE_ON_REPEAT` addresses, and actively wrong on one: there a
-        repeat is meaningful to every listener rather than to one consumer, so the filter
-        already knows -- and forgetting clears the `old is None` short-circuit that the
-        fold sits behind, so a twin copy arriving after it is delivered twice.
+        Never call it on a `REFIRE_ON_REPEAT` address: the filter already delivers repeats
+        there, and forgetting drops the cached value the fold's short-circuit reads, so the
+        next twin copy is delivered twice.
         """
         with self._cache_lock:
             self._cache.pop(address, None)
@@ -463,16 +458,14 @@ class OSCManager:
             fire = (old is None) or (val != old)
             if addr in REFIRE_ON_REPEAT:
                 if not fire:
-                    # A repeat on an address where a repeat means something: fire unless
-                    # this is the twin copy of the one the client just sent.
+                    # Deliver the repeat unless it is the twin of the one just delivered.
                     fire = (now - self._last_fired.get(addr, float("-inf"))
                             >= REFIRE_FOLD_WINDOW_SECS)
                 if fire:
-                    # Stamped on a value *change* too, not only on a folded repeat, because
-                    # that is what arms the fold against the change's own twin copy: the
-                    # twin is a repeat, and with no stamp behind it the window has nothing
-                    # to measure from. Stamped before the listener runs, so it dates the
-                    # decision to deliver rather than the delivery.
+                    # Stamped on a value *change* too, which is what arms the fold against
+                    # that change's own twin: the twin is a repeat, and without this stamp
+                    # the window has nothing to measure from. It dates the decision to
+                    # deliver, not the delivery -- the listener has not run yet.
                     self._last_fired[addr] = now
         if fire:
             if self._listener:
