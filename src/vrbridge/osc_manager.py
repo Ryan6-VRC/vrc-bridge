@@ -28,9 +28,10 @@ _SERVE_POLL_SECS = 0.05
 
 #: Addresses where a repeated identical value is a real event, not a redundant echo, so the
 #: change filter's value-equality test is the wrong instrument. Re-wearing the same avatar
-#: id -- an OSC `/avatar/change` naming the worn avatar, a world rejoin, the in-client Reset
-#: Avatar -- resets every mapping's world, and the client announces it with the id it
-#: announced last time; suppressed, that reset reaches nobody. Listed per address rather
+#: id -- the in-client Reset Avatar (measured: one announcement per press, same id), an OSC
+#: `/avatar/change` naming the worn avatar, a world rejoin -- resets every mapping's world,
+#: and the client announces it with the id it announced last time; suppressed, that reset
+#: reaches nobody. Listed per address rather
 #: than lifted to a setting: which addresses carry that meaning is a property of VRChat's
 #: wire, not a matter of taste, and `docs/design.md` §Inbound delivery semantics holds the
 #: measurement and what earns an address a place here.
@@ -38,7 +39,8 @@ REFIRE_ON_REPEAT: Set[str] = {"/avatar/change"}
 
 #: How long an exempt address folds a repeat for -- the dedupe window `docs/design.md` rules
 #: out in general, scoped to the addresses above and sized from the doubling it still has to
-#: fold: the client's two sender sockets deliver their copies within a millisecond of each
+#: fold: where the client doubles at all (`docs/design.md` -- it depends on which process
+#: started first), its two sender sockets deliver their copies within a millisecond of each
 #: other. Do not widen it toward seconds, which is where a deliberate re-wear starts being
 #: eaten instead -- the failure this exists to fix.
 REFIRE_FOLD_WINDOW_SECS = 0.25
