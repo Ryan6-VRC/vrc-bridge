@@ -9,25 +9,30 @@ itself, and no shipped router registers it (opt-in, like the wardrobe).
 **Why this is not the wardrobe's read-on-every-press, although it copies everything else.**
 The wardrobe's marker read rides a human press: rare, and itself the proof the avatar is
 loaded. A quant consumer asks at controller rate, so the read latches (`arm`) -- and the
-whole trigger design is shaped by what a *cold avatar load* does to any read taken at the
-change: the client acknowledges `/avatar/change` immediately while a cold download runs
-30-60 s, so a fetch fired on the change either 404s (and a latch-on-change design stays dark
-until some future change) or reads the *outgoing* avatar's tree and arms the wrong manifest.
-Hence, in order:
+whole trigger design is shaped by what an avatar load does to any read taken at the change.
+A swap announces `/avatar/change` twice: at request time, seconds before the avatar is
+applied, and again as it is applied. A fetch fired on the first reads the *outgoing* avatar's
+tree, or 404s through a cold download the client acknowledges immediately and serves over
+tens of seconds. A latch is also only as good as the states it can recover from with no
+change at all: a bridge started before the client, a foreign OSCQuery peer holding the
+target, a tree not up yet. Hence, in order:
 
 * **Invalidation is inline and cheap -- and fires no fetch.** `/avatar/change` and
-  target-selected only clear the armed state and bump a sequence token; a fetch kicked here
-  would race the cold load and could arm the *outgoing* avatar's manifest, which then
-  latches with no later event to correct it. The target-selected leg runs on zeroconf's
-  single dispatch thread, which `docs/design.md` prices at one blocking query for target
-  *selection* itself -- an inline fetch there is not ours to add either.
+  target-selected only clear the armed state and bump a sequence token. The target-selected
+  leg runs on zeroconf's single dispatch thread, which `docs/design.md` prices at one
+  blocking query for target *selection* itself -- an inline fetch there is not ours to add.
+  A wrong manifest armed here latches, because no later event corrects it -- and the first
+  of a swap's two announcements is exactly where the wrong one would be read. The second,
+  at apply, is the one that finds the incoming avatar's tree up; both reach this handler,
+  and clearing twice costs nothing.
 * **All fetches run on one daemon worker thread** (the `press_pulse` single-worker shape).
   A completed fetch arms only if its token is still current: two avatar changes in flight
   must not let the older fetch latch the older avatar's manifest.
 * **Re-arm on use, floored.** While unarmed, `active_manifest()` re-kicks the worker at most
-  once per `REARM_FLOOR_SECS`. This is what closes the cold load: the 404 taken mid-download
-  answers "right now", the next use after the avatar finishes loading asks again. It is not a
-  timer -- an untouched bridge fetches nothing.
+  once per `REARM_FLOOR_SECS`. This is what closes every window above: the failed read
+  answers "right now", and the next use once the state clears arms it -- no avatar change
+  and no restart required, which is the property to preserve if this is ever reworked. It is
+  not a timer: an untouched bridge fetches nothing.
 
 The armed manifest is trusted only after the **puppet cross-check**: where a manifest
 declares channels at `index_puppet`'s own addresses, its `bits`/`floatTau` must match the

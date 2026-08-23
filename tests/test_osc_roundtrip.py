@@ -6,8 +6,11 @@ can hold without a headset. mDNS discovery is not among them -- browsing a real
 network from a test is flaky and would prove nothing pointing at a known port
 does not.
 """
+import time
+
 import pytest
 
+import vrbridge.osc_manager as om
 from vrbridge.engine import CallbackContext
 from vrbridge.osc_manager import OSCManager
 from vrbridge.utils import ParamState
@@ -208,3 +211,110 @@ def test_oscquery_tree_is_a_two_node_constant(wired):
         tree = json.loads(r.read())
     assert sorted(tree["CONTENTS"]) == ["avatar", "usercamera"]
     assert "Thing" not in json.dumps(tree)
+
+
+# ---------------------------------------------------------------------------
+# The /avatar/change refire window (docs/design.md, Inbound delivery semantics).
+#
+# Measured against a live client 2026-08-22: re-wearing the same avatar id makes the
+# client re-announce /avatar/change with the value it announced last time, the
+# value-equality filter eats it, and no mapping learns its world reset. These pin the
+# carve-out and the doubling it still has to fold; the window is driven by the module
+# constant rather than a patched clock, so nothing here depends on wall-clock timing
+# beyond one short sleep.
+# ---------------------------------------------------------------------------
+
+
+def _collect(mgr):
+    seen = []
+    mgr.set_listener(lambda addr, val: seen.append((addr, val)))
+    return seen
+
+
+def test_a_repeated_avatar_change_fires_again_past_the_fold_window(monkeypatch):
+    """The defect: the same avatar id twice IS two events, because re-wearing an avatar
+    resets every mapping's world."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.05)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")
+    time.sleep(0.06)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")
+
+    assert seen == [("/avatar/change", "avtr_same"), ("/avatar/change", "avtr_same")]
+
+
+def test_the_twin_copy_of_one_avatar_change_is_folded(monkeypatch):
+    """The doubling the filter used to absorb: the client's two sender sockets deliver
+    their copies within 1 ms, and a listener must still see one event."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 5.0)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")
+
+    assert seen == [("/avatar/change", "avtr_same")]
+
+
+def test_a_changed_avatar_id_inside_the_window_still_fires(monkeypatch):
+    """The window folds repeats, never changes: two swaps in quick succession are two
+    events, or the second avatar's arrival is the one that goes missing."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 5.0)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_one")
+    mgr._update_cache_and_fire("/avatar/change", "avtr_two")
+
+    assert seen == [("/avatar/change", "avtr_one"), ("/avatar/change", "avtr_two")]
+
+
+def test_a_repeated_parameter_value_is_still_suppressed(monkeypatch):
+    """The carve-out is per address: a streaming parameter must not wake listeners on
+    every identical frame, which is what the change filter is for."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.0)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/parameters/Thing", 0.5)
+    mgr._update_cache_and_fire("/avatar/parameters/Thing", 0.5)
+
+    assert seen == [("/avatar/parameters/Thing", pytest.approx(0.5))]
+
+
+def test_a_swaps_twin_is_folded_against_the_swap_that_preceded_it(monkeypatch):
+    """The production sequence, and the one that pins where the stamp goes: the cache
+    already holds an avatar, a different one arrives twin-delivered, and the twin must
+    not reset every mapping a second time. Stamping only on a folded repeat passes every
+    other test here and double-fires this."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.05)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_one")
+    # The wearer wore that avatar a while: the swap must be folded against its OWN stamp,
+    # not against one left by the avatar before it, so the earlier stamp is aged out first.
+    time.sleep(0.06)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_two")   # the swap
+    mgr._update_cache_and_fire("/avatar/change", "avtr_two")   # its twin, ~1 ms behind
+
+    assert seen == [("/avatar/change", "avtr_two")]
+
+
+def test_a_folded_repeat_does_not_push_the_window_forward(monkeypatch):
+    """The fold rate-limits a repeat stream rather than silencing it: a repeat eaten at
+    W/2 must not buy the next one another full window, or a stream faster than the window
+    goes dark instead of arriving at window cadence."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.10)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # fires, stamps
+    time.sleep(0.05)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # folded
+    time.sleep(0.06)
+    mgr._update_cache_and_fire("/avatar/change", "avtr_same")  # past the window: fires
+
+    assert len(seen) == 2
