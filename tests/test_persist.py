@@ -192,6 +192,29 @@ def test_a_menu_swap_to_the_same_prefab_restores(rig):
     assert msgs.index((addr("GripSync", "Detached"), True)) < three
 
 
+def test_restore_3_follows_the_payload_by_the_settle_wait(rig):
+    """Intended: Restore=3 reaches the client a settle wait after the last payload write, because
+    the client applies the latest value per parameter per frame and the avatar reads the payload
+    on the 3. Order alone does not show it: a 3 sent straight after the payload is still after it."""
+    r = rig()
+    arrived = {}
+    answer = r.vrc.on_receive
+
+    def stamp(address, value):
+        arrived.setdefault((address, value), time.monotonic())
+        answer(address, value)
+
+    r.vrc.on_receive = stamp
+    worn_a_with(r, Word0=137.0, Detached=True)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync"), f"no completed handshake: {r.restores('GripSync')}"
+    last_payload = max(arrived[(addr("GripSync", "Word0"), 137.0)],
+                       arrived[(addr("GripSync", "Detached"), True)])
+    waited = arrived[(addr("GripSync", "Restore"), 3)] - last_payload
+    # A timer never fires early; the margin is for the payload's own arrival lag on loopback.
+    assert waited >= osc_persist.WRITE_SETTLE_SECS * 0.8, f"3 came {waited * 1e3:.1f} ms after the payload"
+
+
 def test_an_osc_swap_restores_from_the_checkpoint_taken_at_apply(rig):
     """Intended: an OSC swap announces twice, the echo at the request and again at apply, and the
     outgoing avatar keeps emitting in between. The later checkpoint is the final state."""
