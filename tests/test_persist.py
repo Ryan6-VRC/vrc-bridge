@@ -185,7 +185,8 @@ def test_restore_1_follows_the_payload_by_the_write_settle_wait(rig):
     r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.perf_counter())
     worn_a_with(r, Word0=137.0, Detached=True)
     r.load(A2, "GripSync")
-    assert r.completed("GripSync")
+    # The fake stamps in on_receive, after it records the message completed() reads.
+    assert wait_for(lambda: (addr("GripSync", "Restore"), 1) in arrived)
     last_payload = max(arrived[(addr("GripSync", "Word0"), 137.0)],
                        arrived[(addr("GripSync", "Detached"), True)])
     waited = arrived[(addr("GripSync", "Restore"), 1)] - last_payload
@@ -206,7 +207,8 @@ def test_restore_1_is_not_written_before_both_waits_on_the_real_constants(rig, m
     r.set("GripSync", "Announce", 5)
     booted = time.perf_counter()            # before the send, so any lag only adds
     r.vrc.emit(addr("GripSync", "Boot"), 0.5)
-    assert r.completed("GripSync")
+    # The fake stamps in on_receive, after it records the message completed() reads.
+    assert wait_for(lambda: (addr("GripSync", "Restore"), 1) in arrived)
     took = arrived[(addr("GripSync", "Restore"), 1)] - booted
     assert took >= REAL_ANNOUNCE_SETTLE + REAL_WRITE_SETTLE, f"1 came {took * 1e3:.1f} ms after Boot"
 
