@@ -173,17 +173,19 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 ## Persistence across a swap: the rulings, not the mechanism
 
-`osc_persist` writes an avatar-published `BridgePersist/<Name>/` namespace back into the next avatar through the `Restore` handshake. Only the decisions live here. The reserved names, the handshake, the validity rule and which thread waits are the module docstring's; the avatar half is built in vrc-patterns.
+`osc_persist` writes an avatar-published `BridgePersist/<Name>/` namespace back into the next avatar, then writes `Restore` 1. Only the decisions live here. The reserved names, the exchange and its waits, the validity rule and which thread waits are the module docstring's; the avatar half is built in vrc-patterns.
+
+**Nothing is acknowledged.** The avatar half has to be cheap to fit into an avatar that is already complicated, and an acknowledged handshake was most of what it carried. So the bridge awaits nothing from the avatar: it waits `ANNOUNCE_SETTLE_SECS` from `Boot` to decide, `WRITE_SETTLE_SECS` more to write the 1, and is done, while the avatar waits a window of its own sized from those two constants. Do not add an answer the bridge waits for, or a timeout on one.
 
 **The namespace is the contract, and the bridge holds no manifest.** The mapping watches one fnmatch shape through the pattern seam and knows only names that arrive, so the discovery descope in §Settled decisions holds. Do not add a configured list of namespaces, ids or payload names.
 
-**Identity is per prefab, and 0 means off.** A namespace's `Id` default names the prefab it belongs to, so two different payloads built on one composition never restore onto each other. A restore needs the incoming `Announce` to equal the outgoing one.
+**Identity is per prefab, and 0 means off.** A namespace's `Id` default names the prefab it belongs to, so two different payloads built on one composition never restore onto each other. A restore needs an `Announce` from the incoming avatar, arrived since the announcement, that equals the outgoing one; an avatar that sends none is never matched against the outgoing avatar's value.
 
 **The lifetime is one swap.** A → A′ restores and A → B → A′ forgets. Any world or instance join clears, a fresh instance of the same world included, and so does Reset Avatar, because on the wire it is the same event as a join. A newly selected send target is a join too, since it is a client that started or restarted. A failed OSC swap before a real one also forgets, since its echo cannot be told from a request; that cost is accepted. Telling a join from Reset Avatar by tailing the client's log is a last resort, reached for only if nothing on the wire can serve.
 
 **The checkpoint is re-taken at every announcement, echo or not, and consumed at `Boot`.** This builds on the second announcement §The wardrobe will not trust, and is safe only because of what was measured about it on one client build: a rejected swap is followed by nothing, a load announces at apply with nothing from the incoming avatar before it, and a menu swap announces once, at apply. So the last checkpoint before a boot is the outgoing avatar's final state, and a snapshot is consumed only by a boot, which a rejected swap never produces.
 
-**A snapshot is all or nothing, and a timeout never retries.** After a dropped payload write the bridge withholds `Restore=3`, and either wait expiring drops the snapshot, so the avatar boots from defaults rather than placing a prop from a torn pose.
+**A snapshot is all or nothing, and nothing is retried.** After a dropped payload write the bridge withholds `Restore` 1, so the avatar's window expires and it boots from defaults rather than placing a prop from a torn pose. A change, a further `Boot` or a new target during either wait abandons the exchange outright.
 
 **Values replay with the type they arrived with.** Measured, an int sent to a declared float writes garbage rather than nothing, so a whole-number float stays a float and a bool stays a bool.
 

@@ -182,7 +182,7 @@ def test_restore_1_follows_the_payload_by_the_write_settle_wait(rig):
     the 1. Order alone does not show it: a 1 sent straight after the payload is still after it."""
     r = rig()
     arrived = {}
-    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.monotonic())
+    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.perf_counter())
     worn_a_with(r, Word0=137.0, Detached=True)
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
@@ -200,11 +200,11 @@ def test_restore_1_is_not_written_before_both_waits_on_the_real_constants(rig, m
     monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", REAL_ANNOUNCE_SETTLE)
     r = rig()
     arrived = {}
-    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.monotonic())
+    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.perf_counter())
     worn_a_with(r, Word0=1.0)
     r.change(A2)
     r.set("GripSync", "Announce", 5)
-    booted = time.monotonic()               # before the send, so any lag only adds
+    booted = time.perf_counter()            # before the send, so any lag only adds
     r.vrc.emit(addr("GripSync", "Boot"), 0.5)
     assert r.completed("GripSync")
     took = arrived[(addr("GripSync", "Restore"), 1)] - booted

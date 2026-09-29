@@ -185,7 +185,7 @@ One guard worth knowing: a manifest that declares channels at `index_puppet`'s o
 
 ## Persistence across an avatar swap
 
-Keep a world-placed prop where it was when you swap to another avatar carrying the same prop. The avatar publishes its state under `/avatar/parameters/BridgePersist/<Name>/`; the bridge remembers it through one swap and writes it back into the new avatar through a short handshake on `BridgePersist/<Name>/Restore`. Nothing is configured on the bridge side: the avatar's namespace, and the identity it announces, are the whole contract. The avatar half comes from [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns).
+Keep a world-placed prop where it was when you swap to another avatar carrying the same prop. The avatar publishes its state under `/avatar/parameters/BridgePersist/<Name>/`; the bridge remembers it through one swap and writes it back into the new avatar a quarter of a second after it loads, then sets `BridgePersist/<Name>/Restore` to 1 to say the values are in place. The avatar never answers, and one that hears nothing within its own wait starts as it would with no bridge running. Nothing is configured on the bridge side: the avatar's namespace, and the identity it announces, are the whole contract. The avatar half comes from [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns).
 
 It restores only a single swap to an avatar carrying the same prefab. Swapping through a third avatar, Reset Avatar, joining any world (including a rejoin), and VRChat restarting all forget. A bridge started after the avatar loaded restores nothing on the first swap, only once an avatar has loaded in front of it.
 
