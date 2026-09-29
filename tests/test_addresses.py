@@ -165,7 +165,7 @@ def test_bridge_persist_contract():
     assert bp.AVATAR_CHANGE_ADDR == "/avatar/change"
     assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE) == ("Id", "Announce", "Boot", "Restore")
     assert (bp.REST, bp.REQUEST, bp.READY, bp.WRITTEN) == (0, 1, 2, 3)
-    assert bp.ACK_WAIT_SECS == 3.0
+    assert bp.ACK_WAIT_SECS == 5.0
     assert bp.WRITE_SETTLE_SECS == 0.05
 
 

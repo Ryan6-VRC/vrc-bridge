@@ -125,7 +125,10 @@ REST, REQUEST, READY, WRITTEN = 0, 1, 2, 3
 
 #: How long the bridge waits for the avatar's READY after REQUEST, and again for REST after
 #: WRITTEN. A contract constant shared with the avatar side's clip lengths, not a feel value.
-ACK_WAIT_SECS = 3.0
+#: The second wait spans the avatar's place hold, which is a whole wire refresh at the sync
+#: build's floor frame rate, so this is sized to leave that hold room through the frame
+#: hitches an avatar load brings.
+ACK_WAIT_SECS = 5.0
 
 #: Between the last payload write and WRITTEN. The client applies the latest value per parameter
 #: per frame, so this is what puts WRITTEN in a later frame than the payload. Contract, not feel.
