@@ -431,6 +431,33 @@ def test_an_avatar_change_inside_the_write_settle_wait_withholds_restore(rig, mo
     assert r.restores("GripSync") == []
 
 
+@pytest.mark.parametrize("phase", ["settle", "write"])
+def test_a_timer_that_lost_the_race_to_an_abandonment_is_a_no_op(rig, monkeypatch, phase):
+    """Intended: a timer can fire and block on the mapping's lock while the change that abandons
+    it holds the lock, so cancelling it is not enough; run after the change, it must write
+    nothing. Staged by running the abandoned timer's own call after the change, with an equal
+    Announce arrived since, so every rule it would check holds."""
+    monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", 0.3)
+    monkeypatch.setattr(osc_persist, "WRITE_SETTLE_SECS", 0.3)
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    r.vrc.emit(addr("GripSync", "Boot"), 0.5)
+    if phase == "write":
+        assert wait_for(lambda: r.written("GripSync", "Word0") == [1.0])
+    else:
+        time.sleep(STEP)
+    t = r.m._ns["GripSync"].timer
+    r.change(B)                           # abandons; the timer has "already fired"
+    r.set("GripSync", "Announce", 5)
+    t.function(*t.args)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+    if phase == "settle":
+        assert r.written("GripSync", "Word0") == []
+
+
 # --------------------------------------------------------------------------
 # Wire types
 # --------------------------------------------------------------------------
@@ -484,6 +511,37 @@ def test_a_boot_outside_0_1_is_not_a_boot(rig, not_a_boot):
     r.set("GripSync", "Boot", 0.5)
     assert r.completed("GripSync"), r.restores("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_a_boot_redelivered_after_a_zero_is_still_one_boot(rig):
+    """Intended: a doubled Boot is one boot. The change filter folds adjacent copies, but doubled
+    and reordered delivery around the declared 0.0 the avatar also writes puts the draw back past
+    the filter; taken as a further Boot, it would abandon the swap and restore nothing."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    for v in (0.5, 0.0, 0.5):
+        r.vrc.emit(addr("GripSync", "Boot"), v)
+        time.sleep(0.01)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_values_from_before_the_announcement_are_not_the_incoming_avatars(rig):
+    """Intended: at Boot the live values become only what arrived since the last announcement.
+    A value the outgoing avatar sent before it is that avatar's, and the next swap must not
+    restore it as if the incoming avatar held it."""
+    r = rig()
+    worn_a_with(r, Word0=1.0, Extra=9.0)
+    time.sleep(REPEAT_GAP)
+    r.change(A)                           # Reset Avatar: A reloads
+    r.set("GripSync", "Word0", 2.0)       # its home-pose commit; Extra is not re-sent
+    r.boot("GripSync")
+    time.sleep(QUIET)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
 
 
 def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
