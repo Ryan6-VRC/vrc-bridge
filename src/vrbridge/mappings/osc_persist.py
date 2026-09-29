@@ -24,7 +24,9 @@ value with the wire type it arrived with, then `WRITE_SETTLE_SECS` later `Restor
 applies the latest value per parameter per frame, so the wait puts the 1 in a later frame than the
 payload), and the mapping is finished with it. The avatar waits for the 1 in a window of its own
 and boots from defaults without it, so a dropped payload write withholds the 1 -- a snapshot is
-all or nothing -- and nothing is retried. A `/avatar/change`, a further `Boot` for the namespace,
+all or nothing -- and nothing is retried. A decision running more than `LATE_LIMIT_SECS` after its
+`Boot` arrived (a stalled bridge) writes nothing: payload landing after the window closes lands on
+a running prop, which a watching remote sees thrown out of place. A `/avatar/change`, a further `Boot` for the namespace,
 or a newly selected target during either wait abandons the exchange; a per-exchange token makes
 the timer that lost the race a no-op. Payload the snapshot does not name stays at the default the
 avatar reset it to, which is what makes a snapshot complete without holding unchanged values.
@@ -94,6 +96,7 @@ to watch; only writing a snapshot checks `enabled`.
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -121,6 +124,9 @@ ANNOUNCE_SETTLE_SECS = 0.2
 
 #: From the last payload write to `Restore` 1, so the 1 lands in a later client frame.
 WRITE_SETTLE_SECS = 0.05
+
+#: The longest after a `Boot` arrived that a snapshot may still begin writing, inside the window.
+LATE_LIMIT_SECS = 0.6
 
 
 @dataclass
@@ -153,6 +159,7 @@ class _AtBoot:
     ids: Tuple[str, ...]
     checkpoint: Optional[Dict[str, Any]]
     checkpoint_announce: Any
+    arrived: float
 
 
 def _split(address: str) -> Optional[tuple[str, str]]:
@@ -274,9 +281,11 @@ class BridgePersistMapping(Mapping):
             # The same draw again is a repeated delivery of one boot, not a second load.
             return
         ns.last_boot = value
+        arrived = time.monotonic()
         # The avatar reloaded, so an exchange still in flight was for an animator that is gone.
         self._abandon_locked(ns, "a further Boot")
-        at_boot = _AtBoot(ns.baselined, tuple(ns.ids), ns.checkpoint, ns.checkpoint_announce)
+        at_boot = _AtBoot(ns.baselined, tuple(ns.ids), ns.checkpoint, ns.checkpoint_announce,
+                          arrived)
 
         ns.live = dict(ns.since_announce)
         ns.checkpoint = None
@@ -323,6 +332,12 @@ class BridgePersistMapping(Mapping):
             if not self.enabled:
                 self.log.info("BridgePersist/%s booted with a valid snapshot, but the mapping "
                               "is disabled; not restoring.", name)
+                return
+            elapsed = time.monotonic() - at_boot.arrived
+            if elapsed > LATE_LIMIT_SECS:
+                self.log.warning("BridgePersist/%s: the decision ran %.3f s after Boot, past the "
+                                 "%.3f s limit; dropping the snapshot unwritten, so the avatar "
+                                 "boots from defaults.", name, elapsed, LATE_LIMIT_SECS)
                 return
             snapshot = at_boot.checkpoint
             ok = True

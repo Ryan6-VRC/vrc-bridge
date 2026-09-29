@@ -157,7 +157,7 @@ def test_quant_directory_addresses():
 
 
 def test_bridge_persist_contract():
-    """The namespace root, the reserved names, the Restore values and the two bridge-side waits
+    """The namespace root, the reserved names, the Restore values, the two bridge-side waits and the late limit
     are the wire contract with the avatar half, whose window is sized from these waits. Changed
     here alone, a restore either never starts or lands after the avatar gave up, with nothing
     logged."""
@@ -167,6 +167,7 @@ def test_bridge_persist_contract():
     assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE) == ("Id", "Announce", "Boot", "Restore")
     assert (bp.REST, bp.RESTORED) == (0, 1)
     assert bp.ANNOUNCE_SETTLE_SECS == 0.2
+    assert bp.LATE_LIMIT_SECS == 0.6
     assert bp.WRITE_SETTLE_SECS == 0.05
 
 

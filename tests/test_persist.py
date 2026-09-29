@@ -42,6 +42,7 @@ UNWEARABLE = "avtr_ffffffff-0000-0000-0000-000000000000"
 
 REAL_ANNOUNCE_SETTLE = osc_persist.ANNOUNCE_SETTLE_SECS
 REAL_WRITE_SETTLE = osc_persist.WRITE_SETTLE_SECS
+REAL_LATE_LIMIT = osc_persist.LATE_LIMIT_SECS
 FAST_ANNOUNCE_SETTLE = 0.1
 
 STEP = 0.05
@@ -457,6 +458,26 @@ def test_a_timer_that_lost_the_race_to_an_abandonment_is_a_no_op(rig, monkeypatc
     time.sleep(QUIET)
     assert r.restores("GripSync") == []
     if phase == "settle":
+        assert r.written("GripSync", "Word0") == []
+
+
+@pytest.mark.parametrize("limit, restored", [(FAST_ANNOUNCE_SETTLE / 2, False),
+                                             (REAL_LATE_LIMIT, True)], ids=["late", "on-time"])
+def test_a_decision_past_the_late_limit_writes_nothing(rig, monkeypatch, limit, restored):
+    """Intended: payload landing after the avatar's window closed lands on a running prop, so a
+    decision running more than LATE_LIMIT_SECS after its Boot arrived -- a stalled bridge --
+    writes no payload and no 1, and one inside the limit is unaffected. The stall is staged by
+    shrinking the limit below the settle wait, which the decision always runs after."""
+    monkeypatch.setattr(osc_persist, "LATE_LIMIT_SECS", limit)
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.load(A2, "GripSync")
+    if restored:
+        assert r.completed("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 1.0}
+    else:
+        time.sleep(QUIET)
+        assert r.restores("GripSync") == []
         assert r.written("GripSync", "Word0") == []
 
 
