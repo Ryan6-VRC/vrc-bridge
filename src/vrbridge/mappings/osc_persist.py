@@ -26,10 +26,11 @@ payload), and the mapping is finished with it. The avatar waits for the 1 in a w
 and boots from defaults without it, so a dropped payload write withholds the 1 -- a snapshot is
 all or nothing -- and nothing is retried. A decision running more than `LATE_LIMIT_SECS` after its
 `Boot` arrived (a stalled bridge) writes nothing: payload landing after the window closes lands on
-a running prop, which a watching remote sees thrown out of place. A `/avatar/change`, a further `Boot` for the namespace,
-or a newly selected target during either wait abandons the exchange; a per-exchange token makes
-the timer that lost the race a no-op. Payload the snapshot does not name stays at the default the
-avatar reset it to, which is what makes a snapshot complete without holding unchanged values.
+a running prop, which a watching remote sees thrown out of place. A `/avatar/change`, a further
+`Boot` for the namespace, or a newly selected target during either wait abandons the exchange; a
+per-exchange token makes the timer that lost the race a no-op. Payload the snapshot does not name
+stays at the default the avatar reset it to, which is what makes a snapshot complete without holding
+unchanged values.
 
 **What is kept per namespace.** The live payload values, each as the Python value python-osc
 parsed, so it replays with its wire type (an int sent to a declared float writes garbage, and a
@@ -82,10 +83,12 @@ announcement at apply, and the incoming one first writes payload a fifth of a se
 The Av3Emulator is the narrow case: its re-send of declared defaults follows its announcement
 inside a few milliseconds.
 
-**Reordering within one address.** A payload handler stores the value the manager's cache now
+**Reordering within one address.** A payload handler stores the value the manager's cache
 holds rather than the one it was handed: two datagrams for one address can reach this mapping in
 reverse arrival order (`docs/design.md` §Inbound delivery semantics), and the cache is
-last-arrival-wins under its lock.
+last-arrival-wins under its lock. It reads the cache under the mapping's lock, in the same hold
+as the store, so a handler cannot read, be overtaken by the newer datagram's handler, and then
+store the older value over it.
 
 **Every shipped router registers it always-on** (`routers._register_persist`), outside mode
 switching, because a swap can happen in any mode. **`enabled` belongs to the router.**
@@ -107,7 +110,7 @@ from vrbridge.mappings.mapping_base import Mapping
 
 # The namespace root, the reserved names and both waits are the wire contract with the avatar
 # side, not settings -- a typo here is a diff rather than a silent runtime miss (settings.py's
-# header rule). The avatar's window is sized from the two waits.
+# header rule). The avatar's window has to outlast LATE_LIMIT_SECS plus WRITE_SETTLE_SECS.
 NAMESPACE_ROOT = "/avatar/parameters/BridgePersist/"
 NAMESPACE_PATTERN = NAMESPACE_ROOT + "*"
 AVATAR_CHANGE_ADDR = "/avatar/change"
@@ -193,8 +196,9 @@ class BridgePersistMapping(Mapping):
         # lifetime rule forbids.
         self._reload_as_swap = treat_reload_as_swap
         # One plain Lock over all namespace state. Held across UDP sends (sendto, never a
-        # fetch) and across forget(), which nests _lock -> _cache_lock; nothing takes them the
-        # other way, because _update_cache_and_fire releases _cache_lock before firing.
+        # fetch) and across forget() and a payload's cache read, which nest _lock ->
+        # _cache_lock; nothing takes them the other way, because _update_cache_and_fire
+        # releases _cache_lock before firing.
         self._lock = threading.Lock()
         self._ns: Dict[str, _Namespace] = {}
         # The last id announced on /avatar/change, echo or not: what a namespace records as
@@ -255,10 +259,6 @@ class BridgePersistMapping(Mapping):
                 self.log.info("BridgePersist/%s: Restore is back at 0 (the avatar ending a "
                               "restore, or resetting its namespace).", name)
             return
-        if rest not in (ANNOUNCE, BOOT):
-            # Payload: take the cache's value, which is the latest arrival even when this
-            # listener fires after a newer one for the same address (module docstring).
-            value = ctx.get(address, value)
         with self._lock:
             ns = self._ns.get(name)
             if ns is None:
@@ -269,6 +269,10 @@ class BridgePersistMapping(Mapping):
             elif rest == BOOT:
                 self._on_boot_locked(ns, value)
             else:
+                # Payload: take the cache's value, read under our lock, which is the latest
+                # arrival even when this listener fires after a newer one for the same address
+                # or waits here while one lands (module docstring).
+                value = ctx.get(address, value)
                 ns.live[address] = value
                 ns.since_announce[address] = value
 
@@ -381,6 +385,6 @@ class BridgePersistMapping(Mapping):
 
     def _forget_locked(self, ns: _Namespace) -> None:
         # Payload and Announce; /avatar/change is never here.
-        for addr in set(ns.live) | set(ns.checkpoint or ()):
+        for addr in ns.live:
             self.bridge.osc.forget(addr)
         self.bridge.osc.forget(ns.addr(ANNOUNCE))

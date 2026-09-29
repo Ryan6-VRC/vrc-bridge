@@ -13,9 +13,10 @@ from .osc_wardrobe import WardrobeMapping
 # RemyMapping is deliberately absent: `import *` walks __all__ with getattr, which
 # would fire the lazy hook and pull in httpx and Pillow -- the exact cost the extra
 # exists to avoid, and a hard failure on an install without it. Import it by name.
-__all__ = ["BridgePersistMapping", "IndexPuppetMapping", "VirtualLensMapping", "UserCameraMapping", "VRCLensMapping",
-           "MuteProxyMapping", "ParamLogMapping", "QuantChannelDirectory", "VRCFTMapping",
-           "WardrobeMapping", "Mapping", "MappingRouter"]
+__all__ = ["BridgePersistMapping", "IndexPuppetMapping", "VirtualLensMapping",
+           "UserCameraMapping", "VRCLensMapping", "MuteProxyMapping", "ParamLogMapping",
+           "QuantChannelDirectory", "VRCFTMapping", "WardrobeMapping", "Mapping",
+           "MappingRouter"]
 
 #: Everything importable from here, including the lazily-resolved names, so tab
 #: completion and dir() still show them without resolving anything.

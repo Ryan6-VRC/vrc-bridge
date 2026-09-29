@@ -22,6 +22,7 @@ values. A same-id re-announcement is spaced past `REFIRE_FOLD_WINDOW_SECS`, as e
 by seconds, or the manager folds it as a twin.
 """
 import random
+import threading
 import time
 from unittest import mock
 
@@ -576,6 +577,47 @@ def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
     newer = addr("GripSync", "Word0")
     r.set("GripSync", "Word0", 2.0)
     r.bridge._on_osc_event(newer, 1.0)    # the older datagram's listener, firing late
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
+
+
+def test_a_payload_listener_overtaken_while_waiting_for_the_lock_keeps_the_newer_value(rig):
+    """Intended: a listener for the older value can wait on the mapping's lock while the newer
+    datagram lands in the manager's cache. What it stores once it runs must be what the cache
+    holds then, or the snapshot places the prop from a pose the avatar has left. Staged by holding
+    the mapping's lock, parking the older value's listener on it, landing the newer value in the
+    cache, and only then letting the listener run."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    time.sleep(QUIET)
+    word = addr("GripSync", "Word0")
+    osc = r.bridge.osc
+    real_lock = r.m._lock
+    parked = threading.Event()
+
+    class ParkingLock:
+        """The mapping's lock, flagging the listener thread as it starts to wait on it."""
+        def __enter__(self):
+            if threading.current_thread() is listener:
+                parked.set()
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    listener = threading.Thread(target=r.bridge._on_osc_event, args=(word, 1.5))
+    r.m._lock = ParkingLock()
+    with real_lock:
+        with osc._cache_lock:
+            osc._cache[word] = 1.5            # the older datagram's cache write
+        listener.start()
+        assert parked.wait(3.0), "the listener never reached the mapping's lock"
+        with osc._cache_lock:
+            osc._cache[word] = 2.0            # the newer datagram's, while the older one waits
+    listener.join(3.0)
+    r.m._lock = real_lock
+    assert r.m._ns["GripSync"].live[word] == osc.get_cached(word) == 2.0
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 2.0}
