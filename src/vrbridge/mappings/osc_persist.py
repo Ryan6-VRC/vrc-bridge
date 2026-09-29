@@ -76,7 +76,20 @@ So it does not depend on the tick at all: the settle wait and both ack deadlines
 `threading.Timer` threads, identical in both homes, and a per-handshake token makes a timer that
 lost the race a no-op. The router tick's ~22 ms granularity would also have padded a 50 ms settle.
 
-**Reordering.** A payload handler stores the value the manager's cache now holds rather than the one
+**Order across addresses is assumed, and the wire's own spacing is what carries it.** Dispatch is
+thread-per-datagram, so nothing orders the handler for one address against another's, and three
+decisions here read state a different address wrote: the checkpoint at `/avatar/change` against
+the outgoing avatar's last payload and the incoming avatar's first, and validity at `Boot`
+against `Announce`. Each pair is separated on the wire by far more than a handler takes: the
+outgoing avatar falls silent about a second before the announcement at apply, the incoming one
+first writes payload a fifth of a second after it, and the avatar side holds `Announce` ahead of
+`Boot` by a contract constant, `ANNOUNCE_LEAD_SECS` (0.1). Measured on loopback with the sender
+in its own process, no pair was handled in reverse at any spacing from 0 to 100 ms, with or
+without other threads working. The Av3Emulator is the narrow case: its full re-send of declared
+defaults follows its announcement inside 3 ms. A mapping that had to hold under adversarial
+scheduling would need a receive sequence from `OSCManager`, which it does not offer.
+
+**Reordering within one address.** A payload handler stores the value the manager's cache now holds rather than the one
 it was handed: two datagrams for one address can reach this mapping in reverse arrival order
 (`docs/design.md` §Inbound delivery semantics), and the cache is last-arrival-wins under its lock.
 `Restore` is the exception and uses the delivered value, because a step is an edge, not a level --
