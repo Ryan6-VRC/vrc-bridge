@@ -175,7 +175,7 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 `osc_persist` writes an avatar-published `BridgePersist/<Name>/` namespace back into the next avatar, then writes `Restore` 1. Only the decisions live here. The reserved names, the exchange and its waits, the validity rule and which thread waits are the module docstring's; the avatar half is built in vrc-patterns.
 
-**Nothing is acknowledged.** The avatar half has to be cheap to fit into an avatar that is already complicated, and an acknowledged handshake was most of what it carried. So the bridge awaits nothing from the avatar and finishes on its own clock, and the avatar waits in a window of its own, which has to outlast `LATE_LIMIT_SECS` plus `WRITE_SETTLE_SECS` after `Boot`, the latest the bridge can write the 1. Do not add an answer the bridge waits for, or a timeout on one.
+**Nothing is acknowledged.** The avatar half has to be cheap to fit into an avatar that is already complicated, and an acknowledged handshake would be most of what it carries. So the bridge awaits nothing from the avatar and finishes on its own clock, and the avatar waits in a window of its own, which has to outlast `LATE_LIMIT_SECS` plus `WRITE_SETTLE_SECS` after `Boot`, the latest the bridge can write the 1. Do not add an answer the bridge waits for, or a timeout on one.
 
 **The namespace is the contract, and the bridge holds no manifest.** The mapping knows only names that arrive, so the discovery descope in §Settled decisions holds. Do not add a configured list of namespaces, ids or payload names.
 
