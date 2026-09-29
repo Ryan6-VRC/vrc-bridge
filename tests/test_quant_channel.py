@@ -6,9 +6,10 @@ move it), so the refactor is checked against the pins rather than against itself
 
 Intent before test, per `docs/design.md`. Two behaviours here are wire contracts a test
 written casually would miss sideways: the float companion must leave the boundary as a
-**float object** (an int reaching a declared float parameter is dropped silently on both
-venues -- `docs/osc.md`), and the bits leave as plain ints, which is a *valid* bool write
-that must not be "fixed" into OSC booleans for symmetry with VRCFT.
+**float object** (an int reaching a declared float parameter is never a float write: measured
+in the client it lands as a garbage value -- `docs/osc.md`), and the bits leave as plain
+ints, which is a *valid* bool write that must not be "fixed" into OSC booleans for symmetry
+with VRCFT.
 """
 import math
 
@@ -192,7 +193,7 @@ def spec(**kw):
 def test_the_float_companion_is_a_float_object_even_for_int_input():
     """Intended: the boundary coercion is load-bearing. `_clamp_unit(0)` is type-preserving,
     so an int 0 survives arithmetic that looks float-typed -- and an int arriving at a
-    declared float parameter is dropped silently on both venues (`docs/osc.md`). The
+    declared float parameter lands in the client as a garbage value (`docs/osc.md`). The
     assertion is on the *type*, which is the only place this defect is visible headlessly."""
     wire = Wire()
     ch = QuantChannel(spec())
