@@ -1,28 +1,29 @@
-"""Bridge persistence: one swap's worth of avatar state, written back through the Restore handshake.
+"""Bridge persistence: one swap's worth of avatar state, written back ahead of `Restore` 1.
 
 Intent before test, per `docs/design.md`. Every case here is driven end to end over loopback: the
-fake is the client, `FakeVRChat.emit` is its out-port stream, its `echo_inbound` is the client's
-echo of every inbound write, and an `Avatar` answering on `on_receive` is the avatar half of the
-handshake. The intents the suite exists to hold:
+fake is the client, `FakeVRChat.emit` is its out-port stream and its `echo_inbound` is the client's
+echo of every inbound write. The avatar answers nothing, so what it would place from is read off
+the wire: the payload written before the 1 (`Rig.placed_from`). The intents the suite holds:
 
 * **Restore exactly one swap to the same prefab.** A -> A' restores; A -> B -> A', a reload of the
   worn avatar (world join or Reset Avatar, one event on the wire), a failed swap followed by a real
   one, and a change of prefab all forget. An OSC change naming the worn avatar is an echo that
   reloads nothing, and changes nothing.
-* **The last checkpoint before `Boot` is the one restored**, which after an OSC swap is the one
-  taken at apply, not at the request-time echo.
-* **Idempotent per value.** Doubled delivery of everything, and the bridge's own echoed 1 and 3,
-  advance nothing.
-* **Each value goes back with the type it arrived with.** An int written to a declared float
-  writes garbage, so a whole-number float must stay a float and a bool must stay a bool.
+* **Validity waits for the incoming avatar's own `Announce`,** in either order against its `Boot`,
+  and never matches an avatar that sent none against the outgoing avatar's value.
+* **Anything that moves the avatar during a wait abandons the exchange,** and the timer that lost
+  the race writes nothing.
+* **Idempotent per value, and each value goes back with the type it arrived with.**
 
 Timing: thread-per-datagram dispatch means two datagrams sent back to back can reach the mapping
 in either order, so the avatar's boot steps are spaced by `STEP`, as the real ones are by frames.
-A same-id re-announcement is spaced past `REFIRE_FOLD_WINDOW_SECS`, as every real one is by
-seconds, or the manager folds it as a twin.
+`ANNOUNCE_SETTLE_SECS` is shortened for speed everywhere but the one test that holds the real
+values. A same-id re-announcement is spaced past `REFIRE_FOLD_WINDOW_SECS`, as every real one is
+by seconds, or the manager folds it as a twin.
 """
 import random
 import time
+from unittest import mock
 
 import pytest
 
@@ -39,8 +40,19 @@ A2 = "avtr_aaaaaaaa-0000-0000-0000-000000000002"   # A', a different avatar with
 B = "avtr_bbbbbbbb-0000-0000-0000-000000000001"
 UNWEARABLE = "avtr_ffffffff-0000-0000-0000-000000000000"
 
+REAL_ANNOUNCE_SETTLE = osc_persist.ANNOUNCE_SETTLE_SECS
+REAL_WRITE_SETTLE = osc_persist.WRITE_SETTLE_SECS
+FAST_ANNOUNCE_SETTLE = 0.1
+
 STEP = 0.05
 REPEAT_GAP = REFIRE_FOLD_WINDOW_SECS + 0.1
+# Long enough for a decision and its Restore write to have happened, at the shortened settle.
+QUIET = 0.4
+
+
+@pytest.fixture(autouse=True)
+def fast_settle(monkeypatch):
+    monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", FAST_ANNOUNCE_SETTLE)
 
 
 def addr(ns: str, leaf: str) -> str:
@@ -56,39 +68,8 @@ def wait_for(cond, timeout=3.0) -> bool:
     return False
 
 
-class Avatar:
-    """The avatar half of the handshake, answering the bridge's Restore writes.
-
-    `answer_request` / `answer_written` switch off the answer to 1 and to 3, for the timeouts.
-    `reply_first` sends the answer before the client's echo of the write it answers, which is the
-    reverse of the usual arrival order on the Restore address; the fake's own echo is switched off
-    for it and the echo sent here instead, spaced so the order is the one intended.
-    """
-
-    def __init__(self, vrc: FakeVRChat):
-        self.vrc = vrc
-        self.answer_request = True
-        self.answer_written = True
-        self.reply_first = False
-
-    def receive(self, address, value):
-        reply = None
-        if address.endswith("/Restore"):
-            if value == 1 and self.answer_request:
-                reply = 2
-            elif value == 3 and self.answer_written:
-                reply = 0
-        if self.reply_first:
-            if reply is not None:
-                self.vrc.emit(address, reply)
-                time.sleep(0.03)
-            self.vrc.emit(address, value)
-        elif reply is not None:
-            self.vrc.emit(address, reply)
-
-
 class Rig:
-    """A started bridge pinned at the fake, the mapping registered and active, an avatar answering."""
+    """A started bridge pinned at the fake, the mapping registered and active."""
 
     def __init__(self, vrc: FakeVRChat, *, copies=1, activate=True, **kw):
         self.vrc = vrc
@@ -98,8 +79,6 @@ class Rig:
         vrc.out_port = self.bridge.osc.osc_port
         vrc.copies = copies
         vrc.echo_inbound = True
-        self.avatar = Avatar(vrc)
-        vrc.on_receive = self.avatar.receive
         self.m = BridgePersistMapping(self.bridge, **kw)
         self.m.register()
         if activate:
@@ -140,12 +119,19 @@ class Rig:
     def written(self, ns, leaf):
         return self.vrc.values_for(addr(ns, leaf))
 
-    def idle(self, ns):
-        return self.m._ns[ns].awaiting is None
-
     def completed(self, ns):
-        """Restore 1 and 3 written, and the avatar's 0 accepted."""
-        return wait_for(lambda: self.restores(ns) == [1, 3] and self.idle(ns))
+        """Restore 1 written, once."""
+        return wait_for(lambda: self.restores(ns) == [1])
+
+    def placed_from(self, ns):
+        """What the avatar reads on the 1: each payload leaf's last value written before it."""
+        restore, prefix, seen = addr(ns, "Restore"), addr(ns, ""), {}
+        for a, v in list(self.vrc.messages):
+            if a == restore and v == 1:
+                return seen
+            if a.startswith(prefix) and a != restore:
+                seen[a[len(prefix):]] = v
+        return None
 
 
 @pytest.fixture
@@ -176,43 +162,53 @@ def worn_a_with(r, ns="GripSync", **payload):
 # --------------------------------------------------------------------------
 
 def test_a_menu_swap_to_the_same_prefab_restores(rig):
-    """Intended: A -> A' by the menu, one announcement at apply, restores A's final state, and the
-    payload is written before Restore=3 so the avatar reads it after the settle wait."""
+    """Intended: A -> A' by the menu, one announcement at apply, restores A's final state, every
+    value written before Restore 1, which is written once and never followed by anything."""
     r = rig()
     worn_a_with(r, Word0=137.0, Detached=True)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == [], "a join must not restore"
 
     r.load(A2, "GripSync")
-    assert r.completed("GripSync"), f"no completed handshake: {r.restores('GripSync')}"
-    assert r.written("GripSync", "Word0") == [137.0]
-    assert r.written("GripSync", "Detached") == [True]
-    msgs = r.vrc.messages
-    three = msgs.index((addr("GripSync", "Restore"), 3))
-    assert msgs.index((addr("GripSync", "Word0"), 137.0)) < three
-    assert msgs.index((addr("GripSync", "Detached"), True)) < three
+    assert r.completed("GripSync"), f"no Restore 1: {r.restores('GripSync')}"
+    assert r.placed_from("GripSync") == {"Word0": 137.0, "Detached": True}
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1], "the bridge wrote Restore again"
 
 
-def test_restore_3_follows_the_payload_by_the_settle_wait(rig):
-    """Intended: Restore=3 reaches the client a settle wait after the last payload write, because
-    the client applies the latest value per parameter per frame and the avatar reads the payload
-    on the 3. Order alone does not show it: a 3 sent straight after the payload is still after it."""
+def test_restore_1_follows_the_payload_by_the_write_settle_wait(rig):
+    """Intended: the 1 reaches the client a settle wait after the last payload write, because the
+    client applies the latest value per parameter per frame and the avatar reads the payload on
+    the 1. Order alone does not show it: a 1 sent straight after the payload is still after it."""
     r = rig()
     arrived = {}
-    answer = r.vrc.on_receive
-
-    def stamp(address, value):
-        arrived.setdefault((address, value), time.monotonic())
-        answer(address, value)
-
-    r.vrc.on_receive = stamp
+    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.monotonic())
     worn_a_with(r, Word0=137.0, Detached=True)
     r.load(A2, "GripSync")
-    assert r.completed("GripSync"), f"no completed handshake: {r.restores('GripSync')}"
+    assert r.completed("GripSync")
     last_payload = max(arrived[(addr("GripSync", "Word0"), 137.0)],
                        arrived[(addr("GripSync", "Detached"), True)])
-    waited = arrived[(addr("GripSync", "Restore"), 3)] - last_payload
+    waited = arrived[(addr("GripSync", "Restore"), 1)] - last_payload
     # A timer never fires early; the margin is for the payload's own arrival lag on loopback.
-    assert waited >= osc_persist.WRITE_SETTLE_SECS * 0.8, f"3 came {waited * 1e3:.1f} ms after the payload"
+    assert waited >= REAL_WRITE_SETTLE * 0.8, f"1 came {waited * 1e3:.1f} ms after the payload"
+
+
+def test_restore_1_is_not_written_before_both_waits_on_the_real_constants(rig, monkeypatch):
+    """Intended: the contract's timing, on the shipped values. The avatar sizes its window from
+    ANNOUNCE_SETTLE_SECS + WRITE_SETTLE_SECS after Boot, and a 1 written sooner would mean the
+    decision did not wait for a late Announce."""
+    monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", REAL_ANNOUNCE_SETTLE)
+    r = rig()
+    arrived = {}
+    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.monotonic())
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    booted = time.monotonic()               # before the send, so any lag only adds
+    r.vrc.emit(addr("GripSync", "Boot"), 0.5)
+    assert r.completed("GripSync")
+    took = arrived[(addr("GripSync", "Restore"), 1)] - booted
+    assert took >= REAL_ANNOUNCE_SETTLE + REAL_WRITE_SETTLE, f"1 came {took * 1e3:.1f} ms after Boot"
 
 
 def test_an_osc_swap_restores_from_the_checkpoint_taken_at_apply(rig):
@@ -225,7 +221,7 @@ def test_an_osc_swap_restores_from_the_checkpoint_taken_at_apply(rig):
     time.sleep(REPEAT_GAP)
     r.load(A2, "GripSync")            # the announcement at apply, then A' boots
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [2.0], "restored from the echo's checkpoint"
+    assert r.placed_from("GripSync") == {"Word0": 2.0}, "restored from the echo's checkpoint"
 
 
 def test_a_to_b_to_a_forgets(rig):
@@ -235,7 +231,7 @@ def test_a_to_b_to_a_forgets(rig):
     worn_a_with(r, Word0=1.0)
     r.change(B)
     r.load(A2, "GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
 
@@ -251,7 +247,7 @@ def test_away_and_back_to_the_same_avatar_forgets(rig):
     r.change(A)                       # the request-time echo
     time.sleep(REPEAT_GAP)
     r.load(A, "GripSync")             # the announcement at apply, then the boot
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
 
@@ -262,7 +258,7 @@ def test_reset_avatar_forgets(rig):
     worn_a_with(r, Word0=1.0)
     time.sleep(REPEAT_GAP)
     r.load(A, "GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
 
@@ -277,7 +273,7 @@ def test_an_osc_change_naming_the_worn_avatar_changes_nothing(rig):
     assert r.restores("GripSync") == []
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [3.0]
+    assert r.placed_from("GripSync") == {"Word0": 3.0}
 
 
 def test_a_failed_osc_swap_before_a_real_one_forgets(rig):
@@ -287,21 +283,20 @@ def test_a_failed_osc_swap_before_a_real_one_forgets(rig):
     worn_a_with(r, Word0=1.0)
     r.change(UNWEARABLE)
     r.load(A2, "GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
 
 def test_two_namespaces_on_one_avatar_restore_independently(rig):
-    """Intended: each namespace is its own snapshot and handshake, and writes only its own names."""
+    """Intended: each namespace is its own snapshot and exchange, and writes only its own names."""
     r = rig()
     r.load(A, "GripSync", "Lamp")
     r.set("GripSync", "Word0", 1.5)
     r.set("Lamp", "On", True)
     r.load(A2, "GripSync", "Lamp")
     assert r.completed("GripSync") and r.completed("Lamp")
-    assert r.written("GripSync", "Word0") == [1.5]
-    assert r.written("Lamp", "On") == [True]
-    assert r.written("GripSync", "On") == [] and r.written("Lamp", "Word0") == []
+    assert r.placed_from("GripSync") == {"Word0": 1.5}
+    assert r.placed_from("Lamp") == {"On": True}
 
 
 def test_a_namespace_whose_prefab_changed_forgets_while_its_neighbour_restores(rig):
@@ -318,8 +313,122 @@ def test_a_namespace_whose_prefab_changed_forgets_while_its_neighbour_restores(r
     r.vrc.emit(addr("GripSync", "Boot"), 0.25)
     r.vrc.emit(addr("Lamp", "Boot"), 0.75)
     assert r.completed("GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("Lamp") == []
+
+
+def test_boot_before_its_announce_restores(rig):
+    """Intended: the avatar writes Announce and Boot in one state, so either can reach the bridge
+    first. An Announce arriving inside the settle wait after its Boot is the incoming avatar's,
+    and the swap restores."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Boot", 0.5)
+    r.set("GripSync", "Announce", 5)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_a_boot_from_an_avatar_that_sends_no_announce_does_not_restore(rig):
+    """Intended: the outgoing avatar's Announce value stands across the change, because the next
+    checkpoint needs it; only an Announce arriving since the change speaks for the incoming
+    avatar. One that boots and sends none is not matched against the outgoing value."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Boot", 0.5)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+@pytest.mark.parametrize("announce_first", [True, False], ids=["announce-first", "boot-first"])
+def test_an_incoming_announce_that_differs_does_not_restore_in_either_order(rig, announce_first):
+    """Intended: a different Id is a different prefab, whether its Announce arrives before its
+    Boot or inside the settle wait after it."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    if announce_first:
+        r.set("GripSync", "Announce", 6)
+        r.set("GripSync", "Boot", 0.5)
+    else:
+        r.set("GripSync", "Boot", 0.5)
+        r.set("GripSync", "Announce", 6)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+# --------------------------------------------------------------------------
+# Abandonment: anything that moves the avatar during a wait
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def long_settle(monkeypatch):
+    """Room to land an event inside the wait without racing it."""
+    monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", 0.3)
+
+
+def test_an_avatar_change_inside_the_settle_wait_abandons_the_decision(rig, long_settle):
+    """Intended: the Boot's animator is gone once another change arrives, so its decision must
+    not run -- even when, by the time its timer fires, an equal Announce has arrived since that
+    change and every captured rule holds."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.vrc.emit(addr("GripSync", "Boot"), 0.5)
+    time.sleep(STEP)
+    r.change(B)                           # inside the wait
+    r.vrc.emit(addr("GripSync", "Announce"), 5)
+    time.sleep(0.3 + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+def test_a_further_boot_inside_the_settle_wait_abandons_the_first(rig, long_settle):
+    """Intended: a second Boot is a second load; the first decision is dropped and the second
+    starts its own, which finds no change since the first Boot and restores nothing."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    r.vrc.emit(addr("GripSync", "Boot"), 0.25)
+    time.sleep(STEP)
+    r.vrc.emit(addr("GripSync", "Boot"), 0.75)
+    time.sleep(0.3 + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+def test_a_new_target_inside_the_settle_wait_abandons_even_a_same_name_namespace(rig, long_settle):
+    """Intended: a newly selected target deletes every namespace, and a timer from before it must
+    not act on a namespace of the same name that booted after it, with state it never had."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    r.vrc.emit(addr("GripSync", "Boot"), 0.25)
+    time.sleep(STEP)
+    r.bridge._on_target_selected(("127.0.0.1", 9000))
+    r.boot("GripSync")                    # the same name, new, booting inside the old wait
+    time.sleep(0.3 + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+def test_an_avatar_change_inside_the_write_settle_wait_withholds_restore(rig, monkeypatch):
+    """Intended: the payload is out, but the avatar it was for is being replaced; the 1 would tell
+    the next animator to place from values that were never its snapshot."""
+    monkeypatch.setattr(osc_persist, "WRITE_SETTLE_SECS", 0.3)
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.load(A2, "GripSync")
+    assert wait_for(lambda: r.written("GripSync", "Word0") == [1.0])
+    r.change(B)
+    time.sleep(0.3 + QUIET)
+    assert r.restores("GripSync") == []
 
 
 # --------------------------------------------------------------------------
@@ -337,10 +446,10 @@ def test_every_wire_type_goes_back_with_the_type_it_arrived_with(rig):
         r.set("GripSync", leaf, v)
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
+    placed = r.placed_from("GripSync")
     for leaf, v in payload.items():
-        got = r.written("GripSync", leaf)
-        assert got == [v], f"{leaf}: {got}"
-        assert type(got[0]) is type(v), f"{leaf} came back as {type(got[0]).__name__}"
+        assert placed.get(leaf) == v, f"{leaf}: {placed.get(leaf)!r}"
+        assert type(placed[leaf]) is type(v), f"{leaf} came back as {type(placed[leaf]).__name__}"
 
 
 # --------------------------------------------------------------------------
@@ -349,49 +458,32 @@ def test_every_wire_type_goes_back_with_the_type_it_arrived_with(rig):
 
 def test_doubled_delivery_of_everything_restores_once(rig):
     """Intended: idempotent per value. Every inbound message -- the announcements, Announce, Boot,
-    payload, the avatar's 2 and 0, and the echo of every write -- arrives twice, and the bridge
-    writes each thing once."""
+    payload, and the echo of every write -- arrives twice, and the bridge writes each thing once."""
     r = rig(copies=2)
     worn_a_with(r, Word0=137.0, Detached=True)
     r.load(A2, "GripSync")
     assert r.completed("GripSync"), r.restores("GripSync")
-    time.sleep(0.2)
-    assert r.restores("GripSync") == [1, 3]
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1]
     assert r.written("GripSync", "Word0") == [137.0]
     assert r.written("GripSync", "Detached") == [True]
 
 
-def test_the_avatars_answer_arriving_before_our_echo_still_advances(rig):
-    """Intended: on the Restore address the avatar's 2 can land before the echo of our 1, and its
-    0 before the echo of our 3. The step is the value becoming 2 (or 0), whatever arrives around
-    it, and the late echo is ignored rather than restarting anything."""
-    r = rig()
-    worn_a_with(r, Word0=1.0)
-    r.vrc.echo_inbound = False
-    r.avatar.reply_first = True
-    r.load(A2, "GripSync")
-    assert r.completed("GripSync"), r.restores("GripSync")
-    time.sleep(0.2)
-    assert r.restores("GripSync") == [1, 3]
-    assert r.written("GripSync", "Word0") == [1.0]
-
-
 @pytest.mark.parametrize("not_a_boot", [0.0, 1, True, 1.5])
 def test_a_boot_outside_0_1_is_not_a_boot(rig, not_a_boot):
-    """Intended: a boot draws a float from (0, 1]. The avatar resetting its namespace writes Boot
-    back to 0.0 before its real draw; taken as a boot, that 0 would start a handshake against an
-    animator that has not booted and the real boot would then find the swap already consumed.
-    So it starts nothing and records nothing, and the real boot after it restores normally."""
+    """Intended: a boot draws a float from (0, 1]. The emulator re-sends the declared 0.0 on load;
+    taken as a boot, it would abandon or consume the swap before the real draw. So it starts
+    nothing and records nothing, and the real boot after it restores normally."""
     r = rig()
     worn_a_with(r, Word0=1.0)
     r.change(A2)
     r.set("GripSync", "Announce", 5)
     r.set("GripSync", "Boot", not_a_boot)
-    time.sleep(0.2)
-    assert r.restores("GripSync") == [], f"Boot={not_a_boot!r} started a handshake"
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [], f"Boot={not_a_boot!r} started an exchange"
     r.set("GripSync", "Boot", 0.5)
     assert r.completed("GripSync"), r.restores("GripSync")
-    assert r.written("GripSync", "Word0") == [1.0]
+    assert r.placed_from("GripSync") == {"Word0": 1.0}
 
 
 def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
@@ -405,14 +497,14 @@ def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
     r.bridge._on_osc_event(newer, 1.0)    # the older datagram's listener, firing late
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [2.0]
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
 
 
 def test_a_restored_value_survives_a_second_swap(rig):
     """Intended: A -> A' -> A'' with the prop untouched restores the same place twice. The value
     A' holds arrives only as the client's echo of our write, and that echo equals what A last
-    sent -- so unless the manager's cache forgets the namespace at boot, the change filter eats
-    the echo and the second snapshot silently lacks it."""
+    sent -- so unless the manager's cache forgets the namespace at the announcement, the change
+    filter eats the echo and the second snapshot silently lacks it."""
     r = rig()
     worn_a_with(r, Word0=137.0)
     r.load(A2, "GripSync")
@@ -420,7 +512,7 @@ def test_a_restored_value_survives_a_second_swap(rig):
     r.vrc.messages.clear()
     r.load(A, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [137.0], "the second swap lost the restored value"
+    assert r.placed_from("GripSync") == {"Word0": 137.0}, "the second swap lost the restored value"
 
 
 def test_values_sent_before_boot_survive_a_boot_that_restores_nothing(rig):
@@ -433,12 +525,11 @@ def test_values_sent_before_boot_survive_a_boot_that_restores_nothing(rig):
     r.set("GripSync", "Word0", 2.0)       # the home-pose commit, ahead of the boot, never again
     r.set("GripSync", "Detached", True)
     r.boot("GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == [], "a join must not restore"
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [2.0]
-    assert r.written("GripSync", "Detached") == [True]
+    assert r.placed_from("GripSync") == {"Word0": 2.0, "Detached": True}
 
 
 def test_an_incoming_value_equal_to_the_outgoing_one_is_still_seen(rig):
@@ -452,97 +543,58 @@ def test_an_incoming_value_equal_to_the_outgoing_one_is_still_seen(rig):
     r.change(A)                           # Reset Avatar
     r.set("GripSync", "Word0", 1.0)       # the same pose, committed before the boot
     r.boot("GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [1.0], "the equal pre-boot value was filtered away"
+    assert r.placed_from("GripSync") == {"Word0": 1.0}, "the equal pre-boot value was filtered away"
 
 
 def test_a_new_send_target_clears_every_namespace_as_a_join(rig):
     """Intended: a newly selected target is a client that started or restarted, which is a join,
     and any join clears. A restarted client that comes back wearing a different avatar with the
     same prefab must not read as one swap from the old one. Once the namespace has booted in
-    front of the new client, swaps restore again -- which needs the equal `Announce` the new
-    client sends to get past the change filter."""
+    front of the new client, swaps restore again."""
     r = rig()
     worn_a_with(r, Word0=1.0)
+    time.sleep(QUIET)
     r.bridge._on_target_selected(("127.0.0.1", 9000))   # as OSCManager fires it
     r.load(A2, "GripSync")                # the restarted client joins on A'
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == [], "a restart read as a swap"
 
     r.set("GripSync", "Word0", 2.0)
     r.load(A, "GripSync")
     assert r.completed("GripSync"), f"no restore after the rejoin: {r.restores('GripSync')}"
-    assert r.written("GripSync", "Word0") == [2.0]
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
 
 
-def test_a_2_left_from_an_abandoned_handshake_does_not_eat_the_next_one(rig, monkeypatch):
-    """Intended: a 2 that arrived after its handshake expired stays in the manager's cache, and
-    against a peer that does not echo our 1 (nothing then moves the cache) the next avatar's 2
-    would equal it and be filtered. Restore is forgotten before each 1 so the next 2 is an edge."""
-    monkeypatch.setattr(osc_persist, "ACK_WAIT_SECS", 0.3)
+def test_the_avatars_0_reaches_the_log_after_every_restore(rig):
+    """Intended: the 0 is observation only, and it is observed each time. Against a peer that does
+    not echo our 1, the previous restore's 0 stays cached and the next 0 would equal it and be
+    filtered, so Restore is forgotten before each 1."""
     r = rig()
     r.vrc.echo_inbound = False
+    r.m.log = mock.MagicMock(wraps=r.m.log)
+
+    def zeros():
+        return sum("Restore is back at 0" in c.args[0] for c in r.m.log.info.call_args_list)
+
     worn_a_with(r, Word0=1.0)
-    r.avatar.answer_request = False
-    r.load(A2, "GripSync")
-    assert wait_for(lambda: r.idle("GripSync") and r.restores("GripSync") == [1])
-    time.sleep(0.35)
-    r.set("GripSync", "Restore", 2)       # the late answer, now cached
-    r.set("GripSync", "Word0", 2.0)
-    r.avatar.answer_request = True
-    r.vrc.messages.clear()
-    r.load(A, "GripSync")
-    assert r.completed("GripSync"), f"the next handshake stalled: {r.restores('GripSync')}"
+    for n, avatar in enumerate((A2, A), start=1):
+        r.load(avatar, "GripSync")
+        assert wait_for(lambda: r.restores("GripSync") == [1] * n)
+        r.set("GripSync", "Restore", 0)   # the avatar ending the restore
+        assert wait_for(lambda: zeros() == n), f"restore {n}'s 0 was not seen"
 
 
 # --------------------------------------------------------------------------
-# Timeouts: each abandons, drops the snapshot, never retries
+# All or nothing
 # --------------------------------------------------------------------------
 
-@pytest.fixture
-def short_ack(monkeypatch):
-    monkeypatch.setattr(osc_persist, "ACK_WAIT_SECS", 0.3)
-
-
-def test_no_answer_to_1_abandons_and_our_echoed_1_is_not_an_answer(rig, short_ack):
-    """Intended: the bridge acts only on 2 and 0. With the avatar silent the only thing on the
-    Restore address is our own 1 echoed back, which must not stand in for the avatar's 2; the
-    wait expires, and a 2 arriving after that writes nothing."""
-    r = rig()
-    worn_a_with(r, Word0=1.0)
-    r.avatar.answer_request = False
-    r.load(A2, "GripSync")
-    assert wait_for(lambda: r.restores("GripSync") == [1])
-    assert wait_for(lambda: r.idle("GripSync")), "the wait for 2 never expired"
-    assert r.written("GripSync", "Word0") == [], "our own echoed 1 advanced the handshake"
-    r.set("GripSync", "Restore", 2)       # the avatar, too late
-    time.sleep(0.2)
-    assert r.written("GripSync", "Word0") == [], "a late 2 restored a dropped snapshot"
-    assert r.restores("GripSync") == [1], "an abandoned handshake was retried"
-
-
-def test_no_answer_to_3_abandons_and_our_echoed_3_is_not_an_answer(rig, short_ack):
-    """Intended: after 3 the bridge waits for the avatar's 0, and our own 3 echoed back is not
-    it. The handshake stays open until the wait expires, then is dropped without a retry."""
-    r = rig()
-    worn_a_with(r, Word0=1.0)
-    r.avatar.answer_written = False
-    r.load(A2, "GripSync")
-    assert wait_for(lambda: r.restores("GripSync") == [1, 3])
-    time.sleep(0.1)
-    assert not r.idle("GripSync"), "our own echoed 3 was taken as the avatar's 0"
-    assert wait_for(lambda: r.idle("GripSync")), "the wait for 0 never expired"
-    assert r.m._ns["GripSync"].snapshot is None
-    time.sleep(0.4)
-    assert r.restores("GripSync") == [1, 3], "an abandoned handshake was retried"
-
-
-def test_a_dropped_payload_write_withholds_3(rig, monkeypatch):
-    """Intended: all or nothing. If any payload write is dropped the bridge never writes 3, even
-    though it still could, so the avatar's own wait expires and it boots from defaults rather
+def test_a_dropped_payload_write_withholds_restore(rig, monkeypatch):
+    """Intended: all or nothing. If any payload write is dropped the bridge never writes the 1,
+    even though it still could, so the avatar's window expires and it boots from defaults rather
     than placing from a partial payload. The drop is staged in the manager's send, where
     production drops one (no target, a socket error), and only for one name."""
     r = rig()
@@ -553,9 +605,8 @@ def test_a_dropped_payload_write_withholds_3(rig, monkeypatch):
                         lambda a, v: False if a == dropped else real_send(a, v))
     r.load(A2, "GripSync")
     assert wait_for(lambda: r.written("GripSync", "Word0") == [1.0])
-    assert wait_for(lambda: r.idle("GripSync"))
-    time.sleep(0.2)
-    assert r.restores("GripSync") == [1], "3 was written after a payload write was dropped"
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [], "1 was written after a payload write was dropped"
 
 
 # --------------------------------------------------------------------------
@@ -569,7 +620,7 @@ def test_an_announce_of_0_never_restores(rig):
     r.load(A, "GripSync", announce=0)
     r.set("GripSync", "Word0", 1.0)
     r.load(A2, "GripSync", announce=0)
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
 
@@ -584,20 +635,20 @@ def test_a_bridge_started_after_the_avatar_loaded_waits_for_a_boot(rig):
     r.set("GripSync", "Announce", 5)      # caught A's Announce, missed its Boot
     r.set("GripSync", "Word0", 1.0)
     r.load(A2, "GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
 
     r.set("GripSync", "Word0", 2.0)
     r.load(A, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [2.0]
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
 
 
 def test_a_same_id_reload_is_a_swap_only_under_the_test_switch(rig):
     """Intended: for a peer that cannot change avatars (the emulator's play, stop, play announces
     the same id), `treat_reload_as_swap` makes that reload restore. Off by default, where the
     same sequence is a reload and forgets."""
-    for switch, expect in ((False, []), (True, [1, 3])):
+    for switch, expect in ((False, []), (True, [1])):
         r = rig(treat_reload_as_swap=switch)
         worn_a_with(r, Word0=1.0)
         time.sleep(REPEAT_GAP)
@@ -605,7 +656,7 @@ def test_a_same_id_reload_is_a_swap_only_under_the_test_switch(rig):
         if expect:
             assert r.completed("GripSync")
         else:
-            time.sleep(0.2)
+            time.sleep(QUIET)
         assert r.restores("GripSync") == expect, f"treat_reload_as_swap={switch}"
 
 
@@ -637,11 +688,12 @@ def test_a_disabled_mapping_writes_nothing_but_keeps_watching(rig):
     r = rig(activate=False)
     worn_a_with(r, Word0=1.0)
     r.load(A2, "GripSync")
-    time.sleep(0.2)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
 
     r.m.activate()
     r.set("GripSync", "Word0", 2.0)
     r.load(A, "GripSync")
     assert r.completed("GripSync")
-    assert r.written("GripSync", "Word0") == [2.0]
+    assert r.placed_from("GripSync") == {"Word0": 2.0}

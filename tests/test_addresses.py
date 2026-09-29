@@ -158,14 +158,15 @@ def test_quant_directory_addresses():
 
 def test_bridge_persist_contract():
     """The namespace root, the reserved names, the Restore values and the two bridge-side waits
-    are the wire contract with the avatar half, whose clip lengths assume these waits. Changed
-    here alone, a restore either never starts or the avatar gives up on it with nothing logged."""
+    are the wire contract with the avatar half, whose window is sized from these waits. Changed
+    here alone, a restore either never starts or lands after the avatar gave up, with nothing
+    logged."""
     from vrbridge.mappings import osc_persist as bp
     assert bp.NAMESPACE_ROOT == "/avatar/parameters/BridgePersist/"
     assert bp.AVATAR_CHANGE_ADDR == "/avatar/change"
     assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE) == ("Id", "Announce", "Boot", "Restore")
-    assert (bp.REST, bp.REQUEST, bp.READY, bp.WRITTEN) == (0, 1, 2, 3)
-    assert bp.ACK_WAIT_SECS == 5.0
+    assert (bp.REST, bp.RESTORED) == (0, 1)
+    assert bp.ANNOUNCE_SETTLE_SECS == 0.2
     assert bp.WRITE_SETTLE_SECS == 0.05
 
 
