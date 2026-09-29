@@ -39,10 +39,10 @@ had deliberately switched off -- which is the confusion this note exists to prev
 
 **It cannot verify that a swap happened, and that is a property of the channel.** Measured:
 VRChat echoes `/avatar/change` carrying the id we sent within 5 ms, does so identically for
-an ineligible id and for a malformed one, and never emits again when the avatar really loads.
-The echo acknowledges the request and never reports the outcome, so no watchdog built on it
-could tell a working swap from a rejected one, and nothing here may treat it as evidence of
-what is worn.
+an ineligible id and for a malformed one. The echo acknowledges the request and never reports
+the outcome, so no watchdog built on it could tell a working swap from a rejected one, and
+nothing here may treat it as evidence of what is worn. A swap that loads announces the same id
+a second time at apply; this mapping does not build on it (`docs/design.md` §The wardrobe).
 
 **It never enumerates your avatars.** The manifest is authoritative about what is swappable,
 and `design.md` descopes discovery.
