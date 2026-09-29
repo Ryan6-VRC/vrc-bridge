@@ -197,9 +197,9 @@ def test_restore_1_follows_the_payload_by_the_write_settle_wait(rig):
 
 
 def test_restore_1_is_not_written_before_both_waits_on_the_real_constants(rig, monkeypatch):
-    """Intended: the contract's timing, on the shipped values. The avatar sizes its window from
-    ANNOUNCE_SETTLE_SECS + WRITE_SETTLE_SECS after Boot, and a 1 written sooner would mean the
-    decision did not wait for a late Announce."""
+    """Intended: the contract's timing, on the shipped values. The bridge writes the 1 no sooner
+    than ANNOUNCE_SETTLE_SECS + WRITE_SETTLE_SECS after Boot, and a 1 written sooner would mean
+    the decision did not wait for a late Announce."""
     monkeypatch.setattr(osc_persist, "ANNOUNCE_SETTLE_SECS", REAL_ANNOUNCE_SETTLE)
     r = rig()
     arrived = {}
