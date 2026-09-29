@@ -44,8 +44,8 @@ A **router** decides which mapping is active at any moment.
 
 | Router    | Behavior |
 |-----------|----------|
-| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy` and `VRCFT` stay on. |
-| `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` stays on, but `VRCFT` is not registered. |
+| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `VRCFT` and `Persistence` stay on. |
+| `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` and `Persistence` stay on, but `VRCFT` is not registered. |
 | `remy`    | The `default` router plus the Remy AI integration (see below). |
 
 **Core mappings**
@@ -55,6 +55,7 @@ A **router** decides which mapping is active at any moment.
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
 - **Wardrobe** — changes your worn avatar from a button on your own expression menu. Needs the [`osc-wardrobe`](#wardrobe) prefab on the avatar and a manifest listing the avatars each button means; it is opt-in, so register it from your own router. VRChat only accepts avatars in your favorites, recents, uploads or purchases.
+- **Persistence** — carries a prop's placed position across one swap to an avatar carrying the same prop ([below](#persistence-across-an-avatar-swap)). On in every router; it does nothing on an avatar without the prop.
 - **Parameter logger** — records whitelisted avatar parameters (names or globs) to a timestamped CSV as they change; runs standalone as `vrbridge-paramlog --params "MyThing/*" [--file out.csv]`. The whitelist is required — full traffic is too noisy to log raw. For two VRChat clients on one PC (each launched with `--osc=inPort:ip:outPort`), run one logger per client with `--osc-port`/`--osc-bind-port` naming that client's ports and `--no-advertise` so the other client's discovery does not also land here.
 - **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
@@ -181,6 +182,27 @@ bridge.start()
 **If you pin the send target** with `--osc-port` (the Av3Emulator advertises nothing and serves no tree), name the manifest instead: `QuantChannelDirectory.load_from_settings(bridge, pinned_manifest_id=1)`. There is deliberately no CLI flag for this — the mapping is only reachable from code that already holds the constructor.
 
 One guard worth knowing: a manifest that declares channels at `index_puppet`'s own addresses must agree with your `[puppet]` settings (`quant_level`, `float_smooth_tau_secs`), or the directory refuses to arm it and the log names both values. The manifest and the settings describe the same wire; when they diverge, one of them is stale.
+
+## Persistence across an avatar swap
+
+Keep a world-placed prop where it was when you swap to another avatar carrying the same prop. The avatar publishes its state under `/avatar/parameters/BridgePersist/<Name>/`; the bridge remembers it through one swap and writes it back into the new avatar a short settle after that avatar reports it has booted (`BridgePersist/<Name>/Boot`), then, after a second and shorter wait, sets `BridgePersist/<Name>/Restore` to 1 to say the values are in place. The avatar never answers, and one that hears nothing within its own wait starts as it would with no bridge running. Nothing is configured on the bridge side: the avatar's namespace, and the identity it announces, are the whole contract. The avatar half comes from vrc-patterns: the [`bridge-persist`](https://github.com/Ryan6-VRC/vrc-patterns/tree/main/bridge-persist) entry is the layer to build into a gimmick of your own, and the [`compositions/grab-sync-persist`](https://github.com/Ryan6-VRC/vrc-patterns/tree/main/compositions/grab-sync-persist) composition is a ready prop that carries it.
+
+It restores only a single swap to an avatar carrying the same prefab. Swapping through a third avatar, Reset Avatar, joining any world (including a rejoin), and VRChat restarting all forget. A bridge started after the avatar loaded restores nothing on the first swap, only once an avatar has loaded in front of it. Each time an avatar loads with persistence on, the bridge logs at the default log level either that it restored the namespace or why it did not.
+
+Every shipped router runs it, in every mode, so `vrbridge` with any `--router` needs nothing extra. It does nothing on an avatar that publishes no `BridgePersist` namespace. On the library path, register it yourself:
+
+```python
+from vrbridge import VRBridge
+from vrbridge.mappings import BridgePersistMapping
+
+bridge = VRBridge()
+persist = BridgePersistMapping(bridge)
+persist.register()
+persist.activate()
+bridge.start()
+```
+
+Against the Av3Emulator (`VRBridge(target=("127.0.0.1", 9000), bind_port=9001)`), a play, stop, play re-announces the same avatar, which on a live client means a reload and restores nothing. `BridgePersistMapping(bridge, treat_reload_as_swap=True)` makes it restore there. It is for testing only, because on a live client it would restore across Reset Avatar and world joins, so no router sets it: register that instance yourself on the library path, instead of running a router.
 
 ## Interoperates with
 

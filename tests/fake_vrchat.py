@@ -12,6 +12,10 @@ port does not. Tests inject the target; discovery stays a live-run concern.
 interleaving at all: a mapping on the OSC datagram path blocks on exactly one thing,
 this read, so holding it open stalls a dispatch thread where production stalls it.
 docs/design.md holds why the rendezvous lives here rather than in the code under test.
+
+The other direction is `emit`: the client's out-port stream, aimed at the bridge's bound port
+through `out_port`, with `copies`, `echo_inbound` and `on_receive` reproducing the doubling, the
+client's echo of every inbound write, and a scripted avatar answering a write.
 """
 from __future__ import annotations
 
@@ -94,6 +98,19 @@ class FakeVRChat:
         self.node_404_first: int = 0
         self.node_gets: list[str] = []
         self._node_gate: _NodeGate | None = None
+        #: The client's out-port stream: where `emit` sends, as VRChat sends to its configured
+        #: out-port. None until a test points it at the bridge's bound OSC port.
+        self.out_port: int | None = None
+        #: Copies of every emitted message. 2 reproduces the client's doubled inbound delivery
+        #: (docs/design.md §Inbound delivery semantics), which the emulator cannot.
+        self.copies: int = 1
+        #: Echo every received message back through `emit`, as the client echoes each inbound
+        #: write on its out-port. Off by default so the existing tests see only what they send.
+        self.echo_inbound: bool = False
+        #: Called as `on_receive(address, value)` after the echo, on the fake's datagram thread:
+        #: how a test scripts the worn avatar's reaction to a write.
+        self.on_receive = None
+        self._sender = None
 
     def hold_next_node_get(self) -> _NodeGate:
         """Park the next node GET mid-flight, so a caller's fetch() stalls there.
@@ -214,9 +231,30 @@ class FakeVRChat:
     # ---- capture ----
 
     def _record(self, addr, *args):
+        value = args[0] if args else None
         with self._cv:
-            self.messages.append((addr, args[0] if args else None))
+            self.messages.append((addr, value))
             self._cv.notify_all()
+        if self.echo_inbound:
+            self.emit(addr, value)
+        if self.on_receive is not None:
+            self.on_receive(addr, value)
+
+    def emit(self, address: str, value) -> None:
+        """Send one message on the client's out-port stream, `copies` times.
+
+        The Python type decides the OSC type tag (python-osc's inference: bool -> T/F, int ->
+        ,i, float -> ,f), which is how a test states the wire type a value arrives with.
+        """
+        from pythonosc import udp_client
+        if self.out_port is None:
+            raise RuntimeError("FakeVRChat.out_port is not set; nothing to emit to")
+        with self._lock:
+            if self._sender is None:
+                self._sender = udp_client.SimpleUDPClient(self.host, self.out_port)
+            sender = self._sender
+        for _ in range(self.copies):
+            sender.send_message(address, value)
 
     def wait_for_count(self, n: int, timeout: float = 2.0) -> bool:
         """Block until at least n messages have arrived. UDP is asynchronous; a

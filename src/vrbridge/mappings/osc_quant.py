@@ -10,8 +10,9 @@ itself, and no shipped router registers it (opt-in, like the wardrobe).
 The wardrobe's marker read rides a human press: rare, and itself the proof the avatar is
 loaded. A quant consumer asks at controller rate, so the read latches (`arm`) -- and the
 whole trigger design is shaped by what an avatar load does to any read taken at the change.
-A swap announces `/avatar/change` twice: at request time, seconds before the avatar is
-applied, and again as it is applied. A fetch fired on the first reads the *outgoing* avatar's
+A swap requested over OSC announces `/avatar/change` twice: at request time, seconds before
+the avatar is applied, and again as it is applied; one made from the client's menu announces
+once, at apply. A fetch fired on a request-time announcement reads the *outgoing* avatar's
 tree, or 404s through a cold download the client acknowledges immediately and serves over
 tens of seconds. A latch is also only as good as the states it can recover from with no
 change at all: a bridge started before the client, a foreign OSCQuery peer holding the
@@ -21,10 +22,10 @@ target, a tree not up yet. Hence, in order:
   target-selected only clear the armed state and bump a sequence token. The target-selected
   leg runs on zeroconf's single dispatch thread, which `docs/design.md` prices at one
   blocking query for target *selection* itself -- an inline fetch there is not ours to add.
-  A wrong manifest armed here latches, because no later event corrects it -- and the first
-  of a swap's two announcements is exactly where the wrong one would be read. The second,
-  at apply, is the one that finds the incoming avatar's tree up; both reach this handler,
-  and clearing twice costs nothing.
+  A wrong manifest armed here latches, because no later event corrects it -- and the
+  request-time announcement of an OSC swap is exactly where the wrong one would be read. The
+  one at apply is the one that finds the incoming avatar's tree up; every announcement
+  reaches this handler, and clearing twice costs nothing.
 * **All fetches run on one daemon worker thread** (the `press_pulse` single-worker shape).
   A completed fetch arms only if its token is still current: two avatar changes in flight
   must not let the older fetch latch the older avatar's manifest.

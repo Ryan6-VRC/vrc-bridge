@@ -26,13 +26,16 @@ from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
 _SERVE_POLL_SECS = 0.05
 
 
-#: Addresses where the value repeating does not make the message redundant, so the change
-#: filter's value-equality test is the wrong instrument. On `/avatar/change` the repeat is
-#: the whole event: the in-client Reset Avatar, an OSC change naming the worn avatar, and a
-#: world rejoin each reset every mapping's world while announcing the id already cached.
-#: Kept per address rather than lifted to a setting -- which addresses carry that meaning is
-#: a property of VRChat's wire, not a matter of taste. `docs/design.md` §Inbound delivery
-#: semantics holds the measurements and what earns an address a place here.
+#: Addresses where the value repeating does not make the message redundant, so the
+#: change filter's value-equality test is the wrong instrument. On `/avatar/change` the
+#: repeat is the whole event: the in-client Reset Avatar and a world rejoin each reload
+#: the worn avatar while announcing the id already cached. An OSC change naming the worn
+#: avatar repeats the id too but reloads nothing (the echo alone, measured); it is
+#: delivered anyway, because the fold is by time and cannot tell that echo from the
+#: repeat a reload makes. Kept per address rather than lifted to a setting -- which
+#: addresses carry that meaning is a property of VRChat's wire, not a matter of taste.
+#: `docs/design.md` §Inbound delivery semantics holds the measurements and what earns an
+#: address a place here.
 REFIRE_ON_REPEAT: Set[str] = {"/avatar/change"}
 
 #: How long an exempt address folds a repeat for: long enough to swallow the client's twin

@@ -156,6 +156,21 @@ def test_quant_directory_addresses():
     assert qc.AVATAR_CHANGE_ADDR == "/avatar/change"
 
 
+def test_bridge_persist_contract():
+    """The namespace root, the reserved names, the Restore values, the two bridge-side
+    waits and the late limit are the wire contract with the avatar half, whose window has
+    to outlast the late limit plus the write settle. Changed here alone, a restore either never starts or lands
+    after the avatar gave up, with nothing logged."""
+    from vrbridge.mappings import osc_persist as bp
+    assert bp.NAMESPACE_ROOT == "/avatar/parameters/BridgePersist/"
+    assert bp.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE) == ("Id", "Announce", "Boot", "Restore")
+    assert (bp.REST, bp.RESTORED) == (0, 1)
+    assert bp.ANNOUNCE_SETTLE_SECS == 0.2
+    assert bp.LATE_LIMIT_SECS == 0.6
+    assert bp.WRITE_SETTLE_SECS == 0.05
+
+
 def test_router_selector_addresses():
     """The parameters the routers switch on. Two of these duplicate a mapping's
     own constant; the pin catches an edit that moves one copy and not the other."""

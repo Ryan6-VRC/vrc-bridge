@@ -12,13 +12,28 @@ USERCAMERA_MODE_ADDR = "/usercamera/Mode"
 AVATAR_CHANGE_ADDR = "/avatar/change"
 
 
+def _register_persist(router: MappingRouter, bridge: VRBridge) -> None:
+    """Register BridgePersist always-on, outside the router's managed set.
+
+    Every shipped router carries it because a swap can happen in any mode, so it must never
+    take part in mode switching; `evaluate()` touches only managed names and leaves it alone.
+    Safe everywhere because it is inert on an avatar that declares no `BridgePersist`
+    namespace: it watches one address shape, and nothing arrives there to act on.
+    `treat_reload_as_swap` is test-only and never set here.
+    """
+    from vrbridge.mappings import BridgePersistMapping
+    persist = BridgePersistMapping(bridge)
+    router.register(persist)
+    persist.activate()
+
+
 class DefaultRouter(MappingRouter):
     """
     Switch between:
       - index_puppet       when /usercamera/Mode == 0
       - index_usercamera   when /usercamera/Mode != 0
 
-    MuteProxy and VRCFT are both always-on.
+    MuteProxy, VRCFT and BridgePersist are always-on.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -48,6 +63,8 @@ class DefaultRouter(MappingRouter):
         vrcft = VRCFTMapping(bridge)
         self.register(vrcft)
         vrcft.activate()
+
+        _register_persist(self, bridge)
 
         # Register the managed mappings (router will activate exactly one)
         self.register(IndexPuppetMapping(bridge))
@@ -109,6 +126,7 @@ class CameraPrefabRouter(MappingRouter):
 
     Always on:
       - muteproxy: Convert MuteProxy changes to /input/voice presses.
+      - osc_persist: BridgePersist namespaces across an avatar swap.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)
@@ -140,6 +158,8 @@ class CameraPrefabRouter(MappingRouter):
         mute = MuteProxyMapping(bridge)
         self.register(mute)
         mute.activate()
+
+        _register_persist(self, bridge)
 
         # Managed group
         self.register(IndexPuppetMapping(bridge))
