@@ -239,6 +239,22 @@ def test_a_to_b_to_a_forgets(rig):
     assert r.restores("GripSync") == []
 
 
+def test_away_and_back_to_the_same_avatar_forgets(rig):
+    """Intended: A -> B -> A is two changes even though the avatar returned to is the one the
+    namespace booted on. The swap away is announced once here, as a swap to an avatar that
+    carries no OSC parameters was measured to be; the return is an echo and an announcement at
+    apply."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(B)
+    time.sleep(REPEAT_GAP)
+    r.change(A)                       # the request-time echo
+    time.sleep(REPEAT_GAP)
+    r.load(A, "GripSync")             # the announcement at apply, then the boot
+    time.sleep(0.2)
+    assert r.restores("GripSync") == []
+
+
 def test_reset_avatar_forgets(rig):
     """Intended: Reset Avatar, a world join and a rejoin are one event on the wire -- the worn id
     announced and the avatar reloaded -- and a join clears. So a reload of A restores nothing."""

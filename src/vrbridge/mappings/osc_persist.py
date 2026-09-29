@@ -28,10 +28,14 @@ it to, which is what makes a snapshot complete without holding values that never
 **What is kept per namespace, and when a snapshot is valid.** The live payload values, each as the
 Python value python-osc parsed, so it is replayed with the wire type it arrived with (an int sent
 to a declared float writes garbage, and a bool must stay a bool); the last `Announce`; a
-checkpoint; and the distinct avatar ids announced since the namespace last booted.
+checkpoint; and the avatar ids announced since the namespace last booted, in order.
 
 * Every `/avatar/change`, echo or not, re-takes the checkpoint from the live values and the last
-  `Announce`, and adds the id to the list unless it is the id worn when the namespace booted.
+  `Announce`, and appends the id to the list unless it repeats the list's last entry (an OSC
+  swap's echo and its announcement at apply are one change) or the list is empty and it names
+  the avatar worn when the namespace booted (an echo that reloads nothing). The list is a
+  sequence and not a set: away to another avatar and back to the same one is two changes, where
+  a set would drop the return and read one.
   Nothing from an incoming avatar arrives before its announcement at apply, so the last checkpoint
   before a `Boot` is the outgoing avatar's final state -- including after an OSC swap, whose
   request-time echo is followed by a second announcement at apply.
@@ -48,8 +52,8 @@ checkpoint; and the distinct avatar ids announced since the namespace last boote
   not do: a restarted client coming back on a different avatar announces an id that is not the
   one worn at boot, and that would read as one swap.
 * An empty list at `Boot` is a reload of the avatar already worn -- a world join, a rejoin and Reset
-  Avatar are one event on the wire -- and restores nothing. Two or more ids is not one swap
-  (A -> B -> A, or a failed OSC swap before a real one) and restores nothing.
+  Avatar are one event on the wire -- and restores nothing. Two or more entries is not one swap
+  (A -> B -> A' or A -> B -> A, or a failed OSC swap before a real one) and restores nothing.
 * **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
   loaded is not, and restores nothing until the next boot. That lost first swap is accepted: an
   OSCQuery read of the namespace subtree would baseline it, but `OSCManager.fetch` reads a single
@@ -225,9 +229,10 @@ class BridgePersistMapping(Mapping):
                 ns.checkpoint_announce = ns.announce
                 ns.since_announce = {}
                 self._forget_payload_locked(ns)
-                if value in ns.ids:
-                    continue
-                if value != ns.worn_at_boot or self._reload_as_swap:
+                if ns.ids:
+                    if ns.ids[-1] != value:
+                        ns.ids.append(value)
+                elif value != ns.worn_at_boot or self._reload_as_swap:
                     ns.ids.append(value)
 
     def _on_target_selected(self, ctx, target) -> None:
