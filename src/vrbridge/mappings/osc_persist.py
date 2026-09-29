@@ -11,8 +11,9 @@ Four direct children of a namespace are reserved; every other address under it, 
 * `Id` -- the per-prefab identity, carried as the declared default and so never on the wire. 0
   means persistence is off. Ignored here if it ever arrives.
 * `Announce` (int, avatar -> bridge) -- a driver copy of `Id`, written at boot a frame before `Boot`.
-* `Boot` (float, avatar -> bridge) -- a driver `random`, once per animator load. Random so that a
-  re-wear of the same build still gets past the change filter.
+* `Boot` (float, avatar -> bridge) -- a driver `random` in (0, 1], once per animator load. Random so
+  that a re-wear of the same build still gets past the change filter. Anything else, the 0.0 the
+  avatar writes when it resets its namespace included, is not a boot and is ignored.
 * `Restore` (int, both ways) -- the handshake. Rests at 0.
 
 **The handshake.** Bridge writes 1; the avatar stops measuring, resets its payload to declared
@@ -36,30 +37,44 @@ checkpoint; and the distinct avatar ids announced since the namespace last boote
   request-time echo is followed by a second announcement at apply.
 * `Boot` makes the checkpoint the snapshot, valid only when the namespace is baselined, exactly one
   id was announced since its last boot, the checkpoint's `Announce` equals the current one, and
-  that value is not 0. A valid snapshot starts the handshake. Valid or not, the live values,
-  checkpoint and list are then emptied, the last announced id is recorded as the one worn at boot,
-  and the namespace is baselined.
+  that value is not 0. A valid snapshot starts the handshake. Valid or not, the live values then
+  become only what arrived since the last announcement -- the incoming avatar's own traffic -- the
+  checkpoint and list empty, the last announced id is recorded as the one worn at boot, and the
+  namespace is baselined. Emptying the live values outright loses a pose: the walks commit the
+  home pose about 0.2 s into the load, before `Boot`, and a value that never changes afterwards is
+  never re-sent, so the next swap would restore that name to its declared default.
+* A newly selected send target is a join -- a client that started or restarted -- and deletes
+  every namespace, so each is un-baselined until it boots again. Merely emptying the lists would
+  not do: a restarted client coming back on a different avatar announces an id that is not the
+  one worn at boot, and that would read as one swap.
 * An empty list at `Boot` is a reload of the avatar already worn -- a world join, a rejoin and Reset
   Avatar are one event on the wire -- and restores nothing. Two or more ids is not one swap
   (A -> B -> A, or a failed OSC swap before a real one) and restores nothing.
 * **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
-  loaded is not, and restores nothing until the next boot. The contract also allows baselining by
-  an OSCQuery read of the namespace subtree; that is not built, because `OSCManager.fetch` reads a
-  single parameter node and answers FETCH_MALFORMED for a container.
+  loaded is not, and restores nothing until the next boot. That lost first swap is accepted: an
+  OSCQuery read of the namespace subtree would baseline it, but `OSCManager.fetch` reads a single
+  parameter node (FETCH_MALFORMED for a container), and the subtree read is deliberately not built.
 
 **Two jobs the change filter would otherwise undo.** `_update_cache_and_fire` suppresses a value
-equal to the last one seen, and its cache outlives every avatar. So at `Boot` the namespace's known
-addresses are `forget()`-ed: otherwise the new avatar's first value for a name, or our own restored
-value echoed back, is dropped whenever it equals what the outgoing avatar last sent, and the next
-swap's snapshot silently lacks it. And `Restore` is forgotten before each 1 is written, so an
-avatar's 2 cannot be eaten by a 2 left cached from an earlier handshake that never completed.
+equal to the last one seen, and its cache outlives every avatar. So at every announcement, and at
+a target selection, the namespace's known payload addresses are `forget()`-ed: otherwise the
+incoming avatar's first value for a name -- its home-pose commit before `Boot`, or our own restored
+value echoed back -- is dropped whenever it equals what the outgoing avatar last sent, and the next
+swap's snapshot silently lacks it. Nothing is forgotten at `Boot` itself: after the announcement
+the cache holds only the incoming avatar's own values, and the client emits a name only when it
+changes from exactly that. `Restore` is forgotten before each 1 is written, so an avatar's 2
+cannot be eaten by a 2 left cached from an earlier handshake that never completed.
+`/avatar/change` is never forgotten: it is a `REFIRE_ON_REPEAT` address, and forgetting it breaks
+the fold of its twin copies.
 
 **Which thread waits.** No handler blocks. The settle wait buys ordering (step 3 in a later client
 frame than the payload writes, since the client applies only the latest value per parameter per
 frame) and consumes no result, so by `docs/design.md`'s rule it does not belong on the datagram
-thread; the tick is where that rule sends it, but this mapping's door is an embedder registering it
-beside `bridge.start()`, and nothing ticks there. So the settle wait and both ack deadlines run on
-`threading.Timer` threads, and a per-handshake token makes a timer that lost the race a no-op.
+thread. The tick is where that rule sends it, but the mapping has two homes: every shipped router,
+which ticks `update()`, and an embedder registering it beside `bridge.start()`, where nothing ticks.
+So it does not depend on the tick at all: the settle wait and both ack deadlines run on
+`threading.Timer` threads, identical in both homes, and a per-handshake token makes a timer that
+lost the race a no-op. The router tick's ~22 ms granularity would also have padded a 50 ms settle.
 
 **Reordering.** A payload handler stores the value the manager's cache now holds rather than the one
 it was handed: two datagrams for one address can reach this mapping in reverse arrival order
@@ -67,7 +82,9 @@ it was handed: two datagrams for one address can reach this mapping in reverse a
 `Restore` is the exception and uses the delivered value, because a step is an edge, not a level --
 reading the cache there could replace the avatar's 2 with our own echoed 1 arriving just after it.
 
-**`enabled` belongs to the router.** Observation is ungated, so a mapping switched off and on again
+**Every shipped router registers it always-on** (`routers._register_persist`), outside mode
+switching, because a swap can happen in any mode; it is inert on an avatar that declares no
+namespace. **`enabled` belongs to the router.** Observation is ungated, so a mapping switched off and on again
 never restores from state it failed to watch; only starting a handshake checks `enabled`.
 """
 
@@ -109,6 +126,8 @@ _SETTLING = "settling"
 class _Namespace:
     name: str
     live: Dict[str, Any] = field(default_factory=dict)
+    # The payload values that arrived since the last announcement: what `live` becomes at Boot.
+    since_announce: Dict[str, Any] = field(default_factory=dict)
     announce: Any = None
     checkpoint: Optional[Dict[str, Any]] = None
     checkpoint_announce: Any = None
@@ -173,6 +192,12 @@ class BridgePersistMapping(Mapping):
     def _attach(self) -> None:
         self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_avatar_change)
         self.bridge.on_osc_pattern(NAMESPACE_PATTERN, self._on_namespace)
+        # Runs on zeroconf's single dispatch thread, so it only clears. It fires on a real
+        # change of target -- a new client, or one back on a fresh port after a restart -- and
+        # on the first resolve after our own OSCManager.stop()/start(); an unchanged mDNS
+        # republication returns early in _consider_service and never reaches it. Every one of
+        # those is a join or a gap in what we watched, so each clears.
+        self.bridge.on_target_selected(self._on_target_selected)
 
     # ---- events ----------------------------------------------------------
 
@@ -182,10 +207,25 @@ class BridgePersistMapping(Mapping):
             for ns in self._ns.values():
                 ns.checkpoint = dict(ns.live)
                 ns.checkpoint_announce = ns.announce
+                ns.since_announce = {}
+                self._forget_payload_locked(ns)
                 if value in ns.ids:
                     continue
                 if value != ns.worn_at_boot or self._reload_as_swap:
                     ns.ids.append(value)
+
+    def _on_target_selected(self, ctx, target) -> None:
+        with self._lock:
+            for ns in self._ns.values():
+                self._clear_handshake_locked(ns)
+                self._forget_payload_locked(ns)
+                # The namespace's remembered Announce goes with it, so the cached one must too,
+                # or the restarted client's equal Announce is filtered and never re-learned.
+                self.bridge.osc.forget(f"{NAMESPACE_ROOT}{ns.name}/{ANNOUNCE}")
+            if self._ns:
+                self.log.info("OSC target selected (%s:%d): a join, so every BridgePersist "
+                              "namespace is cleared.", target[0], target[1])
+            self._ns.clear()
 
     def _on_namespace(self, ctx, address: str, value) -> None:
         parsed = _split(address)
@@ -211,8 +251,14 @@ class BridgePersistMapping(Mapping):
                 self._on_boot_locked(ns, value)
             else:
                 ns.live[address] = value
+                ns.since_announce[address] = value
 
     def _on_boot_locked(self, ns: _Namespace, value) -> None:
+        if isinstance(value, bool) or not isinstance(value, float) or not 0.0 < value <= 1.0:
+            # Not a boot. A boot draws from (0, 1]; the avatar resetting its namespace when it
+            # quiesces writes Boot back to 0.0 (seen on the emulator). Nothing is recorded, not
+            # even as the last Boot, so the real draw that follows is never taken for a repeat.
+            return
         if value == ns.last_boot:
             # The same draw again is a repeated delivery of one boot, not a second load.
             return
@@ -227,9 +273,7 @@ class BridgePersistMapping(Mapping):
                           ns.name)
             self._clear_handshake_locked(ns)
 
-        for addr in set(ns.live) | set(ns.checkpoint or ()):
-            self.bridge.osc.forget(addr)
-        ns.live = {}
+        ns.live = dict(ns.since_announce)
         ns.checkpoint = None
         ns.checkpoint_announce = None
         ns.ids = []
@@ -339,6 +383,11 @@ class BridgePersistMapping(Mapping):
         if ns.timer is not None:
             ns.timer.cancel()
             ns.timer = None
+
+    def _forget_payload_locked(self, ns: _Namespace) -> None:
+        # Payload only: the reserved names need no reset, and /avatar/change is never here.
+        for addr in set(ns.live) | set(ns.checkpoint or ()):
+            self.bridge.osc.forget(addr)
 
     def _clear_handshake_locked(self, ns: _Namespace) -> None:
         self._cancel_timer_locked(ns)

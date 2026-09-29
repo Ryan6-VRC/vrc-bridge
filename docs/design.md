@@ -179,7 +179,7 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Identity is per prefab, and 0 means off.** A namespace's `Id` default names the prefab it belongs to, so two different payloads built on one composition never restore onto each other. A restore needs the incoming `Announce` to equal the outgoing one.
 
-**The lifetime is one swap.** A → A′ restores and A → B → A′ forgets. Any world or instance join clears, a fresh instance of the same world included, and so does Reset Avatar, because on the wire it is the same event as a join. A failed OSC swap before a real one also forgets, since its echo cannot be told from a request; that cost is accepted. Telling a join from Reset Avatar by tailing the client's log is a last resort, reached for only if nothing on the wire can serve.
+**The lifetime is one swap.** A → A′ restores and A → B → A′ forgets. Any world or instance join clears, a fresh instance of the same world included, and so does Reset Avatar, because on the wire it is the same event as a join. A newly selected send target is a join too, since it is a client that started or restarted. A failed OSC swap before a real one also forgets, since its echo cannot be told from a request; that cost is accepted. Telling a join from Reset Avatar by tailing the client's log is a last resort, reached for only if nothing on the wire can serve.
 
 **The checkpoint is re-taken at every announcement, echo or not, and consumed at `Boot`.** This builds on the second announcement §The wardrobe will not trust, and is safe only because of what was measured about it on one client build: a rejected swap is followed by nothing, a load announces at apply with nothing from the incoming avatar before it, and a menu swap announces once, at apply. So the last checkpoint before a boot is the outgoing avatar's final state, and a snapshot is consumed only by a boot, which a rejected swap never produces.
 
@@ -187,11 +187,13 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Values replay with the type they arrived with.** Measured, an int sent to a declared float writes garbage rather than nothing, so a whole-number float stays a float and a bool stays a bool.
 
-**A bridge that has not seen a namespace boot restores nothing from it.** Values arriving with no boot seen cannot be attributed to a load. The contract also allows a late-started bridge to baseline from one OSCQuery read of the namespace subtree; that is not built, because `fetch` reads a single node and answers `FETCH_MALFORMED` for a container.
+**A bridge that has not seen a namespace boot restores nothing from it, and the lost first swap after a late start is accepted.** Values arriving with no boot seen cannot be attributed to a load. One OSCQuery read of the namespace subtree would baseline a late start; it is deliberately not built (`fetch` reads a single node and answers `FETCH_MALFORMED` for a container, and a subtree read would enumerate the names under the namespace).
 
-**No handler blocks, and the waits run on timer threads rather than the tick.** §Inbound delivery semantics sends a wait that buys only ordering to the tick, but this mapping is enabled by an embedder registering it beside `bridge.start()`, where nothing ticks.
+**Every shipped router registers it, always on and outside mode switching.** This is the exception to mappings keyed off the avatar being opt-in, as the wardrobe and the quant directory are. Those act only when asked, by a press or a consumer; persistence has to be watching before the swap it restores, so it only works if it is already running whenever a user runs `vrbridge`. It is safe everywhere because it is inert on an avatar that publishes no namespace, and it stays out of mode switching because a swap can happen in any mode.
 
-**`treat_reload_as_swap` is test-only.** It exists for the Av3Emulator, which cannot change avatars and re-announces the same id on each play entry. On a live client it would restore across Reset Avatar and joins, which the lifetime ruling forbids.
+**No handler blocks, and the mapping does not depend on the tick.** §Inbound delivery semantics sends a wait that buys only ordering to the tick, but the mapping also runs on the library path beside `bridge.start()`, where nothing ticks. So its waits run on timer threads that behave the same under a router and without one.
+
+**`treat_reload_as_swap` is test-only, and no router sets it.** It exists for the Av3Emulator, which cannot change avatars and re-announces the same id on each play entry. On a live client it would restore across Reset Avatar and joins, which the lifetime ruling forbids.
 
 ## Provenance
 

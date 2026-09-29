@@ -337,6 +337,24 @@ def test_the_avatars_answer_arriving_before_our_echo_still_advances(rig):
     assert r.written("GripSync", "Word0") == [1.0]
 
 
+@pytest.mark.parametrize("not_a_boot", [0.0, 1, True, 1.5])
+def test_a_boot_outside_0_1_is_not_a_boot(rig, not_a_boot):
+    """Intended: a boot draws a float from (0, 1]. The avatar resetting its namespace writes Boot
+    back to 0.0 before its real draw; taken as a boot, that 0 would start a handshake against an
+    animator that has not booted and the real boot would then find the swap already consumed.
+    So it starts nothing and records nothing, and the real boot after it restores normally."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.change(A2)
+    r.set("GripSync", "Announce", 5)
+    r.set("GripSync", "Boot", not_a_boot)
+    time.sleep(0.2)
+    assert r.restores("GripSync") == [], f"Boot={not_a_boot!r} started a handshake"
+    r.set("GripSync", "Boot", 0.5)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.written("GripSync", "Word0") == [1.0]
+
+
 def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
     """Intended: two datagrams for one address can reach the mapping in reverse arrival order
     (the listener fires after the cache lock is released). The snapshot must hold the value the
@@ -364,6 +382,61 @@ def test_a_restored_value_survives_a_second_swap(rig):
     r.load(A, "GripSync")
     assert r.completed("GripSync")
     assert r.written("GripSync", "Word0") == [137.0], "the second swap lost the restored value"
+
+
+def test_values_sent_before_boot_survive_a_boot_that_restores_nothing(rig):
+    """Intended: the walks commit the home pose about 0.2 s into a load, before `Boot`, and a
+    name that never changes afterwards is never re-sent. A join restores nothing, yet the next
+    swap must replay those pre-boot values; emptying them at the boot would restore that name to
+    its declared default, a wrong pose."""
+    r = rig()
+    r.change(A)                           # the join
+    r.set("GripSync", "Word0", 2.0)       # the home-pose commit, ahead of the boot, never again
+    r.set("GripSync", "Detached", True)
+    r.boot("GripSync")
+    time.sleep(0.2)
+    assert r.restores("GripSync") == [], "a join must not restore"
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.written("GripSync", "Word0") == [2.0]
+    assert r.written("GripSync", "Detached") == [True]
+
+
+def test_an_incoming_value_equal_to_the_outgoing_one_is_still_seen(rig):
+    """Intended: the manager's change filter outlives the avatar, so the reloaded avatar's pre-boot
+    commit of the value the outgoing one last sent would be eaten unless the filter is reset at
+    the announcement. Reset Avatar with the prop where it was is exactly that case, and the swap
+    after it must still restore the value."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    time.sleep(REPEAT_GAP)
+    r.change(A)                           # Reset Avatar
+    r.set("GripSync", "Word0", 1.0)       # the same pose, committed before the boot
+    r.boot("GripSync")
+    time.sleep(0.2)
+    assert r.restores("GripSync") == []
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.written("GripSync", "Word0") == [1.0], "the equal pre-boot value was filtered away"
+
+
+def test_a_new_send_target_clears_every_namespace_as_a_join(rig):
+    """Intended: a newly selected target is a client that started or restarted, which is a join,
+    and any join clears. A restarted client that comes back wearing a different avatar with the
+    same prefab must not read as one swap from the old one. Once the namespace has booted in
+    front of the new client, swaps restore again -- which needs the equal `Announce` the new
+    client sends to get past the change filter."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    r.bridge._on_target_selected(("127.0.0.1", 9000))   # as OSCManager fires it
+    r.load(A2, "GripSync")                # the restarted client joins on A'
+    time.sleep(0.2)
+    assert r.restores("GripSync") == [], "a restart read as a swap"
+
+    r.set("GripSync", "Word0", 2.0)
+    r.load(A, "GripSync")
+    assert r.completed("GripSync"), f"no restore after the rejoin: {r.restores('GripSync')}"
+    assert r.written("GripSync", "Word0") == [2.0]
 
 
 def test_a_2_left_from_an_abandoned_handshake_does_not_eat_the_next_one(rig, monkeypatch):
@@ -495,6 +568,28 @@ def test_a_same_id_reload_is_a_swap_only_under_the_test_switch(rig):
         else:
             time.sleep(0.2)
         assert r.restores("GripSync") == expect, f"treat_reload_as_swap={switch}"
+
+
+@pytest.mark.parametrize("router_name", ["default", "camera", "remy"])
+def test_every_shipped_router_runs_persistence_in_every_mode(router_name):
+    """Intended: `vrbridge --router <any shipped name>` restores with nothing else to type, and a
+    swap can happen in any mode, so the mapping is registered active and no mode switch may
+    disable it. Driven through each router's own mode inputs, then its evaluate()."""
+    from vrbridge.cli import ROUTERS
+    from vrbridge.routers import (USERCAMERA_MODE_ADDR, VIRTUALLENS_ENABLE_ADDR,
+                                  VRCL_FEATURE_TOGGLE_ADDR)
+    bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
+    router = ROUTERS[router_name](bridge)
+    persist = router._mappings.get("osc_persist")
+    assert isinstance(persist, BridgePersistMapping), f"{router_name} does not register it"
+    assert persist.enabled and not persist._reload_as_swap
+    router.evaluate()
+    for address, value in ((USERCAMERA_MODE_ADDR, 1.0), (VIRTUALLENS_ENABLE_ADDR, 1.0),
+                           (VRCL_FEATURE_TOGGLE_ADDR, 1.0), (AVATAR_CHANGE_ADDR, A),
+                           (USERCAMERA_MODE_ADDR, 0.0)):
+        bridge.osc._update_cache_and_fire(address, value)
+        router.evaluate()
+        assert persist.enabled, f"{router_name} disabled it after {address}={value!r}"
 
 
 def test_a_disabled_mapping_writes_nothing_but_keeps_watching(rig):
