@@ -69,6 +69,10 @@ class Rig:
         self.m.register()
         if activate:
             self.m.activate()
+            # activation puts the client at rest (three zeros); tests measure from that baseline
+            assert vrc.wait_for_count(3, timeout=3.0), "the activation zeros never landed"
+            self.activation = list(vrc.messages)
+            vrc.messages.clear()
         self.now = 1000.0
         self.sends = 0
         real_send = self.bridge.osc.send
@@ -505,3 +509,74 @@ def test_shipped_routers_register_it_only_when_enabled(router_name, enabled):
         assert leash.enabled
     finally:
         set_settings(None)
+
+
+# --------------------------------------------------------------------------
+# The second look's findings, each pinned
+# --------------------------------------------------------------------------
+
+def test_activation_zeros_a_client_whose_state_is_unknown(rig):
+    """Intended: a fresh mapping cannot know what a previous bridge left latched on `/input/`,
+    so activation sends both axes and Run to zero before anything else."""
+    r = rig()
+    assert sorted(a for a, _ in r.activation) == sorted(INPUTS)
+    assert all(v == 0 for _, v in r.activation)
+
+
+def test_a_new_target_is_unknown_and_gets_the_zeros_again(rig):
+    """Intended: a target re-selection (a client restart, a re-resolve) makes the client's state
+    unknown again; the next rest sends the zeros even though the last known state was rest."""
+    r = rig()
+    r.held_at(forward=0.3)                      # inside slack: at rest, nothing written
+    r.step()
+    assert r.written() == []
+    r.m._on_target(None, ("127.0.0.1", r.vrc.osc_port))
+    r.step()
+    assert_at_rest(r)
+    assert len(r.values(RUN_ADDR)) == 1
+
+
+def test_a_non_finite_reading_is_nothing_sensed(rig):
+    """Intended: NaN or inf on a box is never a position and never seeds the ratchet's peak."""
+    r = rig()
+    for bad in (float("nan"), float("inf")):
+        r.held_at(forward=1.4)
+        r.vrc.emit(r.m._addr["Forward"], bad)
+        assert wait_for(lambda: r.m._in.get(r.m._addr["Forward"]) != pytest.approx(reading(1.4)))
+        r.step()
+        assert r.written() == []
+        assert r.m._peak is None
+
+
+def test_axis_min_zero_never_lifts_a_zero_share():
+    """Intended: `axis_min` 0 is valid, and a pure forward pull still writes nothing on
+    Horizontal, since a share of exactly zero is the wearer's whatever the threshold."""
+    with FakeVRChat() as vrc:
+        r = Rig(vrc, tuning=LeashSettings(axis_min=0.0))
+        try:
+            r.held_at(forward=1.4, right=0.0)
+            r.step()
+            assert r.values(HORIZONTAL_ADDR) == []
+            assert r.last(VERTICAL_ADDR) == pytest.approx(1.0, abs=TOL)
+        finally:
+            r.close()
+
+
+def test_stopping_retries_a_dropped_zero(rig):
+    """Intended: on bridge stop there is no next step, so a zero whose send fails is retried
+    before OSC goes down rather than logged and lost."""
+    r = rig()
+    pulling(r)
+    real = r.bridge.osc.send
+    dropped = {"n": 0}
+
+    def flaky(address, value):
+        if value == 0 and dropped["n"] < 2:
+            dropped["n"] += 1
+            return False
+        return real(address, value)
+    r.bridge.osc.send = flaky
+    r.bridge.stop()
+    r.landed()
+    assert dropped["n"] == 2
+    assert_at_rest(r)

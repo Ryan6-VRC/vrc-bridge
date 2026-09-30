@@ -64,6 +64,7 @@ from __future__ import annotations
 import math
 import struct
 import threading
+import time
 from typing import Dict, Optional
 
 from vrbridge import VRBridge
@@ -86,6 +87,11 @@ FLAGS = (PRESENT, PLANTED, HELD)
 
 #: The client's per-axis `/input/` deadzone: a value at or under it moves nothing.
 CLIENT_DEADZONE = 0.1
+# On bridge stop a dropped zero has no next step to retry on, so it is retried here, briefly.
+STOP_RETRIES = 3
+# A decoded component smaller than this, in metres, carries nothing and is never lifted.
+AXIS_EPSILON = 1e-3
+STOP_RETRY_WAIT = 0.02
 
 
 def decode(reading: float, *, ratio: float, span: float, sender_radius: float) -> float:
@@ -122,8 +128,11 @@ class LeashMapping(Mapping):
         self._in: Dict[str, object] = {}
         # The furthest distance reached in the pull in progress; None when not pulling.
         self._peak: Optional[float] = None
-        # What the client holds on each axis, as far as a successful send says. Starts at rest.
-        self._sent = {VERTICAL_ADDR: 0.0, HORIZONTAL_ADDR: 0.0}
+        # What the client holds on each address, as far as a successful send says. None is
+        # unknown: a fresh mapping or a newly selected target may face a client still holding a
+        # value a previous bridge latched, so the first rest sends zeros rather than trusting it.
+        self._sent: Dict[str, Optional[float]] = {VERTICAL_ADDR: None, HORIZONTAL_ADDR: None,
+                                                  RUN_ADDR: None}
         self._last_step: Optional[float] = None
 
     # ---- lifecycle -------------------------------------------------------
@@ -132,7 +141,14 @@ class LeashMapping(Mapping):
         for leaf, address in self._addr.items():
             self.bridge.on_osc(address, self._on_input)
         self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_avatar_change)
+        self.bridge.on_target_selected(self._on_target)
         self.bridge.on_stop(self._on_stop)
+
+    def activate(self) -> None:
+        with self._lock:
+            super().activate()
+            # the client's /input/ state is unknown here; start it at rest rather than trust it
+            self._rest_locked("activated")
 
     def deactivate(self) -> None:
         with self._lock:
@@ -154,10 +170,16 @@ class LeashMapping(Mapping):
                 self.bridge.osc.forget(a)
             self._rest_locked("the avatar changed")
 
+    def _on_target(self, ctx, target) -> None:
+        # A new target's /input/ state is unknown; the next rest sends the zeros regardless.
+        with self._lock:
+            for address in self._sent:
+                self._sent[address] = None
+
     def _on_stop(self, ctx) -> None:
         with self._lock:
             self.enabled = False
-            self._rest_locked("the bridge is stopping")
+            self._rest_locked("the bridge is stopping", final=True)
 
     # ---- the tick --------------------------------------------------------
 
@@ -174,7 +196,7 @@ class LeashMapping(Mapping):
 
     def _reading(self, leaf: str) -> Optional[float]:
         v = self._in.get(self._addr[leaf])
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or v == 0.0:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v == 0.0:
             return None
         return float(v)
 
@@ -205,8 +227,10 @@ class LeashMapping(Mapping):
         u = min(t.u_max, (self._peak - t.slack) / t.ramp)
         out = {}
         for address, component in ((VERTICAL_ADDR, forward), (HORIZONTAL_ADDR, right)):
-            share = component / d
-            out[address] = lift(u, share) if abs(share) >= t.axis_min else 0.0
+            # a component under a millimetre is zero: float32 rounding leaves a reported zero a
+            # hair off it, and a lifted hair is a deadzone push in a random sign
+            share = component / d if abs(component) >= AXIS_EPSILON else 0.0
+            out[address] = lift(u, share) if share != 0.0 and abs(share) >= t.axis_min else 0.0
         self._write_locked(out)
 
     # ---- writes ----------------------------------------------------------
@@ -218,20 +242,30 @@ class LeashMapping(Mapping):
             if v != self._sent[address] and self.bridge.osc.send(address, v):
                 self._sent[address] = v
 
-    def _rest_locked(self, why: Optional[str] = None, *, force: bool = False) -> None:
-        """End any pull and put both axes and Run at zero, unless the client already holds them."""
+    def _rest_locked(self, why: Optional[str] = None, *, force: bool = False,
+                     final: bool = False) -> None:
+        """End any pull and put both axes and Run at zero, unless the client is known to hold them.
+
+        A dropped zero stays pending (its `_sent` entry keeps the old value) and is re-sent on the
+        next step. With `final` there is no next step, so the send is retried a few times here.
+        """
         self._peak = None
-        if not force and all(v == 0.0 for v in self._sent.values()):
+        if not force and all(v == 0 for v in self._sent.values()):
             return
         if why:
             self.bridge.log.info("Leash: %s; releasing movement.", why)
-        ok = True
-        for address in self._sent:
-            if self.bridge.osc.send(address, 0.0):
-                self._sent[address] = 0.0
-            else:
-                ok = False
-        self.bridge.osc.send(RUN_ADDR, 0)
-        if not ok:
-            self.bridge.log.warning("Leash: a zero to /input/ was dropped; the wearer may still be "
-                                    "moving. It is re-sent on the next step.")
+        # a release is all three or nothing: Run goes with the axes every time they are zeroed
+        pending = list(self._sent)
+        for attempt in range(STOP_RETRIES if final else 1):
+            for address in list(pending):
+                zero = 0 if address == RUN_ADDR else 0.0
+                if self.bridge.osc.send(address, zero):
+                    self._sent[address] = zero
+                    pending.remove(address)
+            if not pending:
+                return
+            if final:
+                time.sleep(STOP_RETRY_WAIT)
+        self.bridge.log.warning("Leash: a zero to %s was dropped; the wearer may still be moving.%s",
+                                ", ".join(pending),
+                                "" if final else " It is re-sent on the next step.")
