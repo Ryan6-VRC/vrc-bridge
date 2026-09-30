@@ -745,6 +745,16 @@ def test_the_config_is_the_fallback_when_no_slack_is_known(rig):
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - T.slack) / T.ramp), abs=TOL)
 
 
+def test_a_zero_slack_is_a_length(rig):
+    """Intended: 0.0 is a valid Slack, used as-is, so any offset past the sender pulls. At 0.3 m
+    the config's 0.8 would pull nothing; a sent 0.0 pulls at u = 0.5."""
+    r = slack_rig(rig, found(0.2))
+    r.emit(Slack=0.0)
+    r.held_at(forward=0.3)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(0.3 / T.ramp), abs=TOL)
+
+
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5, True])
 def test_an_unusable_slack_falls_back_to_the_config(rig, bad):
     """Intended: a NaN, infinite or negative Slack is never a length, so the config's slack
