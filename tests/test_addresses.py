@@ -171,6 +171,20 @@ def test_bridge_persist_contract():
     assert bp.WRITE_SETTLE_SECS == 0.05
 
 
+def test_leash_addresses():
+    """The client's three `/input/` addresses and its per-axis deadzone, measured; the six
+    parameter leaves are a contract with the leash's vrc-patterns entry, under a prefix the
+    settings name. Renamed here alone, the leash never activates, with nothing logged."""
+    from vrbridge.mappings import osc_leash as le
+    assert (le.VERTICAL_ADDR, le.HORIZONTAL_ADDR, le.RUN_ADDR) == (
+        "/input/Vertical", "/input/Horizontal", "/input/Run")
+    assert le.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert le.PARAM_ROOT == "/avatar/parameters/"
+    assert le.READINGS == ("Right", "Up", "Forward")
+    assert le.FLAGS == ("Present", "Planted", "Held")
+    assert le.CLIENT_DEADZONE == 0.1
+
+
 def test_router_selector_addresses():
     """The parameters the routers switch on. Two of these duplicate a mapping's
     own constant; the pin catches an edit that moves one copy and not the other."""

@@ -77,6 +77,14 @@ def test_defaults_are_the_shipped_values():
     assert s.remy.target_height == 480
     assert s.remy.resize_on_upload is True
 
+    # osc_leash.py -- new with the mapping rather than moved, so pinned against its docstring:
+    # the geometry is the prototype avatar's, and slack/ramp/u_max are the values run live
+    # against a desktop wearer. Off by default because it moves the wearer.
+    le = s.leash
+    assert (le.enabled, le.prefix) == (False, "Leash")
+    assert (le.ratio, le.span, le.sender_radius) == (10.0, 6.0, 0.05)
+    assert (le.slack, le.ramp, le.u_max, le.axis_min, le.rate) == (0.8, 0.6, 1.0, 0.25, 60.0)
+
 
 def test_startup_mirrors_name_a_value_not_a_ladder_index():
     """The two VL2 mirrors used to be ZOOM_STEPS_X[5] and APERTURE_STEPS_X[7].

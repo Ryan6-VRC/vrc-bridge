@@ -27,13 +27,28 @@ def _register_persist(router: MappingRouter, bridge: VRBridge) -> None:
     persist.activate()
 
 
+def _register_leash(router: MappingRouter, bridge: VRBridge) -> None:
+    """Register the leash always-on, outside mode switching, when `[leash] enabled` is true.
+
+    Off by default because it moves the wearer. Outside mode switching because a leash can be
+    held in any mode; inert on an avatar that publishes no leash parameters.
+    """
+    from vrbridge.mappings import LeashMapping
+    from vrbridge.settings import settings
+    if not settings().leash.enabled:
+        return
+    leash = LeashMapping(bridge)
+    router.register(leash)
+    leash.activate()
+
+
 class DefaultRouter(MappingRouter):
     """
     Switch between:
       - index_puppet       when /usercamera/Mode == 0
       - index_usercamera   when /usercamera/Mode != 0
 
-    MuteProxy, VRCFT and BridgePersist are always-on.
+    MuteProxy, VRCFT and BridgePersist are always-on, and the leash when `[leash] enabled`.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -65,6 +80,7 @@ class DefaultRouter(MappingRouter):
         vrcft.activate()
 
         _register_persist(self, bridge)
+        _register_leash(self, bridge)
 
         # Register the managed mappings (router will activate exactly one)
         self.register(IndexPuppetMapping(bridge))
@@ -127,6 +143,7 @@ class CameraPrefabRouter(MappingRouter):
     Always on:
       - muteproxy: Convert MuteProxy changes to /input/voice presses.
       - osc_persist: BridgePersist namespaces across an avatar swap.
+      - osc_leash: when `[leash] enabled`, a held or planted leash pulls the wearer.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)
@@ -160,6 +177,7 @@ class CameraPrefabRouter(MappingRouter):
         mute.activate()
 
         _register_persist(self, bridge)
+        _register_leash(self, bridge)
 
         # Managed group
         self.register(IndexPuppetMapping(bridge))

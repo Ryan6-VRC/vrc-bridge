@@ -286,6 +286,44 @@ class QuantChannelSettings:
 
 
 @dataclass(frozen=True)
+class LeashSettings:
+    """`osc_leash`: the avatar's sensing geometry and the ratchet's feel. Its module docstring
+    owns the arithmetic and the client facts it rests on.
+
+    The geometry (`ratio`, `span`, `sender_radius`) is the prototype avatar's, and an avatar
+    declares its own: a mismatch mis-decodes every reading rather than merely feeling
+    wrong. `slack`, `ramp` and `u_max` were run live against a desktop wearer and are unfelt in
+    a headset; `axis_min` is the share of a pull under which an axis is left to the wearer."""
+    enabled: bool = False                # registered by every shipped router when true
+    prefix: str = "Leash"                # parameters are /avatar/parameters/<prefix>/<Name>
+    ratio: float = 10.0                  # sender placed a tenth of the way to the far end
+    span: float = 6.0                    # box receiver span, metres
+    sender_radius: float = 0.05          # metres
+    slack: float = 0.8                   # metres of free travel before a pull begins
+    ramp: float = 0.6                    # metres past slack to full strength
+    u_max: float = 1.0                   # strength cap, a fraction of the world's speed
+    axis_min: float = 0.25               # an axis under this share of the pull stays the wearer's
+    # Steps per second, at most. The step runs on the router's tick, so a router ticking slower
+    # (the CLI's run_forever ticks at 45 Hz) steps at its own rate.
+    rate: float = 60.0
+
+    def validate(self, at: str) -> None:
+        if not self.prefix or self.prefix.startswith("/") or self.prefix.endswith("/"):
+            raise ConfigError(f"{at}.prefix is {self.prefix!r}; expected a parameter prefix "
+                              "such as 'Leash', with no leading or trailing '/'")
+        _positive(self.ratio, f"{at}.ratio")
+        _positive(self.span, f"{at}.span")
+        _non_negative(self.sender_radius, f"{at}.sender_radius")
+        _non_negative(self.slack, f"{at}.slack")
+        _positive(self.ramp, f"{at}.ramp")
+        if not 0.0 < self.u_max <= 1.0:
+            raise ConfigError(f"{at}.u_max is {self.u_max!r}; expected a value in (0, 1]")
+        if not 0.0 <= self.axis_min < 1.0:
+            raise ConfigError(f"{at}.axis_min is {self.axis_min!r}; expected a value in [0, 1)")
+        _positive(self.rate, f"{at}.rate")
+
+
+@dataclass(frozen=True)
 class RemySettings:
     base_url: str = "http://127.0.0.1:8000"
     http_timeout_sec: float = 1.0
@@ -320,6 +358,7 @@ class Settings:
     vrcft: VRCFTSettings = VRCFTSettings()
     wardrobe: WardrobeSettings = WardrobeSettings()
     quantchannel: QuantChannelSettings = QuantChannelSettings()
+    leash: LeashSettings = LeashSettings()
     remy: RemySettings = RemySettings()
 
     def validate(self) -> None:

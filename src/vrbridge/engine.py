@@ -81,6 +81,7 @@ class VRBridge:
         self._osc_pattern_callbacks: list[tuple[str, Callable[[CallbackContext, str, Any], None]]] = []
         self._ctl_callbacks: Dict[tuple[str, Hand], list[Callable[[CallbackContext, ControllerEvent], None]]] = {}
         self._target_callbacks: list[Callable[[CallbackContext, tuple[str, int]], None]] = []
+        self._stop_callbacks: list[Callable[[CallbackContext], None]] = []
         self._lock = threading.RLock()
         self.osc.set_listener(self._on_osc_event)
         self.osc.add_target_listener(self._on_target_selected)
@@ -111,6 +112,16 @@ class VRBridge:
         """
         with self._lock:
             self._target_callbacks.append(callback)
+
+    def on_stop(self, callback: Callable[[CallbackContext], None]):
+        """Register for "the bridge is stopping", called while OSC can still send.
+
+        For a mapping whose last write must reach the client -- a latched `/input/` axis left
+        off zero walks the wearer away after the bridge is gone. Runs on the thread calling
+        `stop()`, after the controller thread stops and before the pulse drain.
+        """
+        with self._lock:
+            self._stop_callbacks.append(callback)
 
     def on_osc(self, address: str, callback: Callable[[CallbackContext, str, Any], None], *, watch: Iterable[str] | None = None):
         with self._lock:
@@ -161,6 +172,13 @@ class VRBridge:
         # embedder calling stop() directly never drained at all.
         if self.controllers:
             self.controllers.stop()
+        with self._lock:
+            stop_cbs = list(self._stop_callbacks)
+        for cb in stop_cbs:
+            try:
+                cb(self._ctx)
+            except Exception as e:
+                self.log.exception("Stop callback error in %s: %s", self._cb_name(cb), e)
         if not drain_pulses(timeout=1.0):
             self.log.warning(
                 "Timed out draining pending OSC pulses; a parameter may be left latched.")
