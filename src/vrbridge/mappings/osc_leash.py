@@ -2,11 +2,9 @@
 pulls the wearer.
 
 **Provenance.** The idea's ancestor is OSCLeash (MIT, copyright 2022 ZenithVal), credited here by
-name. This module is a clean rewrite that shares no code with it and does not reproduce it: the
-sensing, the gating and the pull below are this workspace's own. The repo once carried an
-uncredited port of OSCLeash; it was deleted and does not return (`docs/design.md` §Provenance).
-Every tuned value in `settings.LeashSettings` was measured in this workspace or is the prototype
-avatar's declared geometry; none comes from the ancestor.
+name. This module is a clean rewrite that shares no code with it: the sensing, the gating and the
+pull below are this workspace's own, and every tuned value in `settings.LeashSettings` was measured
+here or is the prototype avatar's declared geometry.
 
 **Inbound**, all under one configurable prefix (`LeashSettings.prefix`, default `Leash`):
 

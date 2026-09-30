@@ -19,7 +19,7 @@ Do not relitigate these; they are the operator's.
 | Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. |
 | `index_remy` is a labelled personal-integration example | Lazy-imported, behind an optional extra, kept as the worked example of an integration mapping. |
 | Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
-| The OSCLeash **port** is deleted and does not return | It was the sole code borrow (§Provenance). `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
+| The OSCLeash **port** is deleted and does not return | It was the sole code borrow. `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
 | Test-determinism machinery lives in the fake, never as a seam in the code under test | `FakeVRChat`'s knobs — `node_fault`, `node_garbage`, `node_404_first`, `hold_next_node_get` — make a hard-to-reach path reachable. A seam in the code under test would instead encode the interleaving its author already knew about, and its placement would be chosen by whoever already knew the bug. |
 | Design record lives here; `gimmicks.md` carries the only route in | A product's design record travels with the product. No new first-hop doc, no `docs/` owner in the meta-repo. |
 
@@ -217,8 +217,5 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 ## Provenance
 
-The repo once carried a literal port of OSCLeash (MIT, © 2022 ZenithVal) with no notice. The evidence is the finding, so it is recorded rather than summarised: the same movement formula, the same `Y_Combined` up/down deadzone, the same divide-by-`Y_Modifier` compensation, the same three `/input/` outputs, and two of three tuning constants identical. Deleting it ended the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. That port does not return.
+Every named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.
 
-`osc_leash` is its replacement: a clean rewrite that shares no code with OSCLeash and does not reproduce it. OSCLeash is the idea's ancestor and is credited by name in the module docstring and here. The sensing is three face-proximity box receivers (the `box-tracker` mechanism) rather than OSCLeash's six-sphere direction cage, the pull is this workspace's ratchet rather than OSCLeash's stretch-scaled formula, and every tuned value in `LeashSettings` was measured in this workspace or is the prototype avatar's geometry; none comes from the ancestor. A change that carries an OSCLeash constant, formula or threshold back in reopens the obligation the deletion closed.
-
-Every other named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.
