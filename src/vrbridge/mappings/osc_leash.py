@@ -1,0 +1,237 @@
+"""The leash: an avatar's leash sensing turned into `/input/` movement, so a held or planted leash
+pulls the wearer.
+
+**Provenance.** The idea's ancestor is OSCLeash (MIT, copyright 2022 ZenithVal), credited here by
+name. This module is a clean rewrite that shares no code with it and does not reproduce it: the
+sensing, the gating and the pull below are this workspace's own. The repo once carried an
+uncredited port of OSCLeash; it was deleted and does not return (`docs/design.md` §Provenance).
+Every tuned value in `settings.LeashSettings` was measured in this workspace or is the prototype
+avatar's declared geometry; none comes from the ancestor.
+
+**Inbound**, all under one configurable prefix (`LeashSettings.prefix`, default `Leash`):
+
+* `<prefix>/Right`, `<prefix>/Up`, `<prefix>/Forward` -- raw float readings of three
+  face-proximity box receivers on the wearer, one per axis of the wearer's root-yaw frame. Each
+  decodes to metres as `ratio * (span * reading - (span / 2 + sender_radius))`; the avatar
+  declares the geometry and the settings must match it. A reading of exactly 0.0 is the sender outside the boxes, never a
+  position.
+* `<prefix>/Present` -- true while the sensed object is inside the boxes.
+* `<prefix>/Planted`, `<prefix>/Held` -- latching bools the avatar's own machine drives.
+
+The mapping is active while `Held` or `Planted` is true and `Present` is true, every reading is
+non-zero, and the mapping is enabled. Otherwise it writes zeros and holds.
+
+**The pull, a ratchet.** `d = hypot(forward, right)`; `Up` never moves the wearer. A pull begins
+the tick `d` exceeds `slack` and ends, writing zeros, the tick `d` is back at or inside it. Its
+strength is `u = min(u_max, (peak - slack) / ramp)`, where `peak` is the furthest `d` reached in
+this pull, so the strength never falls while the pull lasts: a deeper overshoot pulls faster
+rather than longer. The direction is recomputed every tick from the current offset, and an axis
+whose share of it (`|component| / d`) is under `axis_min` is left at zero so the wearer keeps
+that axis. Each nonzero component is lifted over the client's deadzone:
+`sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward to `/input/Vertical`, right to
+`/input/Horizontal`. `/input/Run` is never raised; it is written 0 with every set of zeros.
+
+**The client facts the pull rests on.**
+
+* Each `/input/` movement axis has its own deadzone of 0.1 and a linear speed law above it; the
+  deadzone is per axis, not radial, which is why each component is lifted on its own rather than
+  a unit vector being scaled.
+* A written value above the deadzone replaces the wearer's own input on that axis until a zero is
+  written, and leaves the other axis to the wearer. Hence `axis_min`.
+* Movement addresses latch until zeroed, so every exit path writes zeros: the pull ending, the
+  sender lost, the gate closing, `deactivate()`, an avatar change, the bridge stopping, and an
+  exception in the step.
+* The client applies the latest value per parameter per frame, and delivers to an advertised
+  bridge twice. So the handlers only store values and are idempotent per value, and the step
+  writes an axis only when its value changes at the wire's 32-bit precision.
+* `/input/Horizontal` unboxes a float directly and `/input/Vertical` reads anything that is not a
+  float as 0.0, so both are always sent as floats.
+
+**Threads.** The handlers only store the latest values, reading the manager's cache under the
+mapping's lock so a reordered older datagram never overwrites a newer one. The step runs on the
+router's tick (`update()`), at most `LeashSettings.rate` times a second and never faster than the
+router ticks; nothing runs on the datagram thread but the store, and the avatar change's zeros.
+
+**Avatar change.** The inputs are cleared and forgotten in the manager's cache, so the incoming
+avatar's first values count as changes. An OSC change naming the worn avatar clears them too,
+which fails safe: the wearer keeps control until the avatar's values next change.
+
+**`enabled` belongs to the router.** Observation is ungated; only the step checks `enabled`.
+"""
+
+from __future__ import annotations
+
+import math
+import struct
+import threading
+from typing import Dict, Optional
+
+from vrbridge import VRBridge
+from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.settings import settings
+
+# ------------------------------ Config ------------------------------------
+
+# Addresses and the client's deadzone are contracts, not settings (settings.py's header rule).
+PARAM_ROOT = "/avatar/parameters/"
+AVATAR_CHANGE_ADDR = "/avatar/change"
+VERTICAL_ADDR = "/input/Vertical"
+HORIZONTAL_ADDR = "/input/Horizontal"
+RUN_ADDR = "/input/Run"
+
+RIGHT, UP, FORWARD = "Right", "Up", "Forward"
+PRESENT, PLANTED, HELD = "Present", "Planted", "Held"
+READINGS = (RIGHT, UP, FORWARD)
+FLAGS = (PRESENT, PLANTED, HELD)
+
+#: The client's per-axis `/input/` deadzone: a value at or under it moves nothing.
+CLIENT_DEADZONE = 0.1
+
+
+def decode(reading: float, *, ratio: float, span: float, sender_radius: float) -> float:
+    """A box receiver's raw reading, in metres along its axis."""
+    return ratio * (span * reading - (span / 2 + sender_radius))
+
+
+def _wire(v: float) -> float:
+    """`v` as the client receives it: OSC floats are 32-bit, so a smaller change is no change."""
+    return struct.unpack("f", struct.pack("f", v))[0]
+
+
+def lift(u: float, share: float) -> float:
+    """One axis of a pull at strength `u`, lifted over the client's deadzone. `share` is signed."""
+    return math.copysign(CLIENT_DEADZONE + (1.0 - CLIENT_DEADZONE) * min(abs(u * share), 1.0),
+                         share)
+
+
+# ----------------------------- Mapping ------------------------------------
+
+class LeashMapping(Mapping):
+    """Pulls the wearer toward a held or planted leash's far end over `/input/`."""
+    name = "osc_leash"
+
+    def __init__(self, bridge: VRBridge, tuning=None):
+        super().__init__(bridge)
+        self._tune = tuning if tuning is not None else settings().leash
+        self._addr = {leaf: f"{PARAM_ROOT}{self._tune.prefix}/{leaf}"
+                      for leaf in READINGS + FLAGS}
+        # One lock over the stored inputs, the pull and what was last written. Held across UDP
+        # sends (sendto, never a fetch) and across a cache read, which nests _lock ->
+        # _cache_lock; nothing takes them the other way.
+        self._lock = threading.Lock()
+        self._in: Dict[str, object] = {}
+        # The furthest distance reached in the pull in progress; None when not pulling.
+        self._peak: Optional[float] = None
+        # What the client holds on each axis, as far as a successful send says. Starts at rest.
+        self._sent = {VERTICAL_ADDR: 0.0, HORIZONTAL_ADDR: 0.0}
+        self._last_step: Optional[float] = None
+
+    # ---- lifecycle -------------------------------------------------------
+
+    def _attach(self) -> None:
+        for leaf, address in self._addr.items():
+            self.bridge.on_osc(address, self._on_input)
+        self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_avatar_change)
+        self.bridge.on_stop(self._on_stop)
+
+    def deactivate(self) -> None:
+        with self._lock:
+            super().deactivate()
+            self._rest_locked("the mapping was disabled")
+
+    # ---- events ----------------------------------------------------------
+
+    def _on_input(self, ctx, address: str, value) -> None:
+        with self._lock:
+            # The cache is last-arrival-wins under its lock; a handler handed an older datagram
+            # after a newer one stores the newer (module docstring, Threads).
+            self._in[address] = ctx.get(address, value)
+
+    def _on_avatar_change(self, ctx, address: str, value) -> None:
+        with self._lock:
+            self._in.clear()
+            for a in self._addr.values():
+                self.bridge.osc.forget(a)
+            self._rest_locked("the avatar changed")
+
+    def _on_stop(self, ctx) -> None:
+        with self._lock:
+            self.enabled = False
+            self._rest_locked("the bridge is stopping")
+
+    # ---- the tick --------------------------------------------------------
+
+    def update(self, now: float) -> None:
+        if self._last_step is not None and now - self._last_step < 1.0 / self._tune.rate:
+            return
+        self._last_step = now
+        with self._lock:
+            try:
+                self._step_locked()
+            except Exception:
+                self._rest_locked("the step raised", force=True)
+                raise
+
+    def _reading(self, leaf: str) -> Optional[float]:
+        v = self._in.get(self._addr[leaf])
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v == 0.0:
+            return None
+        return float(v)
+
+    def _flag(self, leaf: str) -> bool:
+        return bool(self._in.get(self._addr[leaf]))
+
+    def _step_locked(self) -> None:
+        if not self.enabled:
+            # Only reachable with an axis still off zero when a zero was dropped on the way out.
+            self._rest_locked()
+            return
+        if not (self._flag(HELD) or self._flag(PLANTED)) or not self._flag(PRESENT):
+            self._rest_locked()
+            return
+        raw = {leaf: self._reading(leaf) for leaf in READINGS}
+        if any(v is None for v in raw.values()):
+            self._rest_locked()
+            return
+        t = self._tune
+        m = {leaf: decode(v, ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
+             for leaf, v in raw.items()}
+        forward, right = m[FORWARD], m[RIGHT]
+        d = math.hypot(forward, right)
+        if d <= t.slack:
+            self._rest_locked()
+            return
+        self._peak = d if self._peak is None else max(self._peak, d)
+        u = min(t.u_max, (self._peak - t.slack) / t.ramp)
+        out = {}
+        for address, component in ((VERTICAL_ADDR, forward), (HORIZONTAL_ADDR, right)):
+            share = component / d
+            out[address] = lift(u, share) if abs(share) >= t.axis_min else 0.0
+        self._write_locked(out)
+
+    # ---- writes ----------------------------------------------------------
+
+    def _write_locked(self, values: Dict[str, float]) -> None:
+        """Send each axis whose wire value changed; record it only once a send succeeded."""
+        for address, v in values.items():
+            v = _wire(v)
+            if v != self._sent[address] and self.bridge.osc.send(address, v):
+                self._sent[address] = v
+
+    def _rest_locked(self, why: Optional[str] = None, *, force: bool = False) -> None:
+        """End any pull and put both axes and Run at zero, unless the client already holds them."""
+        self._peak = None
+        if not force and all(v == 0.0 for v in self._sent.values()):
+            return
+        if why:
+            self.bridge.log.info("Leash: %s; releasing movement.", why)
+        ok = True
+        for address in self._sent:
+            if self.bridge.osc.send(address, 0.0):
+                self._sent[address] = 0.0
+            else:
+                ok = False
+        self.bridge.osc.send(RUN_ADDR, 0)
+        if not ok:
+            self.bridge.log.warning("Leash: a zero to /input/ was dropped; the wearer may still be "
+                                    "moving. It is re-sent on the next step.")

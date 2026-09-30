@@ -19,7 +19,7 @@ Do not relitigate these; they are the operator's.
 | Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. |
 | `index_remy` is a labelled personal-integration example | Lazy-imported, behind an optional extra, kept as the worked example of an integration mapping. |
 | Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
-| `osc_leash` is **deleted** and does not return | It was the sole code borrow (§Provenance). Its replacement is a `vrc-patterns` entry on face-proximity boxes, not a mapping rewrite. |
+| The OSCLeash **port** is deleted and does not return | It was the sole code borrow (§Provenance). `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
 | Test-determinism machinery lives in the fake, never as a seam in the code under test | `FakeVRChat`'s knobs — `node_fault`, `node_garbage`, `node_404_first`, `hold_next_node_get` — make a hard-to-reach path reachable. A seam in the code under test would instead encode the interleaving its author already knew about, and its placement would be chosen by whoever already knew the bug. |
 | Design record lives here; `gimmicks.md` carries the only route in | A product's design record travels with the product. No new first-hop doc, no `docs/` owner in the meta-repo. |
 
@@ -197,8 +197,28 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **`treat_reload_as_swap` is test-only, and no router sets it.** It exists for the Av3Emulator, which cannot change avatars and re-announces the same id on each play entry. On a live client it would restore across Reset Avatar and joins, which the lifetime ruling forbids.
 
+## The leash: the rulings, not the mechanism
+
+`osc_leash` turns an avatar's leash sensing into `/input/` movement, so a held or planted leash pulls the wearer. Only the decisions live here. The contract, the arithmetic and the client facts it rests on are the module docstring's; the avatar half, which senses and latches, is a vrc-patterns entry's to build, and the parameter names are the contract with it.
+
+**The avatar decides the state; the bridge reads two latching bools.** `Held` and `Planted` are driven by the avatar's own machine, so the bridge never reads a physbone's `_IsGrabbed` or `_IsPosed` and the entry's OSC surface never leaks a bone's name. `_IsPosed` can clear inside the frame it rises in, which is why a plant is a latch the avatar publishes rather than an edge the bridge catches. Do not add plant logic here.
+
+**A reading of 0.0 is never a position.** A box reads exactly 0 at and past its range edge and when stowed, so "at the edge" and "nothing there" are the same value; `Present` carries presence and the working volume stays inside the boxes. Decoded, a 0.0 is about 30 m away and would pull at full strength.
+
+**The pull is a ratchet, and the shapes it replaced do not come back.** A write over the client's deadzone takes that axis from the wearer outright, and a write alternated with zeros near the frame rate is averaged with the wearer's input, so there is no write that holds without moving and no fraction of a tick that is a fraction of control. A hold fading to the edge, a fixed-length tug, and a duty-cycled write against a reverse were each worn and did not keep. The ratchet's strength follows the pull's furthest point so it never fades on the way in, and it ends at `slack`, so a deeper overshoot pulls faster rather than longer.
+
+**Fractions of the world's speed, steered every tick.** Movement speed is per world and per axis, so the mapping writes a fraction and re-aims on the measured offset each step; a world's speed shows up as a faster or slower approach, never a wrong heading. Nothing here is tuned to one world's metres per second.
+
+**Small on purpose.** No smoothing, no jump, no run threshold: `Run` is only ever written 0. The client's deadzone is one value at 0.1 and `Run` is a bool, so a walk/run threshold pair is a choice nobody measured a need for.
+
+**Zeros on every way out, the bridge stopping included.** Movement addresses latch, so an exit that skips its zeros walks the wearer away. `VRBridge.on_stop` exists for this: it runs before OSC goes down, on the router path and the library path alike.
+
+**Off by default, outside mode switching when on.** `[leash] enabled` makes every shipped router register it active; a leash can be held in any mode. It stays off by default because it moves the wearer. The step runs on the router's tick at most `rate` times a second, so the CLI's 45 Hz tick caps it below the 60 Hz default.
+
 ## Provenance
 
-`osc_leash` was a literal port of OSCLeash (MIT, © 2022 ZenithVal) carrying no notice. The evidence is the finding, so it is recorded rather than summarised: the same movement formula, the same `Y_Combined` up/down deadzone, the same divide-by-`Y_Modifier` compensation, the same three `/input/` outputs, and two of three tuning constants identical. Deleting it ends the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. Its replacement is a `vrc-patterns` entry rebuilding the leash on face-proximity box receivers rather than OSCLeash's six-sphere direction cage: `box-tracker` establishes the mechanism, and the open design question is how far below six contacts an axis-separable readout gets. Until that ships there is no leash in this repo.
+The repo once carried a literal port of OSCLeash (MIT, © 2022 ZenithVal) with no notice. The evidence is the finding, so it is recorded rather than summarised: the same movement formula, the same `Y_Combined` up/down deadzone, the same divide-by-`Y_Modifier` compensation, the same three `/input/` outputs, and two of three tuning constants identical. Deleting it ended the obligation forward, and the history that carried it is scrubbable and not preserved for attribution's sake. That port does not return.
+
+`osc_leash` is its replacement: a clean rewrite that shares no code with OSCLeash and does not reproduce it. OSCLeash is the idea's ancestor and is credited by name in the module docstring and here. The sensing is three face-proximity box receivers (the `box-tracker` mechanism) rather than OSCLeash's six-sphere direction cage, the pull is this workspace's ratchet rather than OSCLeash's stretch-scaled formula, and every tuned value in `LeashSettings` was measured in this workspace or is the prototype avatar's geometry; none comes from the ancestor. A change that carries an OSCLeash constant, formula or threshold back in reopens the obligation the deletion closed.
 
 Every other named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.

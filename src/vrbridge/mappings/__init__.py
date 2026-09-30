@@ -3,6 +3,7 @@ from .index_usercamera import UserCameraMapping
 from .index_virtuallens import VirtualLensMapping
 from .index_vrclens import VRCLensMapping
 from .mapping_base import Mapping, MappingRouter
+from .osc_leash import LeashMapping
 from .osc_muteproxy import MuteProxyMapping
 from .osc_paramlog import ParamLogMapping
 from .osc_persist import BridgePersistMapping
@@ -13,7 +14,7 @@ from .osc_wardrobe import WardrobeMapping
 # RemyMapping is deliberately absent: `import *` walks __all__ with getattr, which
 # would fire the lazy hook and pull in httpx and Pillow -- the exact cost the extra
 # exists to avoid, and a hard failure on an install without it. Import it by name.
-__all__ = ["BridgePersistMapping", "IndexPuppetMapping", "VirtualLensMapping",
+__all__ = ["BridgePersistMapping", "IndexPuppetMapping", "LeashMapping", "VirtualLensMapping",
            "UserCameraMapping", "VRCLensMapping", "MuteProxyMapping", "ParamLogMapping",
            "QuantChannelDirectory", "VRCFTMapping", "WardrobeMapping", "Mapping",
            "MappingRouter"]
