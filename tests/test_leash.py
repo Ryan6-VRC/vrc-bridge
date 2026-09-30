@@ -5,8 +5,10 @@ the client's out-port stream (`FakeVRChat.emit`, `copies=2` for the doubled deli
 driven by calling `update()` with a clock the test owns, as the router's tick would. What the
 wearer feels is read off the fake: the writes that reached it on `/input/`. The intents:
 
-* **Active only while the leash is held or planted and the sender is present;** a reading of 0.0
-  is the sender gone, never a position.
+* **Active only while the leash is held or planted and both readings are nonzero;** a reading
+  of 0.0 is the sender gone, never a position.
+* **The avatar's Slack is the pull's slack** while it has sent a usable one, read over OSCQuery
+  on first use; otherwise the config's.
 * **The pull is a ratchet:** it begins past `slack`, its strength follows the furthest distance
   this pull held for two consecutive steps and never falls while the pull lasts, so a torn frame
   never sets it; its direction follows the offset every tick, and it ends, zeroed, the tick the
@@ -26,6 +28,7 @@ import vrbridge.mappings.osc_leash as osc_leash
 from vrbridge.engine import VRBridge
 from vrbridge.mappings.osc_leash import (AVATAR_CHANGE_ADDR, HORIZONTAL_ADDR, RUN_ADDR,
                                          VERTICAL_ADDR, LeashMapping, decode, lift)
+from vrbridge.osc_manager import FETCH_NOT_FOUND, FETCH_OK, FetchResult
 from vrbridge.settings import ConfigError, LeashSettings, Settings, set_settings
 
 from .fake_vrchat import FakeVRChat
@@ -107,13 +110,12 @@ class Rig:
             return False
         return got == value if isinstance(value, bool) else abs(got - value) < 1e-6
 
-    def at(self, forward=0.0, right=0.0, up=0.3, **flags):
+    def at(self, forward=0.0, right=0.0, **flags):
         """Place the sensed object at an offset in metres, with any flags."""
-        self.emit(Forward=reading(forward, self.t), Right=reading(right, self.t),
-                  Up=reading(up, self.t), **flags)
+        self.emit(Forward=reading(forward, self.t), Right=reading(right, self.t), **flags)
 
     def held_at(self, forward=0.0, right=0.0):
-        self.at(forward, right, Held=True, Present=True)
+        self.at(forward, right, Held=True)
 
     # -- the tick --
 
@@ -198,16 +200,14 @@ def test_the_lift_clears_the_deadzone_and_keeps_the_sign():
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("flags, active", [
-    (dict(Held=True, Planted=False, Present=True), True),
-    (dict(Held=False, Planted=True, Present=True), True),
-    (dict(Held=True, Planted=True, Present=True), True),
-    (dict(Held=False, Planted=False, Present=True), False),
-    (dict(Held=True, Planted=False, Present=False), False),
-    (dict(Held=False, Planted=True, Present=False), False),
+    (dict(Held=True, Planted=False), True),
+    (dict(Held=False, Planted=True), True),
+    (dict(Held=True, Planted=True), True),
+    (dict(Held=False, Planted=False), False),
 ])
-def test_active_only_while_held_or_planted_and_present(rig, flags, active):
-    """Intended: the gate is (Held or Planted) and Present. Well past slack, so an open gate
-    pulls and a closed one writes nothing at all."""
+def test_active_only_while_held_or_planted(rig, flags, active):
+    """Intended: with both readings nonzero, the gate is Held or Planted. Well past slack, so
+    an open gate pulls and a closed one writes nothing at all."""
     r = rig()
     r.at(forward=1.4, **flags)
     r.step()
@@ -219,10 +219,10 @@ def test_active_only_while_held_or_planted_and_present(rig, flags, active):
 
 def test_a_zero_reading_is_nothing_sensed_never_a_position(rig):
     """Intended: 0.0 on any box is the sender outside the boxes. Decoded, 0.0 would be about
-    30 m away and pull at full strength; it must write nothing instead, Up included."""
+    30 m away and pull at full strength; it must write nothing instead."""
     r = rig()
-    for leaf in ("Forward", "Right", "Up"):
-        r.at(forward=1.4, Held=True, Present=True)
+    for leaf in ("Forward", "Right"):
+        r.at(forward=1.4, Held=True)
         r.emit(**{leaf: 0.0})
         r.step()
         assert r.written() == [], f"a 0.0 on {leaf} was read as a position"
@@ -379,14 +379,13 @@ def pulling(r):
 
 
 @pytest.mark.parametrize("lose", [
-    dict(Present=False),
     dict(Forward=0.0),
     dict(Right=0.0),
     dict(Held=False),
 ])
 def test_losing_the_sender_or_the_gate_zeros(rig, lose):
-    """Intended: mid-pull, the sender leaving the boxes (Present false, or a reading at 0.0) or
-    the gate closing writes zeros the next step, and holds."""
+    """Intended: mid-pull, the sender leaving the boxes (a reading at 0.0) or the gate closing
+    writes zeros the next step, and holds."""
     r = rig()
     pulling(r)
     r.emit(**lose)
@@ -478,12 +477,12 @@ def test_both_axes_go_out_as_floats(rig):
 # --------------------------------------------------------------------------
 
 def test_the_prefix_names_every_input():
-    """Intended: all six inputs live under one configurable prefix."""
+    """Intended: all five inputs live under one configurable prefix."""
     bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
     m = LeashMapping(bridge, tuning=LeashSettings(prefix="Pet/Leash"))
     assert sorted(m._addr.values()) == sorted(
         f"/avatar/parameters/Pet/Leash/{leaf}"
-        for leaf in ("Right", "Up", "Forward", "Present", "Planted", "Held"))
+        for leaf in ("Right", "Forward", "Planted", "Held", "Slack"))
 
 
 @pytest.mark.parametrize("kw, must_name", [
@@ -597,9 +596,9 @@ def test_stopping_retries_a_dropped_zero(rig):
 # --------------------------------------------------------------------------
 
 # Two consecutive frames of one measured pull against the Av3Emulator, raw as they arrived: each
-# frame's three readings came as three datagrams about a millisecond apart, in this order.
-FRAME_N = dict(Forward=0.5055828094482422, Up=0.5100760459899902, Right=0.5279150009155273)
-FRAME_N1 = dict(Forward=0.4994421601295471, Up=0.5099579095840454, Right=0.5255599021911621)
+# frame's readings came as separate datagrams about a millisecond apart, in this order.
+FRAME_N = dict(Forward=0.5055828094482422, Right=0.5279150009155273)
+FRAME_N1 = dict(Forward=0.4994421601295471, Right=0.5255599021911621)
 
 
 def distance(frame, t=T):
@@ -609,13 +608,13 @@ def distance(frame, t=T):
 
 
 def test_a_step_between_a_frames_datagrams_never_sets_the_peak(rig):
-    """Intended: a step landing after frame N+1's Forward and Up but before its Right reads a
+    """Intended: a step landing after frame N+1's Forward but before its Right reads a
     distance no frame had (1.290 m here, against 1.186 and 1.163 whole), and the ratchet's peak
     stays the furthest whole frame, so the pull is not held too strong for the rest of it."""
     r = rig()
-    r.emit(Held=True, Present=True, **FRAME_N)
+    r.emit(Held=True, **FRAME_N)
     r.step()
-    r.emit(Forward=FRAME_N1["Forward"], Up=FRAME_N1["Up"])
+    r.emit(Forward=FRAME_N1["Forward"])
     torn = distance(dict(FRAME_N1, Right=FRAME_N["Right"]))
     r.tick()                                   # the step lands inside the frame
     r.emit(Right=FRAME_N1["Right"])
@@ -672,3 +671,173 @@ def test_a_distance_before_a_boundary_never_confirms_one_after_it(rig, boundary)
     r.tick()
     assert r.m._peak is None, "a distance from before the boundary confirmed one after it"
     assert r.last(VERTICAL_ADDR) == 0.0
+
+
+# --------------------------------------------------------------------------
+# The avatar's Slack
+# --------------------------------------------------------------------------
+
+class FakeFetch:
+    """Stands in for `bridge.osc.fetch`: serves one scripted result per read, and records reads.
+
+    `hold` parks each read until released, so a test can land an OSC value or an avatar change
+    while a read is in flight."""
+
+    def __init__(self, result: FetchResult, hold: bool = False):
+        import threading
+        self.result = result
+        self.reads: list[str] = []
+        self.release = threading.Event()
+        if not hold:
+            self.release.set()
+
+    def __call__(self, address, timeout=2.0):
+        self.reads.append(address)
+        assert self.release.wait(5.0), "a held read was never released"
+        return self.result
+
+
+def found(value) -> FakeFetch:
+    return FakeFetch(FetchResult(FETCH_OK, value=value))
+
+
+def slack_rig(rig, fetch: FakeFetch):
+    r = rig()
+    r.bridge.osc.fetch = fetch
+    return r
+
+
+def settled(r):
+    """Wait for Slack's read thread, if one ran, to finish storing."""
+    reader = r.m._slack_reader
+    if reader is not None:
+        reader.join(5.0)
+        assert not reader.is_alive(), "Slack's read never finished"
+
+
+def test_the_avatars_slack_overrides_the_config(rig):
+    """Intended: while the avatar has sent a Slack, it is the pull's slack in metres, as-is. At
+    1.1 m a config slack of 0.8 would pull at u = 0.5; a sent 0.5 pulls at u = 1."""
+    r = slack_rig(rig, found(0.2))
+    r.emit(Slack=0.5)
+    r.held_at(forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - 0.5) / T.ramp), abs=TOL)
+    assert r.bridge.osc.fetch.reads == [], "a sent Slack was read again over OSCQuery"
+
+
+def test_the_avatars_slack_moves_the_edge_both_ways(rig):
+    """Intended: a Slack past the offset holds the wearer free where the config would pull."""
+    r = slack_rig(rig, found(0.2))
+    r.emit(Slack=1.5)
+    r.held_at(forward=1.4)
+    r.step()
+    assert r.written() == []
+
+
+def test_the_config_is_the_fallback_when_no_slack_is_known(rig):
+    """Intended: with no Slack sent and none readable (the avatar declares none, so the node
+    404s), the config's slack is the pull's."""
+    r = slack_rig(rig, FakeFetch(FetchResult(FETCH_NOT_FOUND)))
+    r.held_at(forward=1.1)
+    r.step()
+    settled(r)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - T.slack) / T.ramp), abs=TOL)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5, True])
+def test_an_unusable_slack_falls_back_to_the_config(rig, bad):
+    """Intended: a NaN, infinite or negative Slack is never a length, so the config's slack
+    stands in for it rather than a pull that never ends or always begins."""
+    r = slack_rig(rig, found(0.2))
+    r.vrc.emit(r.m._addr["Slack"], bad)
+    assert wait_for(lambda: r.m._addr["Slack"] in r.m._in)
+    r.held_at(forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - T.slack) / T.ramp), abs=TOL)
+
+
+def test_an_avatar_change_forgets_the_slack(rig):
+    """Intended: Slack belongs to the avatar that sent it. After a change the config's slack
+    holds until the incoming avatar's Slack arrives, even one equal to the outgoing avatar's."""
+    r = slack_rig(rig, FakeFetch(FetchResult(FETCH_NOT_FOUND)))
+    r.emit(Slack=0.5)
+    r.vrc.emit(AVATAR_CHANGE_ADDR, "avtr_00000000-0000-0000-0000-000000000001")
+    assert wait_for(lambda: r.m._in == {}), "the change never reached the mapping"
+    assert r.m._slack() == T.slack
+    r.emit(Slack=0.5)
+    assert r.m._slack() == 0.5
+
+
+def test_the_first_open_gate_reads_slack_over_oscquery(rig):
+    """Intended: a bridge started against a wearer already in the avatar hears no Slack, since
+    the client sends only changes. The first step with the gate open reads the node once, and
+    the read value sets the pull's slack from then on."""
+    r = slack_rig(rig, found(0.5))
+    r.held_at(forward=0.3)                     # gate open, inside either slack
+    r.tick()
+    settled(r)
+    assert r.bridge.osc.fetch.reads == [r.m._addr["Slack"]]
+    r.held_at(forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - 0.5) / T.ramp), abs=TOL)
+    assert len(r.bridge.osc.fetch.reads) == 1, "a stored Slack was read again"
+
+
+def test_a_closed_gate_reads_nothing(rig):
+    """Intended: the read is on use. With the gate closed nothing is read, so a cold-loading
+    avatar is never asked for a node it has not built yet."""
+    r = slack_rig(rig, found(0.5))
+    r.at(forward=1.1, Held=False, Planted=False)
+    r.step(3)
+    assert r.bridge.osc.fetch.reads == []
+
+
+def test_a_failed_read_is_retried_only_past_the_floor(rig):
+    """Intended: a read that fails is asked again, but at most every SLACK_REREAD_SECS."""
+    r = slack_rig(rig, FakeFetch(FetchResult(FETCH_NOT_FOUND)))
+    r.held_at(forward=0.3)
+    r.m.update(r.now)
+    settled(r)
+    r.m.update(r.now + osc_leash.SLACK_REREAD_SECS / 2)
+    settled(r)
+    assert len(r.bridge.osc.fetch.reads) == 1
+    r.m.update(r.now + osc_leash.SLACK_REREAD_SECS + 0.1)
+    settled(r)
+    assert len(r.bridge.osc.fetch.reads) == 2
+
+
+def test_a_value_sent_during_a_read_wins(rig):
+    """Intended: a Slack arriving over OSC while a read is in flight is newer than the read, so
+    the read's answer is dropped."""
+    fetch = found(0.2)
+    fetch.release.clear()
+    r = slack_rig(rig, fetch)
+    r.held_at(forward=0.3)
+    r.tick()
+    assert wait_for(lambda: fetch.reads), "no read started"
+    r.emit(Slack=0.5)
+    fetch.release.set()
+    settled(r)
+    assert r.m._slack() == 0.5
+
+
+@pytest.mark.parametrize("boundary", ["avatar", "target"])
+def test_a_read_across_a_boundary_is_dropped(rig, boundary):
+    """Intended: a read that started before an avatar change or a target selection describes the
+    avatar or client before it, so its answer is never stored."""
+    fetch = found(0.2)
+    fetch.release.clear()
+    r = slack_rig(rig, fetch)
+    r.held_at(forward=0.3)
+    r.tick()
+    assert wait_for(lambda: fetch.reads), "no read started"
+    if boundary == "avatar":
+        r.vrc.emit(AVATAR_CHANGE_ADDR, "avtr_00000000-0000-0000-0000-000000000001")
+        assert wait_for(lambda: r.m._in == {}), "the change never reached the mapping"
+    else:
+        r.m._on_target(None, ("127.0.0.1", r.vrc.osc_port))
+    fetch.release.set()
+    settled(r)
+    assert r.m._addr["Slack"] not in r.m._in
+    assert r.m._slack() == T.slack
