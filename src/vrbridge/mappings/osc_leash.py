@@ -19,15 +19,21 @@ here or is the prototype avatar's declared geometry.
 The mapping is active while `Held` or `Planted` is true and `Present` is true, every reading is
 non-zero, and the mapping is enabled. Otherwise it writes zeros and holds.
 
-**The pull, a ratchet.** `d = hypot(forward, right)`; `Up` never moves the wearer. A pull begins
-the tick `d` exceeds `slack` and ends, writing zeros, the tick `d` is back at or inside it. Its
-strength is `u = min(u_max, (peak - slack) / ramp)`, where `peak` is the furthest `d` reached in
-this pull, so the strength never falls while the pull lasts: a deeper overshoot pulls faster
-rather than longer. The direction is recomputed every tick from the current offset, and an axis
-whose share of it (`|component| / d`) is under `axis_min` is left at zero so the wearer keeps
-that axis. Each nonzero component is lifted over the client's deadzone:
-`sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward to `/input/Vertical`, right to
-`/input/Horizontal`. `/input/Run` is never raised; it is written 0 with every set of zeros.
+**The pull, a ratchet.** `d = hypot(forward, right)`; `Up` never moves the wearer. Its strength is
+`u = min(u_max, (peak - slack) / ramp)`, where `peak` is the furthest distance this pull has held
+for two consecutive steps, `max(peak, min(d, d_prev))`, so the strength never falls while the pull
+lasts: a deeper overshoot pulls faster rather than longer. A pull begins the step that `peak` first
+exceeds `slack`, and ends, writing zeros, the step `d` is back at or inside it. The two steps are
+there because a frame's three readings arrive as three datagrams, measured about a millisecond
+apart against the Av3Emulator, so a step can land between them and read a distance from two frames
+that the leash never reached; under a ratchet that one reading would set the whole pull's strength.
+The cost is one step on a rising pull: the strength reached at a step is the one the previous
+step's distance supports, and a pull begins a step after `d` first passes `slack`. The direction is
+recomputed every tick from the current offset, and an axis whose share of it (`|component| / d`) is
+under `axis_min` is left at zero so the wearer keeps that axis. Each nonzero component is lifted
+over the client's deadzone: `sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward to
+`/input/Vertical`, right to `/input/Horizontal`. `/input/Run` is never raised; it is written 0 with
+every set of zeros.
 
 **The client facts the pull rests on.**
 
@@ -124,8 +130,11 @@ class LeashMapping(Mapping):
         # _cache_lock; nothing takes them the other way.
         self._lock = threading.Lock()
         self._in: Dict[str, object] = {}
-        # The furthest distance reached in the pull in progress; None when not pulling.
+        # The furthest distance the pull in progress held for two consecutive steps; None when
+        # not pulling.
         self._peak: Optional[float] = None
+        # The previous step's distance; None when that step read no distance.
+        self._d_prev: Optional[float] = None
         # What the client holds on each address, as far as a successful send says. None is
         # unknown: a fresh mapping or a newly selected target may face a client still holding a
         # value a previous bridge latched, so the first rest sends zeros rather than trusting it.
@@ -202,6 +211,7 @@ class LeashMapping(Mapping):
         return bool(self._in.get(self._addr[leaf]))
 
     def _step_locked(self) -> None:
+        d_prev, self._d_prev = self._d_prev, None
         if not self.enabled:
             # Only reachable with an axis still off zero when a zero was dropped on the way out.
             self._rest_locked()
@@ -217,11 +227,18 @@ class LeashMapping(Mapping):
         m = {leaf: decode(v, ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
              for leaf, v in raw.items()}
         forward, right = m[FORWARD], m[RIGHT]
-        d = math.hypot(forward, right)
+        d = self._d_prev = math.hypot(forward, right)
         if d <= t.slack:
             self._rest_locked()
             return
-        self._peak = d if self._peak is None else max(self._peak, d)
+        # A distance seen on one step alone may be a torn frame (module docstring, the ratchet).
+        held = min(d, d_prev) if d_prev is not None else t.slack
+        if held > t.slack:
+            self._peak = held if self._peak is None else max(self._peak, held)
+        if self._peak is None:
+            # past slack for one step only: not yet a pull
+            self._rest_locked()
+            return
         u = min(t.u_max, (self._peak - t.slack) / t.ramp)
         out = {}
         for address, component in ((VERTICAL_ADDR, forward), (HORIZONTAL_ADDR, right)):

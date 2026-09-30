@@ -8,8 +8,9 @@ wearer feels is read off the fake: the writes that reached it on `/input/`. The 
 * **Active only while the leash is held or planted and the sender is present;** a reading of 0.0
   is the sender gone, never a position.
 * **The pull is a ratchet:** it begins past `slack`, its strength follows the furthest distance
-  of this pull and never falls while the pull lasts, its direction follows the offset every tick,
-  and it ends, zeroed, the tick the wearer is back at or inside `slack`.
+  this pull held for two consecutive steps and never falls while the pull lasts, so a torn frame
+  never sets it; its direction follows the offset every tick, and it ends, zeroed, the tick the
+  wearer is back at or inside `slack`.
 * **Every written axis is over the client's deadzone,** and an axis carrying under `axis_min` of
   the pull is never written, so the wearer keeps it.
 * **Idempotent per value:** an axis is written only when its value changes, doubled delivery
@@ -117,11 +118,16 @@ class Rig:
     # -- the tick --
 
     def step(self, n=1):
+        """The object held where it is for two router ticks, as a live router ticks many times
+        while it sits there: the ratchet takes a distance only once two steps agree on it."""
+        for _ in range(2 * n):
+            self.tick()
+
+    def tick(self):
         """One router tick past the rate limit, then wait for its writes to land."""
-        for _ in range(n):
-            self.now += 1.0
-            self.m.update(self.now)
-            self.landed()
+        self.now += 1.0
+        self.m.update(self.now)
+        self.landed()
 
     def landed(self):
         assert wait_for(lambda: len(self.written()) >= self.sends), "a write never landed"
@@ -347,8 +353,10 @@ def test_the_step_is_limited_to_rate(rig):
     second; a tick inside one step period does nothing."""
     r = rig()
     r.held_at(forward=1.4)
+    r.m.update(2000.0 - 1.01 / T.rate)         # the step before, which the ratchet pairs with
     r.m.update(2000.0)
     r.landed()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(1.0, abs=TOL)
     r.held_at(forward=0.2)
     r.m.update(2000.0 + 0.5 / T.rate)
     time.sleep(0.05)
@@ -580,3 +588,59 @@ def test_stopping_retries_a_dropped_zero(rig):
     r.landed()
     assert dropped["n"] == 2
     assert_at_rest(r)
+
+
+# --------------------------------------------------------------------------
+# A torn frame
+# --------------------------------------------------------------------------
+
+# Two consecutive frames of one measured pull against the Av3Emulator, raw as they arrived: each
+# frame's three readings came as three datagrams about a millisecond apart, in this order.
+FRAME_N = dict(Forward=0.5055828094482422, Up=0.5100760459899902, Right=0.5279150009155273)
+FRAME_N1 = dict(Forward=0.4994421601295471, Up=0.5099579095840454, Right=0.5255599021911621)
+
+
+def distance(frame, t=T):
+    f, r = (decode(frame[k], ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
+            for k in ("Forward", "Right"))
+    return math.hypot(f, r)
+
+
+def test_a_step_between_a_frames_datagrams_never_sets_the_peak(rig):
+    """Intended: a step landing after frame N+1's Forward and Up but before its Right reads a
+    distance no frame had (1.290 m here, against 1.186 and 1.163 whole), and the ratchet's peak
+    stays the furthest whole frame, so the pull is not held too strong for the rest of it."""
+    r = rig()
+    r.emit(Held=True, Present=True, **FRAME_N)
+    r.step()
+    r.emit(Forward=FRAME_N1["Forward"], Up=FRAME_N1["Up"])
+    torn = distance(dict(FRAME_N1, Right=FRAME_N["Right"]))
+    r.tick()                                   # the step lands inside the frame
+    r.emit(Right=FRAME_N1["Right"])
+    r.step()
+    whole = max(distance(FRAME_N), distance(FRAME_N1))
+    assert torn > whole + 0.1, "the replay no longer tears"
+    assert r.m._peak == pytest.approx(whole, abs=TOL)
+    fwd = decode(FRAME_N1["Forward"], ratio=T.ratio, span=T.span, sender_radius=T.sender_radius)
+    d1 = distance(FRAME_N1)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((whole - T.slack) / T.ramp, fwd / d1),
+                                                  abs=TOL)
+
+
+def test_a_rising_pull_reaches_the_same_strength_one_step_later(rig):
+    """Intended: guarding the peak costs a rising pull one step and no more. Moving out a step
+    at a time, each step writes the strength the previous step's distance earns, the first step
+    past slack writes nothing, and one more step at the far point reaches its full strength."""
+    r = rig()
+    ds = (0.9, 1.0, 1.1, 1.2, 1.3)
+    for i, d in enumerate(ds):
+        r.held_at(forward=d)
+        r.tick()
+        if i == 0:
+            assert r.written() == [], "the first step past slack pulled"
+        else:
+            u = (ds[i - 1] - T.slack) / T.ramp
+            assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(u), abs=TOL), f"at {d} m"
+    r.tick()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((ds[-1] - T.slack) / T.ramp), abs=TOL)
+    assert r.m._peak == pytest.approx(ds[-1], abs=TOL)
