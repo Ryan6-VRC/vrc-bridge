@@ -233,20 +233,22 @@ def test_a_zero_reading_is_nothing_sensed_never_a_position(rig):
 # --------------------------------------------------------------------------
 
 def test_the_taut_and_slack_edges(rig):
-    """Intended: nothing inside slack; a pull the tick d passes it, just over the deadzone; zeros,
-    Run with them, the tick d is back inside."""
+    """Intended: nothing inside slack; a pull the second tick d is past it, once two steps agree,
+    just over the deadzone; zeros, Run with them, the first tick d is back inside."""
     r = rig()
     r.held_at(forward=T.slack - 0.02)
     r.step()
     assert r.written() == []
 
     r.held_at(forward=T.slack + 0.03)
-    r.step()
+    r.tick()
+    assert r.written() == [], "one step past slack pulled"
+    r.tick()
     assert r.values(VERTICAL_ADDR) == [pytest.approx(pulled(0.03 / T.ramp), abs=TOL)]
     assert r.values(HORIZONTAL_ADDR) == [], "a pure forward pull wrote the wearer's other axis"
 
     r.held_at(forward=T.slack - 0.02)
-    r.step()
+    r.tick()
     assert_at_rest(r)
 
 
@@ -297,7 +299,7 @@ def test_the_direction_is_recomputed_every_tick(rig):
     assert r.last(HORIZONTAL_ADDR) == pytest.approx(pulled(1.0, share), abs=TOL)
 
     r.held_at(forward=-1.0, right=1.0)
-    r.step()
+    r.tick()
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(1.0, -share), abs=TOL)
     assert r.last(HORIZONTAL_ADDR) == pytest.approx(pulled(1.0, share), abs=TOL)
 
@@ -644,3 +646,29 @@ def test_a_rising_pull_reaches_the_same_strength_one_step_later(rig):
     r.tick()
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((ds[-1] - T.slack) / T.ramp), abs=TOL)
     assert r.m._peak == pytest.approx(ds[-1], abs=TOL)
+
+
+@pytest.mark.parametrize("boundary", ["target", "reactivate", "avatar"])
+def test_a_distance_before_a_boundary_never_confirms_one_after_it(rig, boundary):
+    """Intended: the two agreeing steps belong to one activation, avatar and target. A distance
+    seen before a target reselection, a deactivate/activate or an avatar change, then one step
+    at a new distance, starts no pull and raises no peak."""
+    r = rig()
+    r.held_at(forward=1.4)
+    r.tick()                                   # past slack once: not yet a pull
+    assert r.written() == [] and r.m._peak is None
+    if boundary == "target":
+        r.m._on_target(None, ("127.0.0.1", r.vrc.osc_port))
+    elif boundary == "reactivate":
+        r.m.deactivate()
+        r.m.activate()
+    else:
+        r.vrc.emit(AVATAR_CHANGE_ADDR, "avtr_00000000-0000-0000-0000-000000000001")
+        assert wait_for(lambda: r.m._in == {}), "the change never reached the mapping"
+    r.landed()
+    r.vrc.messages.clear()
+    r.sends = 0
+    r.held_at(forward=1.2)
+    r.tick()
+    assert r.m._peak is None, "a distance from before the boundary confirmed one after it"
+    assert r.last(VERTICAL_ADDR) == 0.0

@@ -28,12 +28,16 @@ there because a frame's three readings arrive as three datagrams, measured about
 apart against the Av3Emulator, so a step can land between them and read a distance from two frames
 that the leash never reached; under a ratchet that one reading would set the whole pull's strength.
 The cost is one step on a rising pull: the strength reached at a step is the one the previous
-step's distance supports, and a pull begins a step after `d` first passes `slack`. The direction is
-recomputed every tick from the current offset, and an axis whose share of it (`|component| / d`) is
-under `axis_min` is left at zero so the wearer keeps that axis. Each nonzero component is lifted
-over the client's deadzone: `sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward to
-`/input/Vertical`, right to `/input/Horizontal`. `/input/Run` is never raised; it is written 0 with
-every set of zeros.
+step's distance supports, and a pull begins a step after `d` first passes `slack`. A step deferred
+while a reading is fresh would cost less, but needs a window sized to a burst spread only the
+emulator's has been measured, and a starvation bound past which a torn read still lands. The
+pairing guards the peak only: a torn step still steers for its tick, and one reading inside `slack`
+ends the pull. The history is forgotten at every activation, avatar change and target selection.
+The direction is recomputed every tick from the current offset, and an axis whose share of it
+(`|component| / d`) is under `axis_min` is left at zero so the wearer keeps that axis. Each nonzero
+component is lifted over the client's deadzone: `sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward
+to `/input/Vertical`, right to `/input/Horizontal`. `/input/Run` is never raised; it is written 0
+with every set of zeros.
 
 **The client facts the pull rests on.**
 
@@ -133,7 +137,9 @@ class LeashMapping(Mapping):
         # The furthest distance the pull in progress held for two consecutive steps; None when
         # not pulling.
         self._peak: Optional[float] = None
-        # The previous step's distance; None when that step read no distance.
+        # The previous step's distance; None when that step read no distance, and forgotten at
+        # every boundary outside the tick, so a new activation, avatar or target never pairs a
+        # new distance with an old one.
         self._d_prev: Optional[float] = None
         # What the client holds on each address, as far as a successful send says. None is
         # unknown: a fresh mapping or a newly selected target may face a client still holding a
@@ -155,11 +161,13 @@ class LeashMapping(Mapping):
         with self._lock:
             super().activate()
             # the client's /input/ state is unknown here; start it at rest rather than trust it
+            self._d_prev = None
             self._rest_locked("activated")
 
     def deactivate(self) -> None:
         with self._lock:
             super().deactivate()
+            self._d_prev = None
             self._rest_locked("the mapping was disabled")
 
     # ---- events ----------------------------------------------------------
@@ -175,17 +183,20 @@ class LeashMapping(Mapping):
             self._in.clear()
             for a in self._addr.values():
                 self.bridge.osc.forget(a)
+            self._d_prev = None
             self._rest_locked("the avatar changed")
 
     def _on_target(self, ctx, target) -> None:
         # A new target's /input/ state is unknown; the next rest sends the zeros regardless.
         with self._lock:
+            self._d_prev = None
             for address in self._sent:
                 self._sent[address] = None
 
     def _on_stop(self, ctx) -> None:
         with self._lock:
             self.enabled = False
+            self._d_prev = None
             self._rest_locked("the bridge is stopping", final=True)
 
     # ---- the tick --------------------------------------------------------
