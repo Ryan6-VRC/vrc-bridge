@@ -16,7 +16,7 @@ Do not relitigate these; they are the operator's.
 |---|---|
 | Library **and** application, with a declared seam | The library path is the documented extension route; a `[project.entry-points]` router group makes third-party routers reachable from the CLI. |
 | Operator-tunable values live in a config file | Retuning must not require editing installed source. A constant that is a *contract* rather than a feel setting stays in source and says so — `osc_wardrobe.REPEAT_GUARD_SECS` and `osc_manager._SERVE_POLL_SECS` are both deliberate, and `settings.py`'s header rule draws the line. |
-| Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. |
+| Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. A consumer reading the subtree of a namespace it owns (`OSCManager.fetch_tree`, `osc_persist`'s reconcile) is not discovery: it names the subtree, and the names under it are the avatar's half of a contract the consumer already holds. |
 | Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
 | The OSCLeash **port** is deleted and does not return | It was the sole code borrow. `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
 | Test-determinism machinery lives in the fake, never as a seam in the code under test | `FakeVRChat`'s knobs — `node_fault`, `node_garbage`, `node_404_first`, `hold_next_node_get` — make a hard-to-reach path reachable. A seam in the code under test would instead encode the interleaving its author already knew about, and its placement would be chosen by whoever already knew the bug. |
@@ -177,7 +177,9 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Nothing is acknowledged.** The avatar half has to be cheap to fit into an avatar that is already complicated, and an acknowledged handshake would be most of what it carries. So the bridge awaits nothing from the avatar and finishes on its own clock, and the avatar waits in a window of its own, which has to outlast `LATE_LIMIT_SECS` plus `WRITE_SETTLE_SECS` after `Boot`, the latest the bridge can write the 1. Do not add an answer the bridge waits for, or a timeout on one.
 
-**The namespace is the contract, and the bridge holds no manifest.** The mapping knows only names that arrive, so the discovery descope in §Settled decisions holds. Do not add a configured list of namespaces, ids or payload names.
+**The namespace is the contract, and the bridge holds no manifest.** The mapping knows only names that arrive or that the client's tree serves under a namespace already booted. Do not add a configured list of namespaces, ids or payload names.
+
+**The client's tree is the snapshot's authority; the stream only keeps it fresh.** The client sends a value only when it changes, and neither its out-port stream nor its echo of our writes is delivered reliably, so a value that never arrives is never re-sent while it stands, and a placed prop restored from a snapshot lacking it lands at its default. The mapping therefore reads each booted namespace's subtree from the client every `RECONCILE_SECS` and folds in what differs; the guards against folding in a read that straddled a swap are the module docstring's. Under a pinned target there is no tree, and the snapshot is only as complete as the stream.
 
 **Identity is per prefab, and 0 means off.** A namespace's `Id` default names the prefab it belongs to, so two different payloads built on one composition never restore onto each other. Only the incoming avatar's own `Announce` speaks for it: an avatar that sends none is never matched against the outgoing avatar's value.
 
@@ -185,11 +187,11 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **The checkpoint is re-taken at every announcement, echo or not, and consumed at `Boot`.** This builds on the second announcement §The wardrobe will not trust, and is safe only because of what was measured about it on one client build: a rejected swap is followed by nothing, a load announces at apply with nothing from the incoming avatar before it, and a menu swap announces once, at apply. So the last checkpoint before a boot is the outgoing avatar's final state, and a snapshot is consumed only by a boot, which a rejected swap never produces.
 
-**A snapshot is all or nothing, and nothing is retried.** A dropped payload write withholds `Restore` 1, so the avatar boots from defaults rather than placing a prop from a torn pose. An exchange interrupted during either wait is abandoned, not resumed.
+**A snapshot is all or nothing on our side, and nothing is retried.** A payload write the bridge fails to send withholds `Restore` 1, so the avatar boots from defaults rather than placing a prop from a torn pose. A write lost after it leaves is invisible to the bridge, since UDP reports no receive. An exchange interrupted during either wait is abandoned, not resumed.
 
 **Values replay with the type they arrived with.** Measured, an int sent to a declared float writes garbage rather than nothing, so a whole-number float stays a float and a bool stays a bool.
 
-**A bridge that has not seen a namespace boot restores nothing from it, and the lost first swap after a late start is accepted.** Values arriving with no boot seen cannot be attributed to a load. One OSCQuery read of the namespace subtree would baseline a late start; it is deliberately not built (`fetch` reads a single node, and a subtree read would enumerate the names under the namespace).
+**A bridge that has not seen a namespace boot restores nothing from it, and the lost first swap after a late start is accepted.** Values arriving with no boot seen cannot be attributed to a load. The reconcile's subtree read could baseline a late start, but nothing on the wire then says which avatar those values belong to; it is not built.
 
 **Every shipped router registers it, always on and outside mode switching.** This is the exception to mappings keyed off the avatar being opt-in, as the wardrobe and the quant directory are. Those act only when asked, by a press or a consumer; persistence has to be watching before the swap it restores, so it only works if it is already running whenever a user runs `vrbridge`. It is safe everywhere because it is inert on an avatar that publishes no namespace, and it stays out of mode switching because a swap can happen in any mode.
 
@@ -231,7 +233,7 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Reset after an avatar change is the client's job, and the last will is the one generic hook.** The bridge cannot know what a client's writes meant, so it restores and clears nothing on its behalf. What the bridge can guarantee is that a client's own declared clean-up runs when the client is gone, by any route, so the will fires on every close and from `on_stop` while OSC can still send, once.
 
-**Initial state is read by name, never as a subtree.** `get` is one OSCQuery node per named address, the read `fetch` already makes. A subtree read would enumerate the avatar's parameters, which is the discovery §Settled decisions descopes (§Persistence across a swap declines the same read for the same reason).
+**Initial state is read by name, never as a subtree.** `get` is one OSCQuery node per named address, the read `fetch` already makes. A subtree read here would enumerate whatever the remote client asks about, which is the discovery §Settled decisions descopes.
 
 **One wildcard watch, filtered per connection.** `VRBridge` callbacks cannot be removed, so registering per subscription would accumulate a callback per reconnect for the life of the process. The mapping watches `/avatar/parameters/*` once and each connection's subscription filters it. A named shape of traffic is not enumeration (§The parameter logger), so the descope holds. The stream is the change-filtered one and the mapping adds no dedupe of its own (§Inbound delivery semantics).
 

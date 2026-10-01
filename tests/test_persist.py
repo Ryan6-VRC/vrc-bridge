@@ -33,6 +33,7 @@ from vrbridge.engine import VRBridge
 from vrbridge.mappings.osc_persist import (AVATAR_CHANGE_ADDR, NAMESPACE_ROOT,
                                            BridgePersistMapping)
 from vrbridge.osc_manager import REFIRE_FOLD_WINDOW_SECS
+from zeroconf import ServiceInfo
 
 from .fake_vrchat import FakeVRChat
 
@@ -73,11 +74,19 @@ def wait_for(cond, timeout=3.0) -> bool:
 class Rig:
     """A started bridge pinned at the fake, the mapping registered and active."""
 
-    def __init__(self, vrc: FakeVRChat, *, copies=1, activate=True, **kw):
+    def __init__(self, vrc: FakeVRChat, *, copies=1, activate=True, tree=False, **kw):
         self.vrc = vrc
+        # tree=True: a bridge that found the fake as VRChat, so it has an OSCQuery tree to
+        # read; pinned, the default, it has none and the stream is all it sees.
         self.bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False,
-                               target=("127.0.0.1", vrc.osc_port))
+                               target=None if tree else ("127.0.0.1", vrc.osc_port))
         self.bridge.osc.start()
+        if tree:
+            name = "VRChat-Client-ABC123._oscjson._tcp.local."
+            self.bridge.osc._consider_service(name, ServiceInfo(
+                "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+                port=vrc.http_port, properties={}, server="h.local."))
+        self.boots: dict[str, float] = {}
         vrc.out_port = self.bridge.osc.osc_port
         vrc.copies = copies
         vrc.echo_inbound = True
@@ -101,7 +110,8 @@ class Rig:
             self.vrc.emit(addr(ns, "Announce"), announce)
         time.sleep(STEP)
         for ns in namespaces:
-            self.vrc.emit(addr(ns, "Boot"), random.uniform(0.001, 1.0))
+            self.boots[ns] = random.uniform(0.001, 1.0)
+            self.vrc.emit(addr(ns, "Boot"), self.boots[ns])
         time.sleep(STEP)
 
     def load(self, avatar_id, *namespaces, announce=5):
@@ -112,6 +122,13 @@ class Rig:
     def set(self, ns, leaf, value):
         self.vrc.emit(addr(ns, leaf), value)
         time.sleep(STEP)
+
+    def holds(self, ns, boot=None, **payload):
+        """What the worn avatar's tree serves: its Boot (the last one emitted, by default) and
+        these payload values, whatever the stream did or did not deliver."""
+        self.vrc.set_node(addr(ns, "Boot"), self.boots[ns] if boot is None else boot)
+        for leaf, value in payload.items():
+            self.vrc.set_node(addr(ns, leaf), value)
 
     # -- what the bridge did --
 
@@ -818,5 +835,130 @@ def test_a_disabled_mapping_writes_nothing_but_keeps_watching(rig):
     r.m.activate()
     r.set("GripSync", "Word0", 2.0)
     r.load(A, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 2.0}
+
+
+# --------------------------------------------------------------------------
+# Reconciling against the client's tree
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def fast_reconcile(monkeypatch):
+    monkeypatch.setattr(osc_persist, "RECONCILE_SECS", 0.05)
+
+
+# Long enough for several reconcile reads at the shortened period.
+RECONCILED = 0.4
+
+
+def test_a_value_the_stream_never_delivered_is_restored_from_the_tree(rig, fast_reconcile):
+    """Intended: the client sends a value only when it changes, and a change that never reaches
+    the bridge is never re-sent while it stands. Measured live, a placed box's coarse word went
+    that way and the next swap put the box at cell 0, out of reach. The tree holds what the stream
+    lost, so the snapshot has to come out whole, each value with its wire type."""
+    r = rig(tree=True)
+    r.vrc.whole_floats_as_ints = True        # 98.0 reads back as a float only through its tag
+    worn_a_with(r, Word0=2.0)
+    r.holds("GripSync", Word0=2.0, Coarse=98.0, Detached=True)   # Coarse, Detached never sent
+    time.sleep(RECONCILED)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    placed = r.placed_from("GripSync")
+    assert placed == {"Word0": 2.0, "Coarse": 98.0, "Detached": True}
+    assert type(placed["Coarse"]) is float and type(placed["Detached"]) is bool
+
+
+def test_a_restored_value_whose_echo_never_came_back_survives_a_second_swap(rig, fast_reconcile):
+    """Intended: after a restore the bridge learned the restored values only from the client's
+    echo. Measured live, an echo did not come back; the box re-placed in the same cell held that
+    value unchanged, so nothing re-sent it, and the second swap lost the box. The second snapshot
+    has to carry it."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=137.0)
+    r.vrc.echo_inbound = False
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    r.holds("GripSync", Word0=137.0)          # A' placed from the restore; no echo arrived
+    time.sleep(RECONCILED)
+    r.vrc.messages.clear()
+    r.load(A, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+
+
+def test_a_tree_from_another_boot_is_never_folded_in(rig, fast_reconcile):
+    """Intended: the tree switches avatars at apply, before the announcement reaches the bridge,
+    so a read can return the incoming avatar's reset while the bridge still keeps the outgoing
+    one's state. Folded in, the reset would become the snapshot and every box would go home."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=137.0, Detached=True)
+    r.holds("GripSync", boot=0.5, Word0=0.0, Detached=False)    # someone else's boot
+    time.sleep(RECONCILED)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0, "Detached": True}
+
+
+def test_a_reconciled_value_keeps_the_change_filter_honest(rig, fast_reconcile):
+    """Intended: the stream delivered 1.0, lost the change to 2.0, and the tree supplied it. When
+    the value then moves back to 1.0 the client sends 1.0 -- equal to what the change filter last
+    saw from the stream -- and that send has to reach the snapshot, or the prop restores to a place
+    it already left."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=1.0)
+    r.holds("GripSync", Word0=2.0)
+    assert wait_for(lambda: r.m._ns["GripSync"].live.get(addr("GripSync", "Word0")) == 2.0)
+    r.vrc.clear_node(addr("GripSync", "Boot"))     # stop reading, so only the stream speaks
+    time.sleep(RECONCILED)                         # and let a read already out land first
+    r.set("GripSync", "Word0", 1.0)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_a_read_out_across_an_avatar_change_is_never_folded_in(rig, fast_reconcile):
+    """Intended: a read that left before the announcement and lands after it describes a tree that
+    may already be the incoming avatar's, even where its Boot still matches. Folded in, it would
+    seed the incoming avatar's values with it, and the next swap would restore them. The value is
+    one the stream never delivered: nothing in the manager's cache can stand guard over it."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=137.0)
+    r.vrc.echo_inbound = False
+    r.holds("GripSync", Coarse=5.0)              # what the parked read will answer
+    with r.vrc.hold_next_node_get() as gate:
+        assert gate.wait_until_parked()
+        r.change(A2)
+        r.vrc.clear_node(addr("GripSync", "Boot"))   # the tree is no longer A's; the parked
+    time.sleep(RECONCILED)                           # read answered before that
+    ns = r.m._ns["GripSync"]
+    assert addr("GripSync", "Coarse") not in ns.since_announce
+
+
+def test_a_read_never_overwrites_a_value_the_stream_delivered_while_it_was_out(rig, fast_reconcile):
+    """Intended: the stream's value is newer than any read that was out when it arrived. A read
+    answering 2.0 that lands after the stream delivered 3.0 must leave 3.0, or a swap before the
+    next read restores the prop to where it was a moment ago."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=1.0)
+    r.holds("GripSync", Word0=2.0)
+    with r.vrc.hold_next_node_get() as gate:
+        assert gate.wait_until_parked()
+        r.vrc.clear_node(addr("GripSync", "Boot"))   # every later read is refused
+        r.set("GripSync", "Word0", 3.0)
+    time.sleep(RECONCILED)
+    assert r.m._ns["GripSync"].live[addr("GripSync", "Word0")] == 3.0
+
+
+def test_a_pinned_bridge_reads_no_tree(rig, fast_reconcile):
+    """Intended: a pinned target serves no tree, so the stream is all there is and nothing is
+    asked of the peer. The snapshot is exactly what arrived."""
+    r = rig()
+    worn_a_with(r, Word0=2.0)
+    r.vrc.set_node(addr("GripSync", "Boot"), r.boots["GripSync"])
+    r.vrc.set_node(addr("GripSync", "Coarse"), 98.0)
+    time.sleep(RECONCILED)
+    assert r.vrc.node_gets == []
+    r.load(A2, "GripSync")
     assert r.completed("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 2.0}

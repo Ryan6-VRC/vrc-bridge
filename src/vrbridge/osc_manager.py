@@ -7,7 +7,7 @@ import json
 import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Set
 
 from pythonosc import dispatcher, osc_server, udp_client
@@ -51,6 +51,12 @@ REFIRE_FOLD_WINDOW_SECS = 0.25
 _RANK_SELF = 0
 _RANK_OTHER = 1
 _RANK_VRCHAT = 3
+
+
+#: OSCQuery TYPE tag -> the Python type python-osc hands a handler for that tag, so a value
+#: read from the tree replays with the wire type it would have arrived with.
+_OSCQUERY_TYPES: Dict[Optional[str], Callable[[Any], Any]] = {
+    "T": bool, "F": bool, "i": int, "f": float}
 
 
 #: Why every fetch() outcome is named rather than collapsed to None: the caller has to
@@ -416,6 +422,18 @@ class OSCManager:
         with self._cache_lock:
             self._cache.pop(address, None)
 
+    def prime(self, address: str, value) -> None:
+        """Set a watched address's cached value without firing anything.
+
+        For a consumer that learned the current value some other way than the stream -- an
+        OSCQuery read -- and folds it into its own state itself. Priming keeps the change
+        filter honest afterwards: with the stale value left cached, the client's next send of
+        the value just read could equal it and be suppressed, and the consumer would never
+        hear the parameter move back. Never on a `REFIRE_ON_REPEAT` address, as forget().
+        """
+        with self._cache_lock:
+            self._cache[address] = value
+
     def send(self, address: str, value):
         """Send a message to the selected VRChat OSC target (if any)."""
         with self._client_lock:
@@ -690,6 +708,58 @@ class OSCManager:
         callback is on zeroconf's dispatch thread, which is a third case that already pays
         for one blocking query per record refresh.
         """
+        res = self._fetch_json(address, timeout)
+        if not res.ok:
+            return res
+        node = res.value
+        if "VALUE" not in node:
+            return replace(res, reason=FETCH_MALFORMED, value=None,
+                           detail=f"{res.detail} -> no VALUE attribute")
+        value = node["VALUE"]
+        # OSCQuery types VALUE as an array -- one entry per type tag -- and VRChat's
+        # parameter nodes carry exactly one. Unwrap a single-element list so callers
+        # compare against a scalar; leave anything else alone rather than guessing, since
+        # a multi-tag node is not a parameter and the caller should see that it isn't.
+        if isinstance(value, list) and len(value) == 1:
+            value = value[0]
+        return replace(res, value=value, detail="")
+
+    def fetch_tree(self, address: str, timeout: float = 2.0) -> FetchResult:
+        """Read every parameter at or under `address`, as `{full_path: value}`, in one GET.
+
+        For a consumer that owns a namespace and needs the worn avatar's whole state under
+        it -- `osc_persist` reconciling what the datagram stream never delivered. It is not
+        discovery: the caller names the subtree, and docs/design.md §Settled decisions draws
+        the line there. Each value is typed from the node's OSCQuery TYPE tag (`T`/`F` bool,
+        `i` int, `f` float), because the JSON number alone cannot tell a whole-number float
+        from an int and the two are not interchangeable on the wire. A node of any other
+        type is left out. Same outcomes and thread rules as fetch().
+        """
+        res = self._fetch_json(address, timeout)
+        if not res.ok:
+            return res
+        out: Dict[str, Any] = {}
+        stack = [res.value]
+        while stack:
+            node = stack.pop()
+            if not isinstance(node, dict):
+                continue
+            value, kind, path = node.get("VALUE"), node.get("TYPE"), node.get("FULL_PATH")
+            if isinstance(value, list) and len(value) == 1 and isinstance(path, str):
+                cast = _OSCQUERY_TYPES.get(kind)
+                if cast is not None:
+                    try:
+                        out[path] = cast(value[0])
+                    except (TypeError, ValueError):
+                        pass
+            contents = node.get("CONTENTS")
+            if isinstance(contents, dict):
+                stack.extend(contents.values())
+        return replace(res, value=out, detail="")
+
+    def _fetch_json(self, address: str, timeout: float) -> FetchResult:
+        """One GET of `address` on the peer's OSCQuery server; FETCH_OK carries the JSON
+        node as `value` and the URL as `detail`. fetch() and fetch_tree() read it."""
         with self._client_lock:
             # `endpoint`, not `peer`: this is where to ask. Who is answering is `identity`,
             # and both appear below.
@@ -763,16 +833,9 @@ class OSCManager:
             node = json.loads(body)
         except Exception as e:
             return _result(FETCH_MALFORMED, detail=f"{url} -> not JSON: {e}")
-        if not isinstance(node, dict) or "VALUE" not in node:
-            return _result(FETCH_MALFORMED, detail=f"{url} -> no VALUE attribute")
-        value = node["VALUE"]
-        # OSCQuery types VALUE as an array -- one entry per type tag -- and VRChat's
-        # parameter nodes carry exactly one. Unwrap a single-element list so callers
-        # compare against a scalar; leave anything else alone rather than guessing, since
-        # a multi-tag node is not a parameter and the caller should see that it isn't.
-        if isinstance(value, list) and len(value) == 1:
-            value = value[0]
-        return _result(FETCH_OK, value=value)
+        if not isinstance(node, dict):
+            return _result(FETCH_MALFORMED, detail=f"{url} -> not a JSON node")
+        return _result(FETCH_OK, value=node, detail=url)
 
     @staticmethod
     def _host_info(host: str, http_port: int):
