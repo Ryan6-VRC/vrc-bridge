@@ -17,10 +17,10 @@ Do not relitigate these; they are the operator's.
 | Library **and** application, with a declared seam | The library path is the documented extension route; a `[project.entry-points]` router group makes third-party routers reachable from the CLI. |
 | Operator-tunable values live in a config file | Retuning must not require editing installed source. A constant that is a *contract* rather than a feel setting stays in source and says so — `osc_wardrobe.REPEAT_GUARD_SECS` and `osc_manager._SERVE_POLL_SECS` are both deliberate, and `settings.py`'s header rule draws the line. |
 | Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. |
-| `index_remy` is a labelled personal-integration example | Lazy-imported, behind an optional extra, kept as the worked example of an integration mapping. |
 | Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
 | The OSCLeash **port** is deleted and does not return | It was the sole code borrow. `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
 | Test-determinism machinery lives in the fake, never as a seam in the code under test | `FakeVRChat`'s knobs — `node_fault`, `node_garbage`, `node_404_first`, `hold_next_node_get` — make a hard-to-reach path reachable. A seam in the code under test would instead encode the interleaving its author already knew about, and its placement would be chosen by whoever already knew the bug. |
+| The external AI socket is the worked integration example | One plain-TCP NDJSON socket, config-enabled and loopback by default, is how an outside program reads and drives an avatar; §The external AI socket holds its rulings. |
 | Design record lives here; `gimmicks.md` carries the only route in | A product's design record travels with the product. No new first-hop doc, no `docs/` owner in the meta-repo. |
 
 ## Inbound delivery semantics
@@ -214,6 +214,30 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 **Zeros on every way out, the bridge stopping included.** Movement addresses latch, so an exit that skips its zeros walks the wearer away. `VRBridge.on_stop` exists for this: it runs before OSC goes down, on the router path and the library path alike.
 
 **Off by default, outside mode switching when on.** `[leash] enabled` makes every shipped router register it active; a leash can be held in any mode. It stays off by default because it moves the wearer. The step runs on the router's tick at most `rate` times a second, so the CLI's 45 Hz tick caps it below the 60 Hz default.
+
+## The external AI socket: the rulings, not the mechanism
+
+`external_ai` is one TCP socket an outside program subscribes and writes through. Only the decisions live here; the wire, the threads and the queue are the module docstring's, and README.md §External AI socket is the client's specification, which the docstring must agree with.
+
+**Plain TCP, newline-delimited JSON, and no dependency.** Every language a client might be written in reads lines of JSON off a socket with its standard library. A WebSocket, gRPC or JSON-RPC framework would add a dependency to a package with three runtime dependencies for nothing a client lacks, so do not adopt one.
+
+**Loopback by default, the LAN by configuration, and no authentication.** The socket writes the wearer's avatar, so it is reachable only from the wearer's own machine until `[external_ai] bind` says otherwise, and the operator who widens it owns that exposure. Do not add a token scheme: it would protect a LAN bind weakly and complicate every client, and a loopback bind needs none.
+
+**Config-enabled, and then always on in every router, outside mode switching.** The leash's shape: off by default because it opens a listening socket, and when on, a client reads and writes in any mode, so no router's mode may switch it off. It is inert until a client connects.
+
+**Types ride the JSON type.** A JSON bool is an OSC bool, an integer an int, a number with a fraction or exponent a float, and nothing else is accepted. There is no type field and no coercion to a declared type: the bridge holds no declaration to coerce to (§Settled decisions descopes discovery), and an int sent to a declared float writes garbage (§Persistence across a swap), so the client must state the type and the JSON already carries it.
+
+**Writes are two things: avatar parameters and the worn avatar.** `/input/*` moves the wearer and latches until zeroed, so a client that dies mid-write walks them away; `/chatbox/*` speaks as them. Both stay out of reach, as does every other address family and any wildcard in a write address. Widening the set is a new decision, not a fix.
+
+**Reset after an avatar change is the client's job, and the last will is the one generic hook.** The bridge cannot know what a client's writes meant, so it restores and clears nothing on its behalf. What the bridge can guarantee is that a client's own declared clean-up runs when the client is gone, by any route, so the will fires on every close and from `on_stop` while OSC can still send, once.
+
+**Initial state is read by name, never as a subtree.** `get` is one OSCQuery node per named address, the read `fetch` already makes. A subtree read would enumerate the avatar's parameters, which is the discovery §Settled decisions descopes (§Persistence across a swap declines the same read for the same reason).
+
+**One wildcard watch, filtered per connection.** `VRBridge` callbacks cannot be removed, so registering per subscription would accumulate a callback per reconnect for the life of the process. The mapping watches `/avatar/parameters/*` once and each connection's subscription filters it. A named shape of traffic is not enumeration (§The parameter logger), so the descope holds. The stream is the change-filtered one and the mapping adds no dedupe of its own (§Inbound delivery semantics).
+
+**The roster comes from the client's own log, bound to the discovered client by its service line.** OSC carries no roster. The log of the client the bridge is talking to is the one whose `Advertising Service ... OSCQuery` line names the discovered service, which keeps two clients on one machine apart; the newest log is the fallback when nothing is discovered. `roster.py` owns the parsing and the binding.
+
+**Nothing blocks a datagram or controller thread.** Every bridge callback formats and queues; `get`'s fetch runs on a per-connection worker; a slow client's full queue drops its oldest event rather than waiting, and is told how many. A client that stops reading must cost the bridge memory bounded by the queue depth and nothing else (§Inbound delivery semantics, on what a block costs each thread).
 
 ## Provenance
 

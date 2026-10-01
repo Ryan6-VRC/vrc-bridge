@@ -69,13 +69,10 @@ def test_defaults_are_the_shipped_values():
     assert r.press_duration == 0.1
     assert list(r.zoom_steps) == [0.00, 0.12, 0.25, 0.38, 0.50, 0.60, 0.65, 0.75, 0.82, 0.90, 1.00]
 
-    # osc_muteproxy.py / osc_vrcft.py / index_remy.py
+    # osc_muteproxy.py / osc_vrcft.py
     assert s.muteproxy.press_duration == 1.0 / 30
     assert s.vrcft.service_name == "VRCFT"
     assert s.vrcft.avatar_load_delay_secs == 1.0
-    assert (s.remy.http_timeout_sec, s.remy.work_queue_maxsize, s.remy.max_retries) == (1.0, 8, 1)
-    assert s.remy.target_height == 480
-    assert s.remy.resize_on_upload is True
 
     # osc_leash.py -- new with the mapping rather than moved, so pinned against its docstring:
     # the geometry is the prototype avatar's, and slack/ramp/u_max are the values run live
@@ -84,6 +81,26 @@ def test_defaults_are_the_shipped_values():
     assert (le.enabled, le.prefix) == (False, "Leash")
     assert (le.ratio, le.span, le.sender_radius) == (10.0, 6.0, 0.05)
     assert (le.slack, le.ramp, le.u_max, le.axis_min, le.rate) == (0.8, 0.6, 1.0, 0.25, 60.0)
+
+    # external_ai.py -- new with the mapping, so pinned against its docstring: off by default
+    # because it opens a socket, loopback by default because the socket has no authentication,
+    # and an empty log_dir meaning the client's own default directory.
+    ea = s.external_ai
+    assert (ea.enabled, ea.bind, ea.port, ea.log_dir) == (False, "127.0.0.1", 9002, "")
+
+
+@pytest.mark.parametrize("raw, key", [
+    ({"port": 65536}, "external_ai.port"),
+    ({"port": -1}, "external_ai.port"),
+    ({"bind": ""}, "external_ai.bind"),
+])
+def test_external_ai_rejects_an_unusable_bind(tmp_path, raw, key):
+    """Intended: a port outside 0..65535 or an empty bind is named at load, not at activate."""
+    body = "[external_ai]\n" + "".join(f"{k} = {v!r}\n".replace("'", '"') for k, v in raw.items())
+    path = tmp_path / "vrbridge.toml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigError, match=key):
+        load_settings(path)
 
 
 def test_startup_mirrors_name_a_value_not_a_ladder_index():

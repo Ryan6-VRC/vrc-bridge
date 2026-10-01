@@ -325,27 +325,26 @@ class LeashSettings:
 
 
 @dataclass(frozen=True)
-class RemySettings:
-    base_url: str = "http://127.0.0.1:8000"
-    http_timeout_sec: float = 1.0
-    work_queue_maxsize: int = 8
-    max_retries: int = 1                 # total attempts = max_retries + 1
-    watch_dir: str = ""                  # empty -> ~/Pictures/VRChat
-    resize_on_upload: bool = True
-    target_height: int = 480
+class ExternalAISettings:
+    """`external_ai`: the socket an external program connects to. Its module docstring owns the
+    wire. Exposure, not feel: loopback by default, and a LAN bind is the operator's choice,
+    since the socket has no authentication."""
+    enabled: bool = False                # registered by every shipped router when true
+    bind: str = "127.0.0.1"              # the interface to listen on; "0.0.0.0" for the LAN
+    port: int = 9002                     # 0 takes any free port, for embedding and tests
+    log_dir: str = ""                    # the client's log directory; empty is roster.DEFAULT_LOG_DIR
 
     def validate(self, at: str) -> None:
-        if not self.base_url:
-            raise ConfigError(f"{at}.base_url is empty; set it to your Remy host")
-        _positive(self.http_timeout_sec, f"{at}.http_timeout_sec")
-        _positive(self.work_queue_maxsize, f"{at}.work_queue_maxsize")
-        _non_negative(self.max_retries, f"{at}.max_retries")
-        _positive(self.target_height, f"{at}.target_height")
+        if not self.bind:
+            raise ConfigError(f"{at}.bind is empty; expected an interface address such as "
+                              "'127.0.0.1'")
+        _in_range(self.port, 0, 65535, f"{at}.port")
 
-    def resolved_watch_dir(self) -> Path:
-        if self.watch_dir:
-            return Path(self.watch_dir).expanduser()
-        return Path.home() / "Pictures" / "VRChat"
+    def resolved_log_dir(self) -> Path:
+        if self.log_dir:
+            return Path(self.log_dir).expanduser()
+        from vrbridge.roster import DEFAULT_LOG_DIR
+        return DEFAULT_LOG_DIR
 
 
 @dataclass(frozen=True)
@@ -360,7 +359,7 @@ class Settings:
     wardrobe: WardrobeSettings = WardrobeSettings()
     quantchannel: QuantChannelSettings = QuantChannelSettings()
     leash: LeashSettings = LeashSettings()
-    remy: RemySettings = RemySettings()
+    external_ai: ExternalAISettings = ExternalAISettings()
 
     def validate(self) -> None:
         for f in fields(self):

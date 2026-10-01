@@ -42,13 +42,30 @@ def _register_leash(router: MappingRouter, bridge: VRBridge) -> None:
     leash.activate()
 
 
+def _register_external_ai(router: MappingRouter, bridge: VRBridge) -> None:
+    """Register the external AI socket always-on, outside mode switching, when
+    `[external_ai] enabled` is true.
+
+    Off by default because it opens a listening socket. Outside mode switching because a client
+    reads and writes in any mode; inert until a client connects.
+    """
+    from vrbridge.mappings import ExternalAIMapping
+    from vrbridge.settings import settings
+    if not settings().external_ai.enabled:
+        return
+    ext = ExternalAIMapping(bridge)
+    router.register(ext)
+    ext.activate()
+
+
 class DefaultRouter(MappingRouter):
     """
     Switch between:
       - index_puppet       when /usercamera/Mode == 0
       - index_usercamera   when /usercamera/Mode != 0
 
-    MuteProxy, VRCFT and BridgePersist are always-on, and the leash when `[leash] enabled`.
+    MuteProxy, VRCFT and BridgePersist are always-on, the leash when `[leash] enabled`, and the
+    external AI socket when `[external_ai] enabled`.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -81,6 +98,7 @@ class DefaultRouter(MappingRouter):
 
         _register_persist(self, bridge)
         _register_leash(self, bridge)
+        _register_external_ai(self, bridge)
 
         # Register the managed mappings (router will activate exactly one)
         self.register(IndexPuppetMapping(bridge))
@@ -144,6 +162,7 @@ class CameraPrefabRouter(MappingRouter):
       - muteproxy: Convert MuteProxy changes to /input/voice presses.
       - osc_persist: BridgePersist namespaces across an avatar swap.
       - osc_leash: when `[leash] enabled`, a held or planted leash pulls the wearer.
+      - external_ai: when `[external_ai] enabled`, the socket an external program connects to.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)
@@ -178,6 +197,7 @@ class CameraPrefabRouter(MappingRouter):
 
         _register_persist(self, bridge)
         _register_leash(self, bridge)
+        _register_external_ai(self, bridge)
 
         # Managed group
         self.register(IndexPuppetMapping(bridge))
@@ -235,43 +255,3 @@ class CameraPrefabRouter(MappingRouter):
             else:
                 if m.enabled:
                     m.deactivate()
-
-
-class FullRouter(DefaultRouter):
-    """
-    Extends DefaultRouter by registering RemyMapping.
-
-    Only RemyMapping's *touchpad* callbacks follow IndexPuppet: they are bound
-    through _gate, so they go live on activate() and quiet on deactivate().
-
-    - When index_puppet is active: RemyMapping.activate()
-    - When index_usercamera is active: RemyMapping.deactivate()
-
-    Its thumbstick callbacks and both of its OSC callbacks are registered
-    ungated and stay live regardless of .enabled -- so "enabled" here means
-    the touchpad half only, not the mapping.
-    """
-    def __init__(self, bridge: VRBridge):
-        super().__init__(bridge)
-        # Lazy import
-        from vrbridge.mappings import RemyMapping
-
-        # Register RemyMapping (managed in evaluate)
-        self.remy_mapping = RemyMapping(bridge)
-        self.register(self.remy_mapping)
-
-    def evaluate(self) -> None:
-        # Let the base router pick & toggle the primary managed mapping
-        super().evaluate()
-
-        # Mirror puppet activation onto RemyMapping for touchpad gating
-        puppet = self._mappings.get("index_puppet")
-        if not puppet:
-            return
-
-        if puppet.enabled:
-            if not self.remy_mapping.enabled:
-                self.remy_mapping.activate()
-        else:
-            if self.remy_mapping.enabled:
-                self.remy_mapping.deactivate()

@@ -46,7 +46,6 @@ A **router** decides which mapping is active at any moment.
 |-----------|----------|
 | `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `VRCFT` and `Persistence` stay on. |
 | `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` and `Persistence` stay on, but `VRCFT` is not registered. |
-| `remy`    | The `default` router plus the Remy AI integration (see below). |
 
 **Core mappings**
 
@@ -57,8 +56,8 @@ A **router** decides which mapping is active at any moment.
 - **Wardrobe** — changes your worn avatar from a button on your own expression menu. Needs the [`osc-wardrobe`](#wardrobe) prefab on the avatar and a manifest listing the avatars each button means; it is opt-in, so register it from your own router. VRChat only accepts avatars in your favorites, recents, uploads or purchases.
 - **Persistence** — carries a prop's placed position across one swap to an avatar carrying the same prop ([below](#persistence-across-an-avatar-swap)). On in every router; it does nothing on an avatar without the prop.
 - **Leash** — a held or planted leash on your avatar pulls you toward its far end, over VRChat's `/input/` movement axes, taking only the axis it pulls on so you keep the other. Needs an avatar that publishes the five leash parameters listed in `vrbridge/mappings/osc_leash.py`; the avatar half is planned as a [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns) entry. Off by default; `[leash] enabled = true` in `vrbridge.toml` turns it on in every router, and the same section holds its tuning. The idea comes from [OSCLeash](https://github.com/ZenithVal/OSCLeash) by ZenithVal; this is a rewrite that shares no code with it.
+- **External AI socket** — one TCP socket another program connects to (an AI, a tool on another PC): it subscribes to avatar parameters, controller events, avatar changes and the instance roster, and writes avatar parameters and the worn avatar, as lines of JSON ([below](#external-ai-socket)). Off by default; `[external_ai] enabled = true` turns it on in every router.
 - **Parameter logger** — records whitelisted avatar parameters (names or globs) to a timestamped CSV as they change; runs standalone as `vrbridge-paramlog --params "MyThing/*" [--file out.csv]`. The whitelist is required — full traffic is too noisy to log raw. For two VRChat clients on one PC (each launched with `--osc=inPort:ip:outPort`), run one logger per client with `--osc-port`/`--osc-bind-port` naming that client's ports and `--no-advertise` so the other client's discovery does not also land here.
-- **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
 ## Extending vrc-bridge
 
@@ -204,6 +203,88 @@ bridge.start()
 ```
 
 Against the Av3Emulator (`VRBridge(target=("127.0.0.1", 9000), bind_port=9001)`), a play, stop, play re-announces the same avatar, which on a live client means a reload and restores nothing. `BridgePersistMapping(bridge, treat_reload_as_swap=True)` makes it restore there. It is for testing only, because on a live client it would restore across Reset Avatar and world joins, so no router sets it: register that instance yourself on the library path, instead of running a router.
+
+## External AI socket
+
+Let another program watch and drive your avatar through the bridge: an AI companion, a stream tool, a script on another PC. It connects to one TCP socket, says what it wants to hear about, and gets each change as a line of JSON; it writes avatar parameters, and changes the worn avatar, the same way. Any language that can open a socket and read lines can be a client — there is nothing to install on its side.
+
+Turn it on in `vrbridge.toml`:
+
+```toml
+[external_ai]
+enabled = true        # registered by every router, in every mode
+bind = "127.0.0.1"    # loopback: only programs on this PC. "0.0.0.0" opens it to your LAN
+port = 9002
+log_dir = ""          # VRChat's log folder; empty means the default location
+```
+
+**There is no authentication.** On loopback, anything running on your PC can connect; bound to the LAN, anything on your network can. Only widen `bind` on a network you trust.
+
+### The wire
+
+UTF-8, one JSON object per line, each way. Everything the bridge sends carries `ev` (what it is), `seq` (1 on the first line of a connection, then rising by one per line) and `t` (the bridge's wall clock, seconds). Everything a client sends carries `op` and may carry `id`; a reply or error to that request echoes the `id`.
+
+On connect, the bridge greets you with whom it is sending to (`null` until VRChat is found) and whether that target was set by hand:
+
+```json
+{"ev":"welcome","seq":1,"t":1790000000.1,"version":1,"target":{"host":"127.0.0.1","port":9000},"pinned":false}
+```
+
+Requests:
+
+```json
+{"op":"subscribe","params":["Ears/*","/avatar/parameters/Mood"],"controller":["touchpad.short_press"],"avatar":true,"roster":true}
+{"op":"set","id":1,"address":"Mood","value":2}
+{"op":"get","id":2,"addresses":["Mood","Ears/Wiggle"]}
+{"op":"change","id":3,"avatar":"avtr_00000000-0000-0000-0000-000000000000"}
+{"op":"will","set":[{"address":"Mood","value":0},{"address":"Talking","value":false}]}
+{"op":"ping","id":4}
+```
+
+- `subscribe` replaces whatever the connection subscribed to before; a missing key means nothing of that kind. In `params` a bare name is an avatar parameter (`Mood` is `/avatar/parameters/Mood`) and `*`, `?` and `[...]` are wildcards (`*` also crosses `/`). `controller` names event types from `vrbridge.ControllerEventType`; `touchpad.scroll_raw` streams at the controller's poll rate, so ask for it only if you need it. An unknown type name is an error naming it, and the rest of the subscription still applies. `"roster": true` is answered at once with the current roster.
+- `set` writes one avatar parameter. It is answered only if it fails.
+- `get` reads each parameter's current value from VRChat, by name. Use it at startup: the stream only reports *changes*, so a value that has not changed since you connected is never streamed.
+- `change` asks VRChat to wear an avatar. VRChat only accepts avatars in your favorites, recents, uploads or purchases, and never reports whether a change worked.
+- `will` sets the connection's **last will**: writes the bridge sends, in order, when your connection closes for any reason — you disconnect, your program crashes, the bridge stops. Each will fires once. A new `will` replaces the old one; an empty list clears it.
+- `ping` is answered with `pong`. Requests on one connection are handled in order, so a `pong` means everything you sent before it has been handled.
+
+Events:
+
+```json
+{"ev":"param","seq":5,"t":1790000000.2,"address":"/avatar/parameters/Mood","name":"Mood","value":2}
+{"ev":"value","seq":6,"t":1790000000.2,"address":"/avatar/parameters/Mood","found":true,"value":2,"id":2}
+{"ev":"controller","seq":7,"t":1790000000.3,"type":"touchpad.short_press","hand":"left","steps":null,"dx":null,"dy":null,"ax":null,"ay":null,"when":12.5}
+{"ev":"avatar","seq":8,"t":1790000000.4,"id":"avtr_00000000-0000-0000-0000-000000000000"}
+{"ev":"target","seq":9,"t":1790000000.5,"host":"127.0.0.1","port":9000}
+{"ev":"roster","seq":10,"t":1790000000.6,"self":{"id":"usr_...","name":"You"},"world":{"id":"wrld_...","instance":"12345~region(us)","name":"Example World"},"joined":true,"players":[{"id":"usr_...","name":"You"}]}
+{"ev":"join","seq":11,"t":1790000000.7,"player":{"id":"usr_...","name":"A Friend"}}
+{"ev":"leave","seq":12,"t":1790000000.8,"player":{"id":"usr_...","name":"A Friend"}}
+{"ev":"error","seq":13,"t":1790000000.9,"op":"set","id":1,"message":"address '/input/Jump' is not an avatar parameter; ..."}
+{"ev":"pong","seq":14,"t":1790000001.0,"id":4}
+```
+
+- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand, which serves no values to read.
+- `target` goes to every connection when the bridge finds VRChat, or finds it again after a restart.
+- `roster` is the whole roster: sent when you subscribe, and again whenever the room changes (you join or leave a world). Between those, `join` and `leave` name one player each.
+- `error` with `"dropped": n` means your program read too slowly and the bridge discarded the `n` oldest events waiting for it, keeping the newest. Read faster, or re-`get` what you care about.
+
+### Types
+
+The JSON type decides the OSC type: `true`/`false` is a Bool, a whole number written without a decimal point is an Int (`2`), and a number with a decimal point or exponent is a Float (`2.0`, `0.5`). Match what the avatar declares: an Int sent to a Float parameter does not arrive as that number, so send `1.0`, not `1`, to a Float. Anything else — a string, `null`, a list — is refused.
+
+### What is refused
+
+Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
+
+### Order and repeats
+
+The `param` stream is the bridge's change-filtered stream: one event per change of value, so VRChat sending a value twice is one event, and a value that has not changed is never re-sent. Your own `set` comes back as an ordinary `param` event once the avatar reports the new value. Events for different parameters can arrive slightly out of the order VRChat sent them; sort on `seq` if you log them, and treat each `param` as "this is the value now".
+
+The bridge does not reset anything when the avatar changes; what your writes meant is yours to undo. Watch `avatar` events for that, and put whatever must never be left switched on in your `will`.
+
+### The roster
+
+VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log file (`output_log_*.txt` under `log_dir`). It picks the log of the VRChat client the bridge is talking to, by matching the OSCQuery service name that client writes into its log at startup, and falls back to the newest log until a client is found. That is what keeps the roster right with two VRChat clients on one PC: each bridge follows the log of the client it found. A bridge whose target was set by hand (`--osc-port`) found no client, so it always follows the newest log.
 
 ## Interoperates with
 

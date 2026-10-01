@@ -15,7 +15,6 @@ never a pattern its neighbours appear to set, and never a correction that merely
 plausible. Both failure modes leave this suite green and surface only in a headset.
 """
 from vrbridge.mappings import index_puppet as puppet
-from vrbridge.mappings import index_remy as remy
 from vrbridge.mappings import index_usercamera as uc
 from vrbridge.mappings import index_virtuallens as vl
 from vrbridge.mappings import index_vrclens as vc
@@ -129,11 +128,6 @@ def test_vrcft_addresses():
                                      "/avatar/parameters/EyeTrackingActive": 0}
 
 
-def test_remy_addresses():
-    assert remy.SELFAUDIO_GRAB_ADDR == "/avatar/parameters/GrabSync/SelfAudio"
-    assert remy.GAMEAUDIO_GRAB_ADDR == "/avatar/parameters/GrabSync/GameAudio_IsGrabbed"
-
-
 def test_wardrobe_addresses():
     """The wardrobe's two parameters are a contract with the `osc-wardrobe` vrc-patterns
     entry, which declares them on the avatar. Renaming one here without renaming it in that
@@ -184,6 +178,21 @@ def test_leash_addresses():
     assert le.FLAGS == ("Planted", "Held")
     assert le.SLACK == "Slack"
     assert le.CLIENT_DEADZONE == 0.1
+
+
+def test_external_ai_addresses():
+    """The socket's one watch is every avatar parameter, its avatar write is VRChat's own
+    address, and its id check is VRChat's prefix. The service suffix is the OSCQuery type the
+    zeroconf name carries and the client's log line does not; renamed here alone, the roster
+    never binds to the discovered client and silently follows the newest log."""
+    from vrbridge.mappings import external_ai as ea
+    from vrbridge.mappings import osc_paramlog as pl
+    assert pl.PARAMS_PREFIX == "/avatar/parameters/"
+    assert ea.PARAMS_PATTERN == "/avatar/parameters/*"
+    assert ea.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert ea.AVATAR_ID_PREFIX == "avtr_"
+    assert ea.OSCQUERY_SERVICE_SUFFIX == "._oscjson._tcp.local."
+    assert ea.PROTOCOL_VERSION == 1
 
 
 def test_router_selector_addresses():
