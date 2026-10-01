@@ -205,10 +205,13 @@ class Roster:
             self.joined = True
             return "joined"
         if isinstance(event, LeftRoom):
-            if not self.joined and not self.players:
+            if not self.joined and not self.players and self.world_id is None:
                 return None
+            # The whole room identity goes: the next start sets its own field first, and a
+            # kept world id or name would ride into that half-built snapshot.
             self.players.clear()
             self.joined = False
+            self.world_id = self.instance = self.room_name = None
             return "left"
         if isinstance(event, SelfIdentity):
             if (self.self_id, self.self_name) == (event.id, event.name):
@@ -293,6 +296,9 @@ class LogTailer:
         self.retry_secs = retry_secs
         self.log = logger or logging.getLogger(__name__)
         self.lock = threading.RLock()
+        # The retarget request is its own short lock, never `lock`: `retarget` is called from
+        # zeroconf's dispatch thread, and `lock` is held for the length of a replay.
+        self._flag_lock = threading.Lock()
         self.roster = Roster()
         self.path: Optional[Path] = None
         self.rule: Optional[str] = None
@@ -322,7 +328,7 @@ class LogTailer:
 
     def retarget(self, service_name: Optional[str]) -> None:
         """Re-select the file for `service_name` and replay it, on the tailer thread."""
-        with self.lock:
+        with self._flag_lock:
             self._service_name = service_name
             self._retarget_pending = True
         self._wake.set()
@@ -334,7 +340,7 @@ class LogTailer:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                with self.lock:
+                with self._flag_lock:
                     due = self._retarget_pending or (
                         self.path is None
                         and time.monotonic() - self._last_attempt >= self.retry_secs)
@@ -348,11 +354,12 @@ class LogTailer:
             self._wake.clear()
 
     def _select_and_replay(self) -> None:
-        with self.lock:
+        with self._flag_lock:
             self._retarget_pending = False
             self._last_attempt = time.monotonic()
             service = self._service_name
-            sel = self.select_file(service)
+        sel = self.select_file(service)
+        with self.lock:
             if sel.path is None:
                 if not self._idle_logged:
                     self.log.info("roster: no %s in %s; idle, retrying every %.0f s",
@@ -377,7 +384,8 @@ class LogTailer:
             except OSError:
                 return
             if size < self._offset:  # truncated or rewritten in place: replay it
-                self._retarget_pending = True
+                with self._flag_lock:
+                    self._retarget_pending = True
                 return
             if size > self._offset:
                 self._read_new(notify=True)

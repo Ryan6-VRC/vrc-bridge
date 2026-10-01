@@ -123,6 +123,9 @@ def test_left_room_clears_players_and_joined():
     r = _in_room(Roster())
     assert r.apply(LeftRoom()) == "left"
     assert r.players == {} and r.joined is False
+    # The world identity goes too, so the next room's first start line cannot be snapshotted
+    # beside the old world's id or name.
+    assert r.snapshot()["world"] is None
     assert r.apply(LeftRoom()) is None
 
 

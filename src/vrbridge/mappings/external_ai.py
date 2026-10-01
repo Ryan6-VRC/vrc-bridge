@@ -489,23 +489,27 @@ class ExternalAIMapping(Mapping):
     def _op_subscribe(self, conn, msg, rid, has_id) -> None:
         params = tuple(to_address(p) for p in _string_list(msg, "params"))
         named = _string_list(msg, "controller")
+        for key in ("avatar", "roster"):
+            if key in msg and not isinstance(msg[key], bool):
+                raise _Refused(f"{key} must be true or false, got {msg[key]!r}")
         unknown = [c for c in named if c not in CONTROLLER_TYPES]
         sub = _Subscription(params=params,
                             controller=frozenset(c for c in named if c in CONTROLLER_TYPES),
-                            avatar=bool(msg.get("avatar", False)),
-                            roster=bool(msg.get("roster", False)))
+                            avatar=msg.get("avatar", False),
+                            roster=msg.get("roster", False))
         tailer = self._tailer
+        reply = {"id": rid} if has_id else {}
         if tailer is None:
             conn.sub = sub
             if sub.roster:
-                conn.send("roster", Roster().snapshot())
+                conn.send("roster", {**Roster().snapshot(), **reply})
         else:
             # Under the tailer's lock, so no roster change lands between the subscription taking
             # effect and the snapshot it is answered with.
             with tailer.lock:
                 conn.sub = sub
                 if sub.roster:
-                    conn.send("roster", tailer.roster.snapshot())
+                    conn.send("roster", {**tailer.roster.snapshot(), **reply})
         if unknown:
             raise _Refused(f"unknown controller event type(s) {', '.join(unknown)}; the rest of "
                            f"the subscription applies. Known: {', '.join(CONTROLLER_TYPES)}")

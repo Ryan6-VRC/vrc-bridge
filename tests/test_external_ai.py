@@ -370,10 +370,15 @@ def test_the_roster_is_read_from_the_log_and_sent_as_snapshot_and_deltas(rig, tm
         time.sleep(0.02)
     c, _ = r.client()
     quiet, _ = r.client()
-    c.send({"op": "subscribe", "roster": True})
+    c.send({"op": "subscribe", "roster": True, "id": "sub-1"})
     snap = c.until(lambda e: e["ev"] == "roster")[-1]
     assert snap["players"] == [{"id": ALICE, "name": "Alice Example"}]
     assert snap["world"]["id"] == WORLD and snap["joined"] is True
+    assert snap["id"] == "sub-1", "the immediate roster answer is a reply, so it echoes the id"
+    # A string where a bool belongs is refused, not read as truthy.
+    c.send({"op": "subscribe", "roster": "false", "id": "sub-2"})
+    err = c.until(lambda e: e["ev"] == "error")[-1]
+    assert err["id"] == "sub-2" and "roster" in err["message"]
 
     with log.open("a", encoding="utf-8") as fh:
         fh.write(log_line(f"[Behaviour] OnPlayerJoined Bob ({BOB})"))
@@ -383,7 +388,7 @@ def test_the_roster_is_read_from_the_log_and_sent_as_snapshot_and_deltas(rig, tm
     with log.open("a", encoding="utf-8") as fh:
         fh.write(log_line("[Behaviour] OnLeftRoom"))
     left = c.until(lambda e: e["ev"] == "roster")[-1]
-    assert left["players"] == [] and left["joined"] is False
+    assert left["players"] == [] and left["joined"] is False and left["world"] is None
     assert [e for e in quiet.sync() if e["ev"] in ("roster", "join", "leave")] == []
 
 
