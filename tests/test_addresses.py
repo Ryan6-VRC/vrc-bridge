@@ -180,6 +180,21 @@ def test_leash_addresses():
     assert le.CLIENT_DEADZONE == 0.1
 
 
+def test_external_ai_addresses():
+    """The socket's one watch is every avatar parameter, its avatar write is VRChat's own
+    address, and its id check is VRChat's prefix. The service suffix is the OSCQuery type the
+    zeroconf name carries and the client's log line does not; renamed here alone, the roster
+    never binds to the discovered client and silently follows the newest log."""
+    from vrbridge.mappings import external_ai as ea
+    from vrbridge.mappings import osc_paramlog as pl
+    assert pl.PARAMS_PREFIX == "/avatar/parameters/"
+    assert ea.PARAMS_PATTERN == "/avatar/parameters/*"
+    assert ea.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert ea.AVATAR_ID_PREFIX == "avtr_"
+    assert ea.OSCQUERY_SERVICE_SUFFIX == "._oscjson._tcp.local."
+    assert ea.PROTOCOL_VERSION == 1
+
+
 def test_router_selector_addresses():
     """The parameters the routers switch on. Two of these duplicate a mapping's
     own constant; the pin catches an edit that moves one copy and not the other."""

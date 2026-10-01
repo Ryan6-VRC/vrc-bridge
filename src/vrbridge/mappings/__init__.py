@@ -1,3 +1,4 @@
+from .external_ai import ExternalAIMapping
 from .index_puppet import IndexPuppetMapping
 from .index_usercamera import UserCameraMapping
 from .index_virtuallens import VirtualLensMapping
@@ -11,7 +12,7 @@ from .osc_quant import QuantChannelDirectory
 from .osc_vrcft import VRCFTMapping
 from .osc_wardrobe import WardrobeMapping
 
-__all__ = ["BridgePersistMapping", "IndexPuppetMapping", "LeashMapping", "VirtualLensMapping",
+__all__ = ["BridgePersistMapping", "ExternalAIMapping","IndexPuppetMapping", "LeashMapping", "VirtualLensMapping",
            "UserCameraMapping", "VRCLensMapping", "MuteProxyMapping", "ParamLogMapping",
            "QuantChannelDirectory", "VRCFTMapping", "WardrobeMapping", "Mapping",
            "MappingRouter"]

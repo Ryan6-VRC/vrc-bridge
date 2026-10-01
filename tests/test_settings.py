@@ -82,6 +82,26 @@ def test_defaults_are_the_shipped_values():
     assert (le.ratio, le.span, le.sender_radius) == (10.0, 6.0, 0.05)
     assert (le.slack, le.ramp, le.u_max, le.axis_min, le.rate) == (0.8, 0.6, 1.0, 0.25, 60.0)
 
+    # external_ai.py -- new with the mapping, so pinned against its docstring: off by default
+    # because it opens a socket, loopback by default because the socket has no authentication,
+    # and an empty log_dir meaning the client's own default directory.
+    ea = s.external_ai
+    assert (ea.enabled, ea.bind, ea.port, ea.log_dir) == (False, "127.0.0.1", 9002, "")
+
+
+@pytest.mark.parametrize("raw, key", [
+    ({"port": 65536}, "external_ai.port"),
+    ({"port": -1}, "external_ai.port"),
+    ({"bind": ""}, "external_ai.bind"),
+])
+def test_external_ai_rejects_an_unusable_bind(tmp_path, raw, key):
+    """Intended: a port outside 0..65535 or an empty bind is named at load, not at activate."""
+    body = "[external_ai]\n" + "".join(f"{k} = {v!r}\n".replace("'", '"') for k, v in raw.items())
+    path = tmp_path / "vrbridge.toml"
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ConfigError, match=key):
+        load_settings(path)
+
 
 def test_startup_mirrors_name_a_value_not_a_ladder_index():
     """The two VL2 mirrors used to be ZOOM_STEPS_X[5] and APERTURE_STEPS_X[7].

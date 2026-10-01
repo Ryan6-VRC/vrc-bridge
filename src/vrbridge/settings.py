@@ -325,6 +325,29 @@ class LeashSettings:
 
 
 @dataclass(frozen=True)
+class ExternalAISettings:
+    """`external_ai`: the socket an external program connects to. Its module docstring owns the
+    wire. Exposure, not feel: loopback by default, and a LAN bind is the operator's choice,
+    since the socket has no authentication."""
+    enabled: bool = False                # registered by every shipped router when true
+    bind: str = "127.0.0.1"              # the interface to listen on; "0.0.0.0" for the LAN
+    port: int = 9002                     # 0 takes any free port, for embedding and tests
+    log_dir: str = ""                    # the client's log directory; empty is roster.DEFAULT_LOG_DIR
+
+    def validate(self, at: str) -> None:
+        if not self.bind:
+            raise ConfigError(f"{at}.bind is empty; expected an interface address such as "
+                              "'127.0.0.1'")
+        _in_range(self.port, 0, 65535, f"{at}.port")
+
+    def resolved_log_dir(self) -> Path:
+        if self.log_dir:
+            return Path(self.log_dir).expanduser()
+        from vrbridge.roster import DEFAULT_LOG_DIR
+        return DEFAULT_LOG_DIR
+
+
+@dataclass(frozen=True)
 class Settings:
     controller: ControllerSettings = ControllerSettings()
     puppet: PuppetSettings = PuppetSettings()
@@ -336,6 +359,7 @@ class Settings:
     wardrobe: WardrobeSettings = WardrobeSettings()
     quantchannel: QuantChannelSettings = QuantChannelSettings()
     leash: LeashSettings = LeashSettings()
+    external_ai: ExternalAISettings = ExternalAISettings()
 
     def validate(self) -> None:
         for f in fields(self):

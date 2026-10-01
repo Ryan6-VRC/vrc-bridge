@@ -653,6 +653,18 @@ class OSCManager:
         return Handler
 
     @property
+    def current_target(self) -> Optional[tuple[str, int]]:
+        """The `(host, port)` sends go to, pinned or discovered, or None before one exists."""
+        with self._client_lock:
+            return self._client_target
+
+    @property
+    def current_service_name(self) -> Optional[str]:
+        """The discovered send target's mDNS service name, or None (pinned, or nothing found yet)."""
+        with self._client_lock:
+            return self._current_service_name
+
+    @property
     def target_is_pinned(self) -> bool:
         """True when the send target was named rather than discovered.
 

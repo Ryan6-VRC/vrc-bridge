@@ -42,7 +42,7 @@ def test_every_shipped_mapping_uses_the_attach_hook():
     # __all__ covers every shipped mapping.
     names = [n for n in list(pkg.__all__)
              if n.endswith("Mapping") and n != "Mapping"]
-    assert len(names) == 10, f"expected all ten shipped mappings, got {names}"
+    assert len(names) == 11, f"expected all eleven shipped mappings, got {names}"
     for name in names:
         cls = getattr(pkg, name)
         assert issubclass(cls, Mapping)
