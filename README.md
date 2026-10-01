@@ -46,7 +46,6 @@ A **router** decides which mapping is active at any moment.
 |-----------|----------|
 | `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `VRCFT` and `Persistence` stay on. |
 | `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` and `Persistence` stay on, but `VRCFT` is not registered. |
-| `remy`    | The `default` router plus the Remy AI integration (see below). |
 
 **Core mappings**
 
@@ -58,7 +57,6 @@ A **router** decides which mapping is active at any moment.
 - **Persistence** — carries a prop's placed position across one swap to an avatar carrying the same prop ([below](#persistence-across-an-avatar-swap)). On in every router; it does nothing on an avatar without the prop.
 - **Leash** — a held or planted leash on your avatar pulls you toward its far end, over VRChat's `/input/` movement axes, taking only the axis it pulls on so you keep the other. Needs an avatar that publishes the five leash parameters listed in `vrbridge/mappings/osc_leash.py`; the avatar half is planned as a [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns) entry. Off by default; `[leash] enabled = true` in `vrbridge.toml` turns it on in every router, and the same section holds its tuning. The idea comes from [OSCLeash](https://github.com/ZenithVal/OSCLeash) by ZenithVal; this is a rewrite that shares no code with it.
 - **Parameter logger** — records whitelisted avatar parameters (names or globs) to a timestamped CSV as they change; runs standalone as `vrbridge-paramlog --params "MyThing/*" [--file out.csv]`. The whitelist is required — full traffic is too noisy to log raw. For two VRChat clients on one PC (each launched with `--osc=inPort:ip:outPort`), run one logger per client with `--osc-port`/`--osc-bind-port` naming that client's ports and `--no-advertise` so the other client's discovery does not also land here.
-- **Remy AI integration** — triggers actions on an external AI service. Point it at your host with `VRBRIDGE_REMY_URL` (defaults to `http://127.0.0.1:8000`) and `VRBRIDGE_REMY_WATCH_DIR` for the screenshot folder.
 
 ## Extending vrc-bridge
 

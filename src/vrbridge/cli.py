@@ -22,7 +22,7 @@ import argparse
 from importlib.metadata import entry_points
 from typing import Dict, Type
 
-from vrbridge.routers import CameraPrefabRouter, DefaultRouter, FullRouter, MappingRouter
+from vrbridge.routers import CameraPrefabRouter, DefaultRouter, MappingRouter
 from vrbridge import VRBridge
 from vrbridge.utils import setup_logging
 
@@ -34,7 +34,6 @@ ROUTER_ENTRY_POINT_GROUP = "vrbridge.routers"
 ROUTERS: Dict[str, Type[MappingRouter]] = {
     "default": DefaultRouter,
     "camera": CameraPrefabRouter,
-    "remy": FullRouter,
 }
 
 DEFAULT_ROUTER = "default"

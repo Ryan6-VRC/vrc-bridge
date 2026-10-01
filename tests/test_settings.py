@@ -69,13 +69,10 @@ def test_defaults_are_the_shipped_values():
     assert r.press_duration == 0.1
     assert list(r.zoom_steps) == [0.00, 0.12, 0.25, 0.38, 0.50, 0.60, 0.65, 0.75, 0.82, 0.90, 1.00]
 
-    # osc_muteproxy.py / osc_vrcft.py / index_remy.py
+    # osc_muteproxy.py / osc_vrcft.py
     assert s.muteproxy.press_duration == 1.0 / 30
     assert s.vrcft.service_name == "VRCFT"
     assert s.vrcft.avatar_load_delay_secs == 1.0
-    assert (s.remy.http_timeout_sec, s.remy.work_queue_maxsize, s.remy.max_retries) == (1.0, 8, 1)
-    assert s.remy.target_height == 480
-    assert s.remy.resize_on_upload is True
 
     # osc_leash.py -- new with the mapping rather than moved, so pinned against its docstring:
     # the geometry is the prototype avatar's, and slack/ramp/u_max are the values run live

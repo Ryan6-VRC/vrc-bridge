@@ -3,7 +3,7 @@ import pytest
 
 from vrbridge import cli
 from vrbridge.mappings import Mapping, MappingRouter
-from vrbridge.routers import CameraPrefabRouter, DefaultRouter, FullRouter
+from vrbridge.routers import CameraPrefabRouter, DefaultRouter
 
 
 class _Bridge:
@@ -39,12 +39,12 @@ def test_every_shipped_mapping_uses_the_attach_hook():
     """A mapping that overrode register() would silently opt out of the guard."""
     import vrbridge.mappings as pkg
 
-    # __all__ + LAZY, so a mapping moved behind the lazy hook stays covered.
-    names = [n for n in list(pkg.__all__) + list(pkg.LAZY)
+    # __all__ covers every shipped mapping.
+    names = [n for n in list(pkg.__all__)
              if n.endswith("Mapping") and n != "Mapping"]
-    assert len(names) == 11, f"expected all eleven shipped mappings, got {names}"
+    assert len(names) == 10, f"expected all ten shipped mappings, got {names}"
     for name in names:
-        cls = getattr(pkg, name)  # RemyMapping resolves through the lazy __getattr__
+        cls = getattr(pkg, name)
         assert issubclass(cls, Mapping)
         assert "register" not in vars(cls), f"{name} overrides register(); it should override _attach()"
 
@@ -75,7 +75,7 @@ class _EP:
 def test_builtins_are_discovered_without_any_plugin(monkeypatch):
     _fake_eps(monkeypatch)
     assert cli.discover_routers() == {
-        "default": DefaultRouter, "camera": CameraPrefabRouter, "remy": FullRouter}
+        "default": DefaultRouter, "camera": CameraPrefabRouter}
 
 
 def test_a_plugin_router_becomes_selectable(monkeypatch):
@@ -99,17 +99,6 @@ def test_a_broken_plugin_is_skipped_not_fatal(monkeypatch, ep, reason):
 def test_a_plugin_may_not_shadow_a_builtin(monkeypatch):
     _fake_eps(monkeypatch, _EP("default", "pkg:R", lambda: _PluginRouter))
     assert cli.discover_routers()["default"] is DefaultRouter
-
-
-def test_star_import_does_not_pull_in_the_optional_extra():
-    """`import *` walks __all__ with getattr, so a lazily-hooked name listed there
-    resolves anyway -- pulling in httpx and Pillow, and hard-failing on an install
-    without the extra."""
-    import vrbridge.mappings as pkg
-
-    assert "RemyMapping" not in pkg.__all__
-    assert "RemyMapping" in pkg.LAZY
-    assert "RemyMapping" in dir(pkg), "dir() should still advertise it"
 
 
 def test_a_mixin_cannot_smuggle_in_a_register_override():

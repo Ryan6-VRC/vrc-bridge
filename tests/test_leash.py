@@ -500,7 +500,7 @@ def test_bad_leash_settings_name_the_key(kw, must_name):
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("router_name", ["default", "camera", "remy"])
+@pytest.mark.parametrize("router_name", ["default", "camera"])
 def test_shipped_routers_register_it_only_when_enabled(router_name, enabled):
     """Intended: off by default, because it moves the wearer; `[leash] enabled` registers it
     active in every shipped router, outside mode switching."""

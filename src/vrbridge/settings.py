@@ -325,30 +325,6 @@ class LeashSettings:
 
 
 @dataclass(frozen=True)
-class RemySettings:
-    base_url: str = "http://127.0.0.1:8000"
-    http_timeout_sec: float = 1.0
-    work_queue_maxsize: int = 8
-    max_retries: int = 1                 # total attempts = max_retries + 1
-    watch_dir: str = ""                  # empty -> ~/Pictures/VRChat
-    resize_on_upload: bool = True
-    target_height: int = 480
-
-    def validate(self, at: str) -> None:
-        if not self.base_url:
-            raise ConfigError(f"{at}.base_url is empty; set it to your Remy host")
-        _positive(self.http_timeout_sec, f"{at}.http_timeout_sec")
-        _positive(self.work_queue_maxsize, f"{at}.work_queue_maxsize")
-        _non_negative(self.max_retries, f"{at}.max_retries")
-        _positive(self.target_height, f"{at}.target_height")
-
-    def resolved_watch_dir(self) -> Path:
-        if self.watch_dir:
-            return Path(self.watch_dir).expanduser()
-        return Path.home() / "Pictures" / "VRChat"
-
-
-@dataclass(frozen=True)
 class Settings:
     controller: ControllerSettings = ControllerSettings()
     puppet: PuppetSettings = PuppetSettings()
@@ -360,7 +336,6 @@ class Settings:
     wardrobe: WardrobeSettings = WardrobeSettings()
     quantchannel: QuantChannelSettings = QuantChannelSettings()
     leash: LeashSettings = LeashSettings()
-    remy: RemySettings = RemySettings()
 
     def validate(self) -> None:
         for f in fields(self):

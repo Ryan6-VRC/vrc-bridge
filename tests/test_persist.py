@@ -783,7 +783,7 @@ def test_a_same_id_reload_is_a_swap_only_under_the_test_switch(rig):
         assert r.restores("GripSync") == expect, f"treat_reload_as_swap={switch}"
 
 
-@pytest.mark.parametrize("router_name", ["default", "camera", "remy"])
+@pytest.mark.parametrize("router_name", ["default", "camera"])
 def test_every_shipped_router_runs_persistence_in_every_mode(router_name):
     """Intended: `vrbridge --router <any shipped name>` restores with nothing else to type, and a
     swap can happen in any mode, so the mapping is registered active and no mode switch may

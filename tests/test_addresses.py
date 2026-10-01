@@ -15,7 +15,6 @@ never a pattern its neighbours appear to set, and never a correction that merely
 plausible. Both failure modes leave this suite green and surface only in a headset.
 """
 from vrbridge.mappings import index_puppet as puppet
-from vrbridge.mappings import index_remy as remy
 from vrbridge.mappings import index_usercamera as uc
 from vrbridge.mappings import index_virtuallens as vl
 from vrbridge.mappings import index_vrclens as vc
@@ -127,11 +126,6 @@ def test_vrcft_addresses():
                                    "/avatar/parameters/EyeTrackingActive": 1}
     assert vrcft.INACTIVE_PARAMS == {"/avatar/parameters/LipTrackingActive": 0,
                                      "/avatar/parameters/EyeTrackingActive": 0}
-
-
-def test_remy_addresses():
-    assert remy.SELFAUDIO_GRAB_ADDR == "/avatar/parameters/GrabSync/SelfAudio"
-    assert remy.GAMEAUDIO_GRAB_ADDR == "/avatar/parameters/GrabSync/GameAudio_IsGrabbed"
 
 
 def test_wardrobe_addresses():
