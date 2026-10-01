@@ -23,8 +23,8 @@ which is what lets an `Announce` arriving after its `Boot` count. A valid snapsh
 value with the wire type it arrived with, then `WRITE_SETTLE_SECS` later `Restore` 1 (the client
 applies the latest value per parameter per frame, so the wait puts the 1 in a later frame than the
 payload), and the mapping is finished with it. The avatar waits for the 1 in a window of its own
-and boots from defaults without it, so a dropped payload write withholds the 1 -- a snapshot is
-all or nothing -- and nothing is retried. A decision running more than `LATE_LIMIT_SECS` after its
+and boots from defaults without it, so a payload write the bridge fails to send withholds the 1,
+and nothing is retried. A write lost after it leaves is invisible here: UDP reports no receive. A decision running more than `LATE_LIMIT_SECS` after its
 `Boot` arrived (a stalled bridge) writes nothing: payload landing after the window closes lands on
 a running prop, which a watching remote sees thrown out of place. A `/avatar/change`, a further
 `Boot` for the namespace, or a newly selected target during either wait abandons the exchange; a
@@ -59,8 +59,24 @@ bool must stay a bool); the last `Announce` and whether one arrived since the la
   every namespace. Merely emptying the lists would not do: a restarted client back on a different
   avatar announces an id that is not the one worn at boot, which would read as one swap.
 * **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
-  loaded restores nothing until the next boot; the OSCQuery read that would baseline it is not
-  built (`OSCManager.fetch` answers FETCH_MALFORMED for a container node).
+  loaded restores nothing until the next boot; the reconcile below corrects a baselined
+  namespace and never baselines one.
+
+**Reconciling against the client's tree.** The stream alone cannot carry the snapshot: the client
+sends a value only when it changes, so one that never reaches us is never re-sent while it stands,
+and neither its out-port stream nor its echo of our writes is delivered reliably under load. A
+snapshot lacking a placed prop's word restores the prop to that word's default, out of reach.
+So every `RECONCILE_SECS` the mapping reads each baselined namespace's subtree from the
+client's OSCQuery server (`OSCManager.fetch_tree`, typed from each node's TYPE tag) and folds in
+every payload value that differs from `live`, priming the manager's cache so the change filter
+agrees. A read is applied only if the tree's `Boot` is the one this namespace last booted with,
+no exchange is in flight, and no `/avatar/change`, `Boot` or target selection landed while it
+was out -- the tree switches avatars at apply, before the announcement reaches us, and a read
+straddling that must not fold the incoming avatar's reset into the outgoing one's checkpoint. A
+datagram landing during a read can be overwritten by the read's older value; the next read
+corrects it, so `live` converges on the client within one period of the values coming to rest,
+and a swap inside that period can still carry a stale value. Under a pinned target there is no
+tree to read and the stream is all there is.
 
 **The change filter.** `_update_cache_and_fire` suppresses a value equal to the last one seen, and
 its cache outlives every avatar. So every announcement, and a target selection, `forget()`s the
@@ -98,8 +114,10 @@ to watch; only writing a snapshot checks `enabled`.
 
 from __future__ import annotations
 
+import struct
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -130,6 +148,10 @@ WRITE_SETTLE_SECS = 0.05
 
 #: The longest after a `Boot` arrived that a snapshot may still begin writing, inside the window.
 LATE_LIMIT_SECS = 0.6
+
+#: How often each baselined namespace is read back from the client's tree. A value the stream
+#: missed is in the next snapshot once a read lands after it came to rest.
+RECONCILE_SECS = 1.0
 
 
 @dataclass
@@ -175,6 +197,13 @@ def _split(address: str) -> Optional[tuple[str, str]]:
     return name, rest
 
 
+def _same_f32(a, b) -> bool:
+    """Whether two floats are one float32: python-osc and the OSCQuery JSON round differently."""
+    if not isinstance(a, float) or not isinstance(b, float):
+        return False
+    return struct.pack("<f", a) == struct.pack("<f", b)
+
+
 def _is_int(value) -> bool:
     # bool is an int subclass; a T on an int address is a mis-authored parameter, not a 1.
     return isinstance(value, int) and not isinstance(value, bool)
@@ -206,6 +235,8 @@ class BridgePersistMapping(Mapping):
         self._last_announced: Optional[str] = None
         # Global, so a timer from a deleted namespace never matches a new one of the same name.
         self._tokens = 0
+        # Bumped by every event that can move the worn avatar under a reconcile read in flight.
+        self._epoch = 0
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -218,12 +249,15 @@ class BridgePersistMapping(Mapping):
         # republication returns early in _consider_service and never reaches it. Every one of
         # those is a join or a gap in what we watched, so each clears.
         self.bridge.on_target_selected(self._on_target_selected)
+        threading.Thread(target=_reconcile_loop, args=(weakref.ref(self),), daemon=True,
+                         name="BridgePersist-reconcile").start()
 
     # ---- events ----------------------------------------------------------
 
     def _on_avatar_change(self, ctx, address: str, value) -> None:
         with self._lock:
             self._last_announced = value
+            self._epoch += 1
             for ns in self._ns.values():
                 self._abandon_locked(ns, "an avatar change")
                 ns.checkpoint = dict(ns.live)
@@ -239,6 +273,7 @@ class BridgePersistMapping(Mapping):
 
     def _on_target_selected(self, ctx, target) -> None:
         with self._lock:
+            self._epoch += 1
             for ns in self._ns.values():
                 self._abandon_locked(ns, "a newly selected OSC target")
                 self._forget_locked(ns)
@@ -285,6 +320,7 @@ class BridgePersistMapping(Mapping):
             # The same draw again is a repeated delivery of one boot, not a second load.
             return
         ns.last_boot = value
+        self._epoch += 1
         arrived = time.monotonic()
         # The avatar reloaded, so an exchange still in flight was for an animator that is gone.
         self._abandon_locked(ns, "a further Boot")
@@ -320,6 +356,42 @@ class BridgePersistMapping(Mapping):
         if not _is_int(ns.announce) or ns.announce == 0:
             return f"Announce is {ns.announce!r}, and only a non-zero int enables persistence"
         return None
+
+    # ---- reconcile -------------------------------------------------------
+
+    def _reconcile(self) -> None:
+        with self._lock:
+            epoch = self._epoch
+            due = [(ns.name, ns.last_boot) for ns in self._ns.values()
+                   if ns.baselined and ns.last_boot is not None and not ns.token]
+        for name, boot in due:
+            res = self.bridge.osc.fetch_tree(f"{NAMESPACE_ROOT}{name}")
+            if not res.ok:
+                self.log.debug("BridgePersist/%s: no reconcile read (%s: %s).", name,
+                               res.reason, res.detail)
+                continue
+            tree = res.value
+            with self._lock:
+                ns = self._ns.get(name)
+                if (ns is None or self._epoch != epoch or ns.token or ns.last_boot != boot
+                        or not _same_f32(tree.get(ns.addr(BOOT)), boot)):
+                    continue
+                changed = []
+                for address, value in tree.items():
+                    parsed = _split(address)
+                    if (parsed is None or parsed[0] != name
+                            or parsed[1] in (ID, ANNOUNCE, BOOT, RESTORE)):
+                        continue
+                    old = ns.live.get(address, _MISSING)
+                    if old is not _MISSING and type(old) is type(value) and old == value:
+                        continue
+                    self.bridge.osc.prime(address, value)
+                    ns.live[address] = value
+                    ns.since_announce[address] = value
+                    changed.append(address)
+                if changed:
+                    self.log.debug("BridgePersist/%s: reconciled %d value(s) from the client's "
+                                   "tree: %s", name, len(changed), ", ".join(changed[:8]))
 
     # ---- timers ----------------------------------------------------------
 
@@ -388,3 +460,20 @@ class BridgePersistMapping(Mapping):
         for addr in ns.live:
             self.bridge.osc.forget(addr)
         self.bridge.osc.forget(ns.addr(ANNOUNCE))
+
+
+_MISSING = object()
+
+
+def _reconcile_loop(ref: "weakref.ref[BridgePersistMapping]") -> None:
+    # Holds the mapping weakly, so a discarded bridge's mapping is collected and its loop ends.
+    while True:
+        time.sleep(RECONCILE_SECS)
+        m = ref()
+        if m is None:
+            return
+        try:
+            m._reconcile()
+        except Exception:
+            m.log.exception("BridgePersist: reconcile failed")
+        del m

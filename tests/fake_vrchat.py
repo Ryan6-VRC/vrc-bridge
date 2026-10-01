@@ -73,6 +73,24 @@ class _NodeGate:
         self._go.wait(timeout)
 
 
+def _node(path: str, value) -> dict:
+    """One parameter node, typed as VRChat types it. bool is tested first: it is an int."""
+    kind = ("T" if isinstance(value, bool) else "i" if isinstance(value, int)
+            else "f" if isinstance(value, float) else "s")
+    return {"FULL_PATH": path, "ACCESS": 3, "TYPE": kind, "VALUE": [value]}
+
+
+def _tree(path: str, known: dict) -> dict:
+    """`path` as the client serves it: its own VALUE if it is a parameter, and CONTENTS for every
+    served address under it, so a GET of a namespace answers the whole subtree in one body."""
+    node = _node(path, known[path]) if path in known else {"FULL_PATH": path, "ACCESS": 0}
+    children = sorted({a[len(path) + 1:].split("/")[0] for a in known
+                       if a.startswith(path + "/")})
+    if children:
+        node["CONTENTS"] = {c: _tree(f"{path}/{c}", known) for c in children}
+    return node
+
+
 class FakeVRChat:
     """Context manager exposing .osc_port, .http_port and the received messages."""
 
@@ -198,9 +216,8 @@ class FakeVRChat:
                     self.end_headers()
                     self.wfile.write(payload)
                     return
-                if self.path in known:
-                    node = {"FULL_PATH": self.path, "ACCESS": 3,
-                            "VALUE": [known[self.path]]}
+                if self.path in known or any(a.startswith(self.path + "/") for a in known):
+                    node = _tree(self.path, known)
                     payload = json.dumps(node).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
