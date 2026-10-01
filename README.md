@@ -38,6 +38,12 @@ Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-s
 
 By default the bridge discovers VRChat over OSCQuery and sends to the port it advertises. To drive something that announces nothing — Lyuma's Av3Emulator in Unity play mode, for instance — name its ports instead. `--osc-port 9000` sends there and stops discovery from ever taking the target back; `--osc-bind-port 9001` listens on the port such a peer already sends to, since it has no way to learn the free port the bridge would otherwise pick. `--osc-host` sets the host for `--osc-port` and defaults to loopback; it aims sends only, since the bridge always listens on loopback, so a peer named on another machine can be sent to but cannot answer. Use both port flags together: a peer that cannot discover you needs to be told where to send as much as it needs to be sent to. Note that a pinned run still advertises itself, so a running VRChat can still find the bridge and push avatar parameters into it.
 
+Settings come from `$VRBRIDGE_CONFIG` if it is set, else `vrbridge.toml` at the checkout root for a source run (gitignored, so `git status` never shows it) or in your per-user data directory for an installed package. A missing file means defaults; an unreadable or invalid one stops the bridge with an error naming it. To see which file and values are in force:
+
+```
+python -c "from vrbridge.settings import load_settings, get_config_path; print(get_config_path(), load_settings())"
+```
+
 ## Routers and mappings
 
 A **router** decides which mapping is active at any moment.
@@ -309,6 +315,8 @@ pytest
 ```
 
 ## Troubleshooting
+
+If `import vrbridge` fails after the checkout was moved, the editable install still points at the old path: run `pip install -e .` again from the new location.
 
 If controller inputs don't register, check SteamVR → Settings → Controllers → Show Old Binding UI → VRBridge Controller Input, and ensure the default binding profile is active for your controller type.
 
