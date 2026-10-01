@@ -72,11 +72,13 @@ every payload value that differs from `live`, priming the manager's cache so the
 agrees. A read is applied only if the tree's `Boot` is the one this namespace last booted with,
 no exchange is in flight, and no `/avatar/change`, `Boot` or target selection landed while it
 was out -- the tree switches avatars at apply, before the announcement reaches us, and a read
-straddling that must not fold the incoming avatar's reset into the outgoing one's checkpoint. A
-datagram landing during a read can be overwritten by the read's older value; the next read
-corrects it, so `live` converges on the client within one period of the values coming to rest,
-and a swap inside that period can still carry a stale value. Under a pinned target there is no
-tree to read and the stream is all there is.
+straddling that must not fold the incoming avatar's reset into the outgoing one's checkpoint.
+An address the stream wrote while the read was out keeps the stream's value: the manager's cached
+object is snapshotted before the GET and must be the same object at apply, so a read never
+overwrites a newer delivered value. Floats compare as float32, since the tree's JSON and
+python-osc render one float32 differently. A value the stream missed is therefore in `live` within
+one period of coming to rest. Under a pinned target there is no tree to read and the stream is all
+there is.
 
 **The change filter.** `_update_cache_and_fire` suppresses a value equal to the last one seen, and
 its cache outlives every avatar. So every announcement, and a target selection, `forget()`s the
@@ -360,12 +362,16 @@ class BridgePersistMapping(Mapping):
     # ---- reconcile -------------------------------------------------------
 
     def _reconcile(self) -> None:
+        osc = self.bridge.osc
         with self._lock:
             epoch = self._epoch
-            due = [(ns.name, ns.last_boot) for ns in self._ns.values()
+            # The cached object per known address, before the GET: one the stream replaced
+            # while the read was out is newer than the read, so the read must not touch it.
+            due = [(ns.name, ns.last_boot, {a: osc.get_cached(a, _MISSING) for a in ns.live})
+                   for ns in self._ns.values()
                    if ns.baselined and ns.last_boot is not None and not ns.token]
-        for name, boot in due:
-            res = self.bridge.osc.fetch_tree(f"{NAMESPACE_ROOT}{name}")
+        for name, boot, cached in due:
+            res = osc.fetch_tree(f"{NAMESPACE_ROOT}{name}")
             if not res.ok:
                 self.log.debug("BridgePersist/%s: no reconcile read (%s: %s).", name,
                                res.reason, res.detail)
@@ -382,10 +388,13 @@ class BridgePersistMapping(Mapping):
                     if (parsed is None or parsed[0] != name
                             or parsed[1] in (ID, ANNOUNCE, BOOT, RESTORE)):
                         continue
-                    old = ns.live.get(address, _MISSING)
-                    if old is not _MISSING and type(old) is type(value) and old == value:
+                    if osc.get_cached(address, _MISSING) is not cached.get(address, _MISSING):
                         continue
-                    self.bridge.osc.prime(address, value)
+                    old = ns.live.get(address, _MISSING)
+                    if old is not _MISSING and type(old) is type(value) and (
+                            _same_f32(old, value) if isinstance(value, float) else old == value):
+                        continue
+                    osc.prime(address, value)
                     ns.live[address] = value
                     ns.since_announce[address] = value
                     changed.append(address)

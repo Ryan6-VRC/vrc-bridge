@@ -858,6 +858,7 @@ def test_a_value_the_stream_never_delivered_is_restored_from_the_tree(rig, fast_
     that way and the next swap put the box at cell 0, out of reach. The tree holds what the stream
     lost, so the snapshot has to come out whole, each value with its wire type."""
     r = rig(tree=True)
+    r.vrc.whole_floats_as_ints = True        # 98.0 reads back as a float only through its tag
     worn_a_with(r, Word0=2.0)
     r.holds("GripSync", Word0=2.0, Coarse=98.0, Detached=True)   # Coarse, Detached never sent
     time.sleep(RECONCILED)
@@ -909,10 +910,44 @@ def test_a_reconciled_value_keeps_the_change_filter_honest(rig, fast_reconcile):
     r.holds("GripSync", Word0=2.0)
     assert wait_for(lambda: r.m._ns["GripSync"].live.get(addr("GripSync", "Word0")) == 2.0)
     r.vrc.clear_node(addr("GripSync", "Boot"))     # stop reading, so only the stream speaks
+    time.sleep(RECONCILED)                         # and let a read already out land first
     r.set("GripSync", "Word0", 1.0)
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_a_read_out_across_an_avatar_change_is_never_folded_in(rig, fast_reconcile):
+    """Intended: a read that left before the announcement and lands after it describes a tree that
+    may already be the incoming avatar's, even where its Boot still matches. Folded in, it would
+    seed the incoming avatar's values with it, and the next swap would restore them. The value is
+    one the stream never delivered: nothing in the manager's cache can stand guard over it."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=137.0)
+    r.vrc.echo_inbound = False
+    r.holds("GripSync", Coarse=5.0)              # what the parked read will answer
+    with r.vrc.hold_next_node_get() as gate:
+        assert gate.wait_until_parked()
+        r.change(A2)
+        r.vrc.clear_node(addr("GripSync", "Boot"))   # the tree is no longer A's; the parked
+    time.sleep(RECONCILED)                           # read answered before that
+    ns = r.m._ns["GripSync"]
+    assert addr("GripSync", "Coarse") not in ns.since_announce
+
+
+def test_a_read_never_overwrites_a_value_the_stream_delivered_while_it_was_out(rig, fast_reconcile):
+    """Intended: the stream's value is newer than any read that was out when it arrived. A read
+    answering 2.0 that lands after the stream delivered 3.0 must leave 3.0, or a swap before the
+    next read restores the prop to where it was a moment ago."""
+    r = rig(tree=True)
+    worn_a_with(r, Word0=1.0)
+    r.holds("GripSync", Word0=2.0)
+    with r.vrc.hold_next_node_get() as gate:
+        assert gate.wait_until_parked()
+        r.vrc.clear_node(addr("GripSync", "Boot"))   # every later read is refused
+        r.set("GripSync", "Word0", 3.0)
+    time.sleep(RECONCILED)
+    assert r.m._ns["GripSync"].live[addr("GripSync", "Word0")] == 3.0
 
 
 def test_a_pinned_bridge_reads_no_tree(rig, fast_reconcile):
