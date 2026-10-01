@@ -414,12 +414,36 @@ def test_a_malformed_request_is_an_error_and_the_connection_survives(rig):
     c, _ = r.client()
     c.raw("this is not json")
     c.raw("[1, 2]")
-    c.raw("\xff\xfe garbage")
+    c.sock.sendall(b"\xff\xfe garbage\n")  # invalid UTF-8 on the wire, not an encoded str
     c.send({"op": "dance", "id": 5})
     errs = errors(c.sync())
     assert len(errs) == 4
     assert errs[-1]["op"] == "dance" and errs[-1]["id"] == 5
     assert "id" not in errs[0]
+
+
+def test_a_pong_lands_after_the_values_an_earlier_get_owes(rig, vrc):
+    """Intended: the README promises a pong is a barrier, so `get` then `ping` answers the
+    values first even though the reads run on a worker thread."""
+    r = rig()
+    c, _ = r.client()
+    c.send({"op": "get", "addresses": ["A", "B", "C"], "id": "g"})
+    c.send({"op": "ping", "id": "p"})
+    events = c.until(lambda e: e["ev"] == "pong" and e.get("id") == "p", timeout=8.0)
+    kinds = [e["ev"] for e in events if e["ev"] != "welcome"]
+    assert kinds == ["value", "value", "value", "pong"], kinds
+
+
+def test_an_overlong_request_line_is_refused_and_ends_the_connection(rig):
+    """Intended: a peer that never sends a newline cannot grow the bridge's memory; it gets one
+    error naming the limit and is disconnected."""
+    from vrbridge.mappings.external_ai import MAX_LINE_BYTES
+    r = rig()
+    c, _ = r.client()
+    c.sock.sendall(b"x" * (MAX_LINE_BYTES + 1))
+    err = c.until(lambda e: e["ev"] == "error", timeout=5.0)[-1]
+    assert str(MAX_LINE_BYTES) in err["message"]
+    assert c.eof(2.0)
 
 
 def test_a_slow_client_loses_the_oldest_events_and_is_told(rig):

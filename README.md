@@ -274,7 +274,7 @@ The JSON type decides the OSC type: `true`/`false` is a Bool, a whole number wri
 
 ### What is refused
 
-Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open.
+Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
 
 ### Order and repeats
 

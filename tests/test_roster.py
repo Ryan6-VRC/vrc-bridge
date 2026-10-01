@@ -216,7 +216,10 @@ def test_tailer_idles_without_files_and_picks_one_up_on_retarget(tmp_path, caplo
     """Intended: a missing directory is not an error — the tailer logs once, idles,
     and a retarget after the log appears selects it by service name and replays."""
     rec = _Recorder()
-    t = LogTailer(rec, log_dir=tmp_path, poll_secs=0.02, logger=logging.getLogger("roster-test"))
+    # retry_secs short enough that several attempts fall in the idle window: the test is that
+    # the idle line is logged once across attempts, not that only one attempt happened.
+    t = LogTailer(rec, log_dir=tmp_path, poll_secs=0.02, retry_secs=0.02,
+                  logger=logging.getLogger("roster-test"))
     with caplog.at_level(logging.INFO, logger="roster-test"):
         t.start()
         try:

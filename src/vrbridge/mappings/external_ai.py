@@ -121,6 +121,9 @@ FETCH_TIMEOUT_SECS = 2.0
 # Matches osc_manager's serve-poll interval, for the same reason: it is the server's teardown cost.
 _SERVE_POLL_SECS = 0.05
 _GLOB_CHARS = ("*", "?", "[")
+#: The longest request line accepted. A peer that never sends a newline would otherwise grow
+#: the bridge's memory without bound; a real request is a few hundred bytes.
+MAX_LINE_BYTES = 1 << 20
 _INT32_MIN, _INT32_MAX = -2 ** 31, 2 ** 31 - 1
 _CLOSE = object()
 
@@ -155,6 +158,16 @@ def osc_value(value: Any):
             raise _Refused(f"value {value} is not a finite number")
         return value
     raise _Refused(f"value {value!r} is not a bool, an integer or a number")
+
+
+def _finite(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_finite(v) for v in value]
+    return value
 
 
 def _instance_name(service_name: Optional[str]) -> Optional[str]:
@@ -239,7 +252,12 @@ class _Connection:
         self._seq += 1
         obj = {"ev": ev, "seq": self._seq, "t": t}
         obj.update(fields)
-        return json.dumps(obj, separators=(",", ":"), default=str) + "\n"
+        try:
+            return json.dumps(obj, separators=(",", ":"), default=str, allow_nan=False) + "\n"
+        except ValueError:
+            # A NaN or infinite float off the wire: JSON has no spelling for it that a strict
+            # parser accepts, so it travels as null.
+            return json.dumps(_finite(obj), separators=(",", ":"), default=str) + "\n"
 
     def _write_loop(self) -> None:
         while True:
@@ -261,6 +279,10 @@ class _Connection:
                 return
 
     # ---- the get worker ----------------------------------------------------
+
+    def has_worker(self) -> bool:
+        with self._lock:
+            return self._worker is not None
 
     def submit(self, fn, *args) -> None:
         with self._lock:
@@ -298,6 +320,11 @@ class _Connection:
             worker = self._worker
         self.fire_will()
         self._put(_CLOSE)
+        # Let the writer drain what was queued before the close -- the error that explains a
+        # refused connection, for one -- bounded so a peer that stopped reading cannot hold
+        # the close. The writer never calls close(), so this join is never a self-join.
+        if self._writer.is_alive() and threading.current_thread() is not self._writer:
+            self._writer.join(timeout=1.0)
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -429,10 +456,12 @@ class ExternalAIMapping(Mapping):
         """One connection, on its handler thread, until EOF, a read error or shutdown."""
         conn = _Connection(self, sock, peer)
         conn.start()
-        # Queued before the connection joins the set, so `welcome` is always seq 1.
-        conn.send("welcome", {"version": PROTOCOL_VERSION, "target": self._target_dict(),
-                              "pinned": self.bridge.osc.target_is_pinned})
         with self._lock:
+            # Target read, welcome queued and the set joined in one hold, so a `target` broadcast
+            # cannot fall between the welcome's view and the connection's first event; `send`
+            # never blocks, and the welcome is queued first so it is always seq 1.
+            conn.send("welcome", {"version": PROTOCOL_VERSION, "target": self._target_dict(),
+                                  "pinned": self.bridge.osc.target_is_pinned})
             live = self._server is not None
             if live:
                 self._conns.add(conn)
@@ -441,11 +470,8 @@ class ExternalAIMapping(Mapping):
             return
         self.bridge.log.info("external_ai: client %s connected", peer)
         try:
-            with sock.makefile("r", encoding="utf-8", errors="replace", newline="\n") as lines:
-                for line in lines:
-                    line = line.strip()
-                    if line:
-                        self._dispatch(conn, line)
+            for line in self._lines(sock, conn):
+                self._dispatch(conn, line)
         except (OSError, ValueError):
             pass  # a reset or a socket closed under us: the connection is over either way
         finally:
@@ -453,6 +479,28 @@ class ExternalAIMapping(Mapping):
                 self._conns.discard(conn)
             conn.close()
             self.bridge.log.info("external_ai: client %s disconnected", peer)
+
+    @staticmethod
+    def _lines(sock: socket.socket, conn: _Connection):
+        """Request lines off the socket, each at most MAX_LINE_BYTES; a longer one ends the
+        connection after one error naming the limit."""
+        buf = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    break
+                line = buf[:nl].decode("utf-8", errors="replace").strip()
+                buf = buf[nl + 1:]
+                if line:
+                    yield line
+            if len(buf) > MAX_LINE_BYTES:
+                conn.error(None, f"request line longer than {MAX_LINE_BYTES} bytes; closing")
+                return
 
     def _target_dict(self) -> Optional[dict]:
         target = self.bridge.osc.current_target
@@ -469,7 +517,7 @@ class ExternalAIMapping(Mapping):
     def _dispatch(self, conn: _Connection, line: str) -> None:
         try:
             msg = json.loads(line)
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:
             conn.error(None, f"not JSON: {e}")
             return
         if not isinstance(msg, dict):
@@ -567,7 +615,13 @@ class ExternalAIMapping(Mapping):
         conn.set_will(writes)
 
     def _op_ping(self, conn, msg, rid, has_id) -> None:
-        conn.send("pong", {"id": rid} if has_id else {})
+        # Through the get worker when one exists, so the pong lands after every `value` the
+        # connection's earlier gets owe: the README promises a pong is a barrier.
+        fields = {"id": rid} if has_id else {}
+        if conn.has_worker():
+            conn.submit(conn.send, "pong", fields)
+        else:
+            conn.send("pong", fields)
 
     # ---- bridge events (format and queue only) ---------------------------
 

@@ -205,7 +205,8 @@ class Roster:
             self.joined = True
             return "joined"
         if isinstance(event, LeftRoom):
-            if not self.joined and not self.players and self.world_id is None:
+            if (not self.joined and not self.players
+                    and (self.world_id, self.instance, self.room_name) == (None, None, None)):
                 return None
             # The whole room identity goes: the next start sets its own field first, and a
             # kept world id or name would ride into that half-built snapshot.
@@ -267,7 +268,12 @@ def select_log_file(log_dir: Path, service_name: Optional[str]) -> Selection:
         files = []
     if not files:
         return Selection(None, "none")
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    def mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:  # pruned between the glob and here: the client prunes at launch
+            return float("-inf")
+    files.sort(key=mtime, reverse=True)
     if service_name is None:
         return Selection(files[0], "newest")
     for p in files:
@@ -375,6 +381,10 @@ class LogTailer:
             self._offset = 0
             self._partial = b""
             self._read_new(notify=False)
+            with self._flag_lock:
+                superseded = self._retarget_pending
+            if superseded:
+                return  # a retarget landed during the replay; the next loop replays its file
             self.on_change(self.roster, "snapshot")
 
     def _poll(self) -> None:

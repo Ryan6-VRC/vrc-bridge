@@ -219,7 +219,7 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 `external_ai` is one TCP socket an outside program subscribes and writes through. Only the decisions live here; the wire, the threads and the queue are the module docstring's, and README.md §External AI socket is the client's specification, which the docstring must agree with.
 
-**Plain TCP, newline-delimited JSON, and no dependency.** Every language a client might be written in reads lines of JSON off a socket with its standard library. A WebSocket, gRPC or JSON-RPC framework would add a dependency to a stdlib-plus-two package for nothing a client lacks, so do not adopt one.
+**Plain TCP, newline-delimited JSON, and no dependency.** Every language a client might be written in reads lines of JSON off a socket with its standard library. A WebSocket, gRPC or JSON-RPC framework would add a dependency to a package with three runtime dependencies for nothing a client lacks, so do not adopt one.
 
 **Loopback by default, the LAN by configuration, and no authentication.** The socket writes the wearer's avatar, so it is reachable only from the wearer's own machine until `[external_ai] bind` says otherwise, and the operator who widens it owns that exposure. Do not add a token scheme: it would protect a LAN bind weakly and complicate every client, and a loopback bind needs none.
 
