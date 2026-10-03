@@ -1016,6 +1016,19 @@ def test_a_reset_shaped_reload_forgets(rig, before, after):
     assert r.written("GripSync", "Word0") == []
 
 
+def test_a_reset_whose_first_upright_is_handled_before_its_change_forgets(rig):
+    """Intended: dispatch is thread-per-datagram, so Reset Avatar's first Upright, 30 ms after
+    its change, can be handled first, and can equal the cached value. Neither may make the reload
+    read as held: an Upright just before the change's handler counts as after the change."""
+    r = rig()
+    worn_in_vr(r, upright=1.0, Word0=137.0)
+    r.vrc.emit(UPRIGHT, 1.0)
+    r.load(A, "GripSync")
+    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
 @pytest.mark.parametrize("stale", [False, True], ids=["never", "stale"])
 def test_a_reload_with_an_idle_headset_forgets(rig, monkeypatch, stale):
     """Intended: an idle headset sends no Upright for minutes, so the missing accept proves

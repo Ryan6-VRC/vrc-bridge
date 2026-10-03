@@ -107,8 +107,9 @@ namespace's payload addresses and its `Announce`: otherwise an incoming payload 
 outgoing avatar's last -- its home-pose commit, or our restore echoed back -- is dropped and the
 next snapshot lacks it, and an equal incoming `Announce` is dropped and the avatar reads as
 sending none. `Restore` is forgotten before each 1, so the avatar's 0 reaches the log. `Upright`
-is forgotten at every `/avatar/change`, so the first one after a reload fires even when it equals
-the last one before it, as it does when saturated at exactly 1.0.
+is forgotten at each arrival, so every one fires, the first after a reload included when it
+equals the last before it, as it does when saturated at exactly 1.0, and whichever of it and the
+`/avatar/change` reaches the manager first.
 `/avatar/change` is never forgotten: it is `REFIRE_ON_REPEAT`, and forgetting it breaks the fold of
 its twin copies.
 
@@ -122,7 +123,11 @@ at `/avatar/change` against the outgoing avatar's last payload and the incoming 
 still rests on the wire's own spacing: the outgoing avatar falls silent about a second before the
 announcement at apply, and the incoming one first writes payload a fifth of a second after it.
 The Av3Emulator is the narrow case: its re-send of declared defaults follows its announcement
-inside a few milliseconds.
+inside a few milliseconds. `Upright` against `/avatar/change` is the other: Reset Avatar's first
+`Upright` follows its change by about 30 ms, so its handler can run first. An `Upright` handled
+within `UPRIGHT_ORDER_SECS` before the change's handler therefore counts as after the change,
+which only errs toward forgetting: the outgoing avatar falls silent about 600 ms before a
+calibration's change.
 
 **Reordering within one address.** A payload handler stores the value the manager's cache
 holds rather than the one it was handed: two datagrams for one address can reach this mapping in
@@ -182,6 +187,9 @@ LATE_LIMIT_SECS = 0.6
 
 #: How recent an `Upright` must be at the `/avatar/change` for the reload to be a calibration's.
 LIVE_SECS = 5.0
+
+#: An `Upright` handled this soon before the `/avatar/change`'s handler counts as after the change.
+UPRIGHT_ORDER_SECS = 0.3
 
 #: From `Restore` 1 to `Restore` 3.
 MARK_FLOOR_SECS = 0.2
@@ -309,10 +317,11 @@ class BridgePersistMapping(Mapping):
         with self._lock:
             self._last_announced = value
             self._epoch += 1
-            self._live_at_change = (self._upright_at is not None
-                                    and time.monotonic() - self._upright_at <= LIVE_SECS)
-            self._upright_since_change = False
-            self.bridge.osc.forget(UPRIGHT_ADDR)
+            since = (None if self._upright_at is None
+                     else time.monotonic() - self._upright_at)
+            self._live_at_change = since is not None and since <= LIVE_SECS
+            # One handled just before this one may have arrived after it (module docstring).
+            self._upright_since_change = since is not None and since <= UPRIGHT_ORDER_SECS
             for ns in self._ns.values():
                 self._abandon_locked(ns, "an avatar change")
                 ns.checkpoint = dict(ns.live)
@@ -328,14 +337,18 @@ class BridgePersistMapping(Mapping):
 
     def _on_upright(self, ctx, address: str, value) -> None:
         with self._lock:
+            self.bridge.osc.forget(UPRIGHT_ADDR)
             self._upright_at = time.monotonic()
             if self._upright_since_change:
                 return
             self._upright_since_change = True
-            # The accept. A release whose 3 is not out yet is released as the 3 goes.
+            # The accept. A release whose 3 is not out yet is released as the 3 goes. A fresh
+            # token, so a give-up already waiting on the lock cannot cancel the 2.
             for ns in self._ns.values():
                 if ns.release and ns.held:
                     ns.release_timer.cancel()
+                    self._tokens += 1
+                    ns.release = self._tokens
                     self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_released, None,
                                      release=True)
 
@@ -349,6 +362,9 @@ class BridgePersistMapping(Mapping):
                 self.log.info("OSC target selected (%s:%d): a join, so every BridgePersist "
                               "namespace is cleared.", target[0], target[1])
             self._ns.clear()
+            # The previous client's headset says nothing about this one's.
+            self._upright_at, self._upright_since_change, self._live_at_change = None, False, False
+            self.bridge.osc.forget(VRMODE_ADDR)
 
     def _on_namespace(self, ctx, address: str, value) -> None:
         parsed = _split(address)
