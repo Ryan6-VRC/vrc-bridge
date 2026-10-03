@@ -14,6 +14,9 @@ the wire: the payload written before the 1 (`Rig.placed_from`). The intents the 
 * **Anything that moves the avatar during a wait abandons the exchange,** and the timer that lost
   the race writes nothing.
 * **Idempotent per value, and each value goes back with the type it arrived with.**
+* **A calibration reload restores and holds until the accept;** a reload with an `Upright` since
+  the change (Reset Avatar, a join), an idle headset, or desktop forgets, and a swap never
+  writes 3.
 
 Timing: thread-per-datagram dispatch means two datagrams sent back to back can reach the mapping
 in either order, so the avatar's boot steps are spaced by `STEP`, as the real ones are by frames.
@@ -962,3 +965,161 @@ def test_a_pinned_bridge_reads_no_tree(rig, fast_reconcile):
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 2.0}
+
+
+# --------------------------------------------------------------------------
+# Calibration reloads
+# --------------------------------------------------------------------------
+
+UPRIGHT, VRMODE = osc_persist.UPRIGHT_ADDR, osc_persist.VRMODE_ADDR
+
+
+def worn_in_vr(r, ns="GripSync", vr=1, upright=0.9, **payload):
+    """A worn with the headset live: VRMode and an Upright arrive over the wire, never primed,
+    so a VRMode the mapping does not watch is never seen. Spaced so a reload's announcement of
+    A is not folded into the join's."""
+    worn_a_with(r, ns, **payload)
+    r.vrc.emit(VRMODE, vr)
+    if upright is not None:
+        r.vrc.emit(UPRIGHT, upright)
+    time.sleep(REPEAT_GAP)
+
+
+def test_a_calibration_reload_restores_and_holds_until_the_accept(rig):
+    """Intended: a reload of the worn avatar in VR with no Upright since the change is a
+    calibration's, and the avatar is held until the user accepts. The snapshot goes out ahead of
+    1, then 3 holds the avatar, and 2 releases it only at the accept, the first Upright."""
+    r = rig()
+    worn_in_vr(r, Word0=137.0, Detached=True)
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0, "Detached": True}
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1, 3], "released before any accept"
+    r.vrc.emit(UPRIGHT, 1.0)
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3, 2]), r.restores("GripSync")
+
+
+@pytest.mark.parametrize("before, after", [(0.9, 0.95), (1.0, 1.0)],
+                         ids=["upright-differs", "upright-equals-cached"])
+def test_a_reset_shaped_reload_forgets(rig, before, after):
+    """Intended: Reset Avatar and a join send Upright within a few tens of ms of Boot, so a
+    reload with an Upright before the decision is not a calibration's, and the lifetime rule
+    forgets. Upright saturates at exactly 1.0, so the first one after the reload can equal the
+    last one before it; the change filter must not eat it."""
+    r = rig()
+    worn_in_vr(r, upright=before, Word0=137.0)
+    r.load(A, "GripSync")
+    r.vrc.emit(UPRIGHT, after)
+    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["never", "stale"])
+def test_a_reload_with_an_idle_headset_forgets(rig, monkeypatch, stale):
+    """Intended: an idle headset sends no Upright for minutes, so the missing accept proves
+    nothing. Only an Upright within LIVE_SECS before the change lets a reload be a
+    calibration's; without one it forgets."""
+    if stale:
+        monkeypatch.setattr(osc_persist, "LIVE_SECS", REPEAT_GAP / 2)
+    r = rig()
+    worn_in_vr(r, upright=0.9 if stale else None, Word0=137.0)
+    r.load(A, "GripSync")
+    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    assert r.restores("GripSync") == []
+    assert r.written("GripSync", "Word0") == []
+
+
+def test_a_desktop_reload_forgets(rig):
+    """Intended: desktop calibration is out of scope, so a reload in VRMode 0 forgets even
+    when every Upright rule holds."""
+    r = rig()
+    worn_in_vr(r, vr=0, Word0=137.0)
+    r.load(A, "GripSync")
+    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    assert r.restores("GripSync") == []
+
+
+def test_an_accept_inside_the_write_settle_keeps_1_3_2_in_separate_frames(rig, monkeypatch):
+    """Intended: the client applies the latest value per parameter per frame, so 1, 3 and 2 must
+    land in separate frames. An accept arriving before the 1 is out still waits for the 3, and
+    the 2 follows the 3 by the write settle."""
+    monkeypatch.setattr(osc_persist, "WRITE_SETTLE_SECS", 0.3)
+    r = rig()
+    arrived = {}
+    restore = addr("GripSync", "Restore")
+    r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.perf_counter())
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.written("GripSync", "Word0") == [137.0])
+    r.vrc.emit(UPRIGHT, 1.0)                  # inside the 0.3 s before the 1
+    assert wait_for(lambda: (restore, 2) in arrived), r.restores("GripSync")
+    assert r.restores("GripSync") == [1, 3, 2]
+    # A timer never fires early; the margin is for loopback arrival lag.
+    assert arrived[(restore, 3)] - arrived[(restore, 1)] >= osc_persist.MARK_FLOOR_SECS * 0.8
+    assert arrived[(restore, 2)] - arrived[(restore, 3)] >= 0.3 * 0.8
+
+
+def test_an_avatar_change_before_the_accept_abandons_the_release(rig):
+    """Intended: the held animator is gone once another change arrives, so the accept after it
+    releases nothing."""
+    r = rig()
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3])
+    r.change(B)
+    r.vrc.emit(UPRIGHT, 1.0)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1, 3]
+
+
+def test_a_reload_during_a_pending_release_restores_what_the_tree_holds(rig, fast_reconcile):
+    """Intended: the release wait can last a minute, and the reconcile has to keep reading
+    through it. With no echo of the restore, the tree is the only source of the restored
+    values, so a second reload inside the hold -- one calibration can reload twice -- restores
+    them rather than an empty snapshot."""
+    r = rig(tree=True)
+    worn_in_vr(r, Word0=137.0)
+    r.vrc.echo_inbound = False
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3])
+    r.holds("GripSync", Word0=137.0)          # placed from the restore; no echo arrived
+    time.sleep(RECONCILED)
+    r.vrc.messages.clear()
+    r.load(A, "GripSync")                     # still inside LIVE_SECS of the last Upright
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+    r.vrc.emit(UPRIGHT, 1.0)
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3, 2])
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1, 3, 2]
+
+
+def test_a_release_with_no_accept_gives_up_at_the_limit(rig, monkeypatch):
+    """Intended: the bridge stops waiting below the avatar's own timeout, says so, and a late
+    Upright after that writes nothing."""
+    monkeypatch.setattr(osc_persist, "RELEASE_LIMIT_SECS", 0.2)
+    r = rig()
+    r.m.log = mock.MagicMock(wraps=r.m.log)
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3])
+    time.sleep(0.2 + QUIET)
+    r.vrc.emit(UPRIGHT, 1.0)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1, 3]
+    assert any("no Upright within" in c.args[0] for c in r.m.log.warning.call_args_list)
+
+
+def test_a_swap_never_writes_3(rig):
+    """Intended: a swap's avatar is not held, so it keeps 1 alone and its timing, even in VR
+    with no Upright since the change, where a reload would be a calibration's."""
+    r = rig()
+    worn_in_vr(r, Word0=137.0)
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    time.sleep(osc_persist.MARK_FLOOR_SECS + QUIET)
+    r.vrc.emit(UPRIGHT, 1.0)
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1]
