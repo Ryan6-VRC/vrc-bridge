@@ -1,4 +1,4 @@
-"""Bridge persistence: carry an avatar-published state across one avatar swap.
+"""Bridge persistence: carry an avatar-published state across one avatar swap or a calibration.
 
 An avatar publishes state under `/avatar/parameters/BridgePersist/<Name>/`, one namespace per
 composition, and this mapping writes it back into the next avatar when that avatar carries the
@@ -14,15 +14,17 @@ Four direct children of a namespace are reserved; every other address under it, 
   so it can reach us before or after it.
 * `Boot` (float, avatar -> bridge) -- a driver `random` in (0, 1], once per animator load. Anything
   else, the emulator's re-send of the declared 0.0 included, is not a boot and is ignored.
-* `Restore` (int) -- the bridge writes 1 once every payload value of the snapshot is written; the
-  avatar writes it back to 0. That 0 is logged and nothing waits for it.
+* `Restore` (int) -- the bridge writes 1 once every payload value of the snapshot is written, and
+  on a calibration restore then 3 and, at the accept, 2; the avatar writes it back to 0. That 0
+  is logged and nothing waits for it.
 
 **The exchange.** Nothing is acknowledged. At `Boot` the bookkeeping below happens at once; the
 validity decision happens `ANNOUNCE_SETTLE_SECS` later, against the state captured at the `Boot`,
 which is what lets an `Announce` arriving after its `Boot` count. A valid snapshot is written, each
 value with the wire type it arrived with, then `WRITE_SETTLE_SECS` later `Restore` 1 (the client
 applies the latest value per parameter per frame, so the wait puts the 1 in a later frame than the
-payload), and the mapping is finished with it. The avatar waits for the 1 in a window of its own
+payload), and, but for a calibration restore's release (below), the mapping is finished with
+it. The avatar waits for the 1 in a window of its own
 and boots from defaults without it, so a payload write the bridge fails to send withholds the 1,
 and nothing is retried. A write lost after it leaves is invisible here: UDP reports no receive. A decision running more than `LATE_LIMIT_SECS` after its
 `Boot` arrived (a stalled bridge) writes nothing: payload landing after the window closes lands on
@@ -54,13 +56,32 @@ bool must stay a bool); the last `Announce` and whether one arrived since the la
   is a non-zero int. The arrival mark is what stops an avatar that sends no `Announce` from being
   matched against the outgoing avatar's value, which is still standing.
 * An empty list at `Boot` is a reload of the worn avatar -- a world join, a rejoin and Reset
-  Avatar are one event on the wire -- and restores nothing; two or more entries is not one swap.
+  Avatar are one event on the wire -- and restores nothing unless it is a calibration's (below);
+  two or more entries is not one swap.
 * A newly selected send target is a join -- a client that started or restarted -- and deletes
   every namespace. Merely emptying the lists would not do: a restarted client back on a different
   avatar announces an id that is not the one worn at boot, which would read as one swap.
 * **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
   loaded restores nothing until the next boot; the reconcile below corrects a baselined
   namespace and never baselines one.
+
+**A calibration reload.** Entering FBT calibration reloads the worn avatar, on the wire the same
+event as Reset Avatar and a join, but the client then holds the avatar until the user accepts:
+its animator runs, its constraints do not solve, and the client sends no `Upright`. So an empty
+list is a calibration's when the namespace saw a change since its last boot, `VRMode` (watched
+beside `Upright`) is 1, an `Upright` arrived within `LIVE_SECS` before that change, and none has
+arrived since it; the rest of the validity rule then runs against that change's checkpoint. The
+liveness term is what keeps an idle headset, which can send no `Upright` for minutes, from
+reading as held. The decision for an empty list runs `RELOAD_SETTLE_SECS` after `Boot`, where a
+swap's keeps `ANNOUNCE_SETTLE_SECS`: Reset Avatar's and a join's first `Upright` arrives within
+25 ms of `Boot`, a calibration's 400 ms or more after it. A calibration restore writes the
+payload and 1 as a swap does, then `MARK_FLOOR_SECS` later 3 (hold until released); a swap never
+writes 3. The first `Upright` since the change is the accept: once it has arrived and the 3 is
+out, 2 follows `WRITE_SETTLE_SECS` later, so 1, 3 and 2 land in separate frames. The release
+keeps its own token and timer rather than the exchange's, because the reconcile must keep
+reading through a wait that can last a minute and is then the only source of restored values
+whose echo never came; whatever abandons an exchange abandons it, and it gives up, logged,
+`RELEASE_LIMIT_SECS` after the 3, below the avatar's own timeout.
 
 **Reconciling against the client's tree.** The stream alone cannot carry the snapshot: the client
 sends a value only when it changes, so one that never reaches us is never re-sent while it stands,
@@ -85,12 +106,15 @@ its cache outlives every avatar. So every announcement, and a target selection, 
 namespace's payload addresses and its `Announce`: otherwise an incoming payload value equal to the
 outgoing avatar's last -- its home-pose commit, or our restore echoed back -- is dropped and the
 next snapshot lacks it, and an equal incoming `Announce` is dropped and the avatar reads as
-sending none. `Restore` is forgotten before each 1, so the avatar's 0 reaches the log.
+sending none. `Restore` is forgotten before each 1, so the avatar's 0 reaches the log. `Upright`
+is forgotten at each arrival, so every one fires, the first after a reload included when it
+equals the last before it, as it does when saturated at exactly 1.0, and whichever of it and the
+`/avatar/change` reaches the manager first.
 `/avatar/change` is never forgotten: it is `REFIRE_ON_REPEAT`, and forgetting it breaks the fold of
 its twin copies.
 
-**Which thread waits.** No handler blocks. Both waits buy ordering and consume no result, and the
-mapping runs both under a router, which ticks, and beside `bridge.start()` on the library path,
+**Which thread waits.** No handler blocks. Every wait buys ordering or bounds the wait for an
+accept, none consumes a result, and the mapping runs them under a router, which ticks, and beside `bridge.start()` on the library path,
 where nothing does, so they run on `threading.Timer` threads, identical in both homes.
 
 **Order across addresses.** Dispatch is thread-per-datagram, so nothing orders one address's
@@ -99,7 +123,11 @@ at `/avatar/change` against the outgoing avatar's last payload and the incoming 
 still rests on the wire's own spacing: the outgoing avatar falls silent about a second before the
 announcement at apply, and the incoming one first writes payload a fifth of a second after it.
 The Av3Emulator is the narrow case: its re-send of declared defaults follows its announcement
-inside a few milliseconds.
+inside a few milliseconds. `Upright` against `/avatar/change` is the other: Reset Avatar's first
+`Upright` follows its change by about 30 ms, so its handler can run first. An `Upright` handled
+within `UPRIGHT_ORDER_SECS` before the change's handler therefore counts as after the change,
+which only errs toward forgetting: the outgoing avatar falls silent about 600 ms before a
+calibration's change.
 
 **Reordering within one address.** A payload handler stores the value the manager's cache
 holds rather than the one it was handed: two datagrams for one address can reach this mapping in
@@ -134,12 +162,14 @@ from vrbridge.mappings.mapping_base import Mapping
 NAMESPACE_ROOT = "/avatar/parameters/BridgePersist/"
 NAMESPACE_PATTERN = NAMESPACE_ROOT + "*"
 AVATAR_CHANGE_ADDR = "/avatar/change"
+UPRIGHT_ADDR = "/avatar/parameters/Upright"
+VRMODE_ADDR = "/avatar/parameters/VRMode"
 
 ID, ANNOUNCE, BOOT, RESTORE = "Id", "Announce", "Boot", "Restore"
 
-#: The only value the bridge writes to `Restore`: every payload value is written. The avatar
-#: writes it back to REST.
-REST, RESTORED = 0, 1
+#: What the bridge writes to `Restore`: RESTORED once every payload value is written, then on a
+#: calibration restore only HOLD and, at the accept, RELEASED. The avatar writes it back to REST.
+REST, RESTORED, RELEASED, HOLD = 0, 1, 2, 3
 
 #: From `Boot` arriving to the validity decision. Covers an `Announce` that arrives after its
 #: `Boot`, which the avatar writes in the same state.
@@ -148,8 +178,24 @@ ANNOUNCE_SETTLE_SECS = 0.2
 #: From the last payload write to `Restore` 1, so the 1 lands in a later client frame.
 WRITE_SETTLE_SECS = 0.05
 
+#: From `Boot` arriving to the decision for a reload of the worn avatar: between Reset Avatar's and
+#: a join's first `Upright`, at most 25 ms after `Boot`, and a calibration's, at least 400 ms.
+RELOAD_SETTLE_SECS = 0.3
+
 #: The longest after a `Boot` arrived that a snapshot may still begin writing, inside the window.
 LATE_LIMIT_SECS = 0.6
+
+#: How recent an `Upright` must be at the `/avatar/change` for the reload to be a calibration's.
+LIVE_SECS = 5.0
+
+#: An `Upright` handled this soon before the `/avatar/change`'s handler counts as after the change.
+UPRIGHT_ORDER_SECS = 0.3
+
+#: From `Restore` 1 to `Restore` 3.
+MARK_FLOOR_SECS = 0.2
+
+#: From `Restore` 3 to giving up on the accept; below the avatar's own timeout on the release.
+RELEASE_LIMIT_SECS = 90.0
 
 #: How often each baselined namespace is read back from the client's tree. A value the stream
 #: missed is in the next snapshot once a read lands after it came to rest.
@@ -174,6 +220,11 @@ class _Namespace:
     # The exchange in flight: its token (0 when none) and its pending timer.
     token: int = 0
     timer: Optional[threading.Timer] = None
+    # A calibration restore's release in flight, kept off `token` so the reconcile reads through
+    # it: its token (0 when none), its pending timer, and whether its 3 is out.
+    release: int = 0
+    release_timer: Optional[threading.Timer] = None
+    held: bool = False
 
     def addr(self, leaf: str) -> str:
         return f"{NAMESPACE_ROOT}{self.name}/{leaf}"
@@ -214,7 +265,7 @@ def _is_int(value) -> bool:
 # ----------------------------- Mapping ------------------------------------
 
 class BridgePersistMapping(Mapping):
-    """Restores `BridgePersist/<Name>/` namespaces across one avatar swap."""
+    """Restores `BridgePersist/<Name>/` namespaces across one avatar swap or a calibration."""
     name = "osc_persist"
 
     def __init__(self, bridge: VRBridge, *, treat_reload_as_swap: bool = False):
@@ -239,11 +290,17 @@ class BridgePersistMapping(Mapping):
         self._tokens = 0
         # Bumped by every event that can move the worn avatar under a reconcile read in flight.
         self._epoch = 0
+        # When the last Upright arrived; whether one has since the last /avatar/change; and
+        # whether one had in the LIVE_SECS before that change.
+        self._upright_at: Optional[float] = None
+        self._upright_since_change = False
+        self._live_at_change = False
 
     # ---- lifecycle -------------------------------------------------------
 
     def _attach(self) -> None:
         self.bridge.on_osc(AVATAR_CHANGE_ADDR, self._on_avatar_change)
+        self.bridge.on_osc(UPRIGHT_ADDR, self._on_upright, watch=[VRMODE_ADDR])
         self.bridge.on_osc_pattern(NAMESPACE_PATTERN, self._on_namespace)
         # Runs on zeroconf's single dispatch thread, so it only clears. It fires on a real
         # change of target -- a new client, or one back on a fresh port after a restart -- and
@@ -260,6 +317,11 @@ class BridgePersistMapping(Mapping):
         with self._lock:
             self._last_announced = value
             self._epoch += 1
+            since = (None if self._upright_at is None
+                     else time.monotonic() - self._upright_at)
+            self._live_at_change = since is not None and since <= LIVE_SECS
+            # One handled just before this one may have arrived after it (module docstring).
+            self._upright_since_change = since is not None and since <= UPRIGHT_ORDER_SECS
             for ns in self._ns.values():
                 self._abandon_locked(ns, "an avatar change")
                 ns.checkpoint = dict(ns.live)
@@ -273,6 +335,23 @@ class BridgePersistMapping(Mapping):
                 elif value != ns.worn_at_boot or self._reload_as_swap:
                     ns.ids.append(value)
 
+    def _on_upright(self, ctx, address: str, value) -> None:
+        with self._lock:
+            self.bridge.osc.forget(UPRIGHT_ADDR)
+            self._upright_at = time.monotonic()
+            if self._upright_since_change:
+                return
+            self._upright_since_change = True
+            # The accept. A release whose 3 is not out yet is released as the 3 goes. A fresh
+            # token, so a give-up already waiting on the lock cannot cancel the 2.
+            for ns in self._ns.values():
+                if ns.release and ns.held:
+                    ns.release_timer.cancel()
+                    self._tokens += 1
+                    ns.release = self._tokens
+                    self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_released, None,
+                                     release=True)
+
     def _on_target_selected(self, ctx, target) -> None:
         with self._lock:
             self._epoch += 1
@@ -283,6 +362,9 @@ class BridgePersistMapping(Mapping):
                 self.log.info("OSC target selected (%s:%d): a join, so every BridgePersist "
                               "namespace is cleared.", target[0], target[1])
             self._ns.clear()
+            # The previous client's headset says nothing about this one's.
+            self._upright_at, self._upright_since_change, self._live_at_change = None, False, False
+            self.bridge.osc.forget(VRMODE_ADDR)
 
     def _on_namespace(self, ctx, address: str, value) -> None:
         parsed = _split(address)
@@ -338,25 +420,42 @@ class BridgePersistMapping(Mapping):
 
         self._tokens += 1
         ns.token = self._tokens
-        self._arm_locked(ns, ANNOUNCE_SETTLE_SECS, self._decide, at_boot)
+        self._arm_locked(ns, ANNOUNCE_SETTLE_SECS if at_boot.ids else RELOAD_SETTLE_SECS,
+                         self._decide, at_boot)
 
     def _invalid_reason(self, ns: _Namespace, at: _AtBoot) -> Optional[str]:
         if not at.baselined:
             return ("this bridge has not seen the namespace boot before, so it cannot tell what "
                     "its values belong to (started after the avatar loaded?)")
         if not at.ids:
-            return "no avatar change since its last boot, so this is a reload of the worn avatar"
+            why = self._not_calibration(at)
+            if why is not None:
+                return f"a reload of the worn avatar, and not a calibration's ({why})"
         if len(at.ids) > 1:
             return (f"{len(at.ids)} avatars were announced since its last boot "
                     f"({', '.join(map(str, at.ids))}), which is not a single swap")
         if not ns.announce_arrived:
-            return (f"no Announce arrived from the incoming avatar within "
-                    f"{ANNOUNCE_SETTLE_SECS:.2f} s of its Boot")
+            settle = ANNOUNCE_SETTLE_SECS if at.ids else RELOAD_SETTLE_SECS
+            return (f"no Announce arrived from the incoming avatar within {settle:.2f} s of "
+                    f"its Boot")
         if at.checkpoint_announce != ns.announce:
             return (f"Announce changed from {at.checkpoint_announce!r} to {ns.announce!r}, so "
                     f"the incoming prefab is not the outgoing one")
         if not _is_int(ns.announce) or ns.announce == 0:
             return f"Announce is {ns.announce!r}, and only a non-zero int enables persistence"
+        return None
+
+    def _not_calibration(self, at: _AtBoot) -> Optional[str]:
+        """Why a reload of the worn avatar is not a calibration's, or None when it is."""
+        if at.checkpoint is None:
+            return "no avatar change since its last boot"
+        vr = self.bridge.osc.get_cached(VRMODE_ADDR)
+        if not _is_int(vr) or vr != 1:
+            return f"VRMode is {vr!r}, not 1"
+        if not self._live_at_change:
+            return f"no Upright in the {LIVE_SECS:.0f} s before the change"
+        if self._upright_since_change:
+            return "an Upright arrived since the change, so the avatar is not held"
         return None
 
     # ---- reconcile -------------------------------------------------------
@@ -425,6 +524,7 @@ class BridgePersistMapping(Mapping):
                                  "boots from defaults.", name, elapsed, LATE_LIMIT_SECS)
                 return
             snapshot = at_boot.checkpoint
+            calibration = not at_boot.ids
             ok = True
             for addr, v in snapshot.items():
                 ok = self.bridge.osc.send(addr, v) and ok
@@ -432,12 +532,13 @@ class BridgePersistMapping(Mapping):
                 self.log.warning("BridgePersist/%s: a payload write was dropped; withholding "
                                  "Restore=1, so the avatar boots from defaults.", name)
                 return
-            self.log.info("BridgePersist/%s: restoring %d value(s) from the outgoing avatar.",
-                          name, len(snapshot))
+            self.log.info("BridgePersist/%s: restoring %d value(s) %s.", name, len(snapshot),
+                          "across a calibration reload" if calibration
+                          else "from the outgoing avatar")
             ns.token = token
-            self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_restored, None)
+            self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_restored, calibration)
 
-    def _write_restored(self, name: str, token: int, _unused) -> None:
+    def _write_restored(self, name: str, token: int, calibration: bool) -> None:
         with self._lock:
             ns = self._ns.get(name)
             if ns is None or ns.token != token:
@@ -448,21 +549,70 @@ class BridgePersistMapping(Mapping):
             if not self.bridge.osc.send(restore, RESTORED):
                 self.log.warning("BridgePersist/%s: could not write Restore=1; the avatar boots "
                                  "from defaults.", name)
+                return
+            if calibration:
+                self._tokens += 1
+                ns.release = self._tokens
+                self._arm_locked(ns, MARK_FLOOR_SECS, self._write_hold, None, release=True)
 
-    def _arm_locked(self, ns: _Namespace, delay: float, fn, arg) -> None:
-        t = threading.Timer(delay, fn, args=(ns.name, ns.token, arg))
+    def _write_hold(self, name: str, release: int, _unused) -> None:
+        with self._lock:
+            ns = self._ns.get(name)
+            if ns is None or ns.release != release:
+                return
+            if not self.bridge.osc.send(ns.addr(RESTORE), HOLD):
+                self.log.warning("BridgePersist/%s: could not write Restore=3; the avatar ends "
+                                 "its hold on its own timer, as after a swap.", name)
+                ns.release, ns.release_timer = 0, None
+                return
+            ns.held = True
+            if self._upright_since_change:
+                self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_released, None, release=True)
+            else:
+                self._arm_locked(ns, RELEASE_LIMIT_SECS, self._give_up, None, release=True)
+
+    def _write_released(self, name: str, release: int, _unused) -> None:
+        with self._lock:
+            ns = self._ns.get(name)
+            if ns is None or ns.release != release:
+                return
+            ns.release, ns.release_timer, ns.held = 0, None, False
+            if not self.bridge.osc.send(ns.addr(RESTORE), RELEASED):
+                self.log.warning("BridgePersist/%s: could not write Restore=2; the avatar ends "
+                                 "its hold at its own timeout.", name)
+
+    def _give_up(self, name: str, release: int, _unused) -> None:
+        with self._lock:
+            ns = self._ns.get(name)
+            if ns is None or ns.release != release:
+                return
+            ns.release, ns.release_timer, ns.held = 0, None, False
+            self.log.warning("BridgePersist/%s: no Upright within %.0f s of Restore=3, so no "
+                             "accept was seen; not releasing, and the avatar ends its hold at "
+                             "its own timeout.", name, RELEASE_LIMIT_SECS)
+
+    def _arm_locked(self, ns: _Namespace, delay: float, fn, arg, *, release=False) -> None:
+        t = threading.Timer(delay, fn, args=(ns.name, ns.release if release else ns.token, arg))
         t.daemon = True
         t.name = f"BridgePersist-{ns.name}"
-        ns.timer = t
+        if release:
+            ns.release_timer = t
+        else:
+            ns.timer = t
         t.start()
 
     def _abandon_locked(self, ns: _Namespace, why: str) -> None:
-        if not ns.token:
-            return
-        self.log.info("BridgePersist/%s: %s during the exchange; abandoning it.", ns.name, why)
-        if ns.timer is not None:
-            ns.timer.cancel()
-        ns.token, ns.timer = 0, None
+        if ns.token:
+            self.log.info("BridgePersist/%s: %s during the exchange; abandoning it.", ns.name,
+                          why)
+            if ns.timer is not None:
+                ns.timer.cancel()
+            ns.token, ns.timer = 0, None
+        if ns.release:
+            self.log.info("BridgePersist/%s: %s before the release; abandoning it.", ns.name, why)
+            if ns.release_timer is not None:
+                ns.release_timer.cancel()
+            ns.release, ns.release_timer, ns.held = 0, None, False
 
     def _forget_locked(self, ns: _Namespace) -> None:
         # Payload and Announce; /avatar/change is never here.
