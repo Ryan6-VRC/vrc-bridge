@@ -1,0 +1,68 @@
+# Real VRChat client-log lines from one launch, 2026-10-05, filtered to the lines roster.parse_line
+# reads (player join/leave dropped); every usr_ and avtr_ id and every player and avatar name
+# replaced. They show `isRemeasure:True` written for other players' loads and in unattributed
+# bursts, not only at the local avatar's accept. `## <block>` starts a block; the line before the
+# first block is the launch's identity, fed ahead of every block.
+2026.10.05 21:37:03 Debug      -  User Authenticated: Local Player (usr_00000001-0000-0000-0000-000000000000)
+## calibration
+# A calibration reload of the worn avatar at 21:46:16, accepted at 21:46:19; another player's
+# load at 21:46:40 writes its own remeasure at 21:46:42, and an unattributed one follows at 21:47:15.
+2026.10.05 21:45:47 Debug      -  [Behaviour] Switching Remote Player 1 to avatar Avatar 2
+2026.10.05 21:45:48 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 8 False 1
+2026.10.05 21:45:49 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 8 False 8
+2026.10.05 21:46:16 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 1
+2026.10.05 21:46:16 Debug      -  Saving Avatar Data:avtr_00000001-0000-0000-0000-000000000000
+2026.10.05 21:46:16 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 7 True 1
+2026.10.05 21:46:16 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 21:46:17 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 7 True 8
+2026.10.05 21:46:19 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 21:46:40 Debug      -  [Behaviour] Switching Remote Player 1 to avatar Avatar 3
+2026.10.05 21:46:40 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 8 False 1
+2026.10.05 21:46:42 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 21:46:42 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 8 False 8
+2026.10.05 21:47:15 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 21:47:17 Debug      -  Saving Avatar Data:avtr_00000001-0000-0000-0000-000000000000
+## burst
+# Another world, no local switch anywhere near: remote loads, then remeasures every 1-5 s.
+2026.10.05 22:05:21 Debug      -  [Behaviour] Switching Remote Player 2 to avatar Avatar 4
+2026.10.05 22:05:21 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 36 False 1
+2026.10.05 22:05:23 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 36 False 8
+2026.10.05 22:05:27 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 38 False 5
+2026.10.05 22:05:32 Debug      -  Saving Avatar Data:avtr_00000001-0000-0000-0000-000000000000
+2026.10.05 22:05:39 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:42 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:43 Debug      -  [Behaviour] Switching Remote Player 3 to avatar Avatar 5
+2026.10.05 22:05:43 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 38 False 1
+2026.10.05 22:05:43 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:45 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:46 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:47 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:47 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 38 False 8
+2026.10.05 22:05:48 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:50 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:55 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:05:58 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:01 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:04 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:05 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:07 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:08 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:11 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:14 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:14 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:14 Debug      -  [Behaviour] Switching Remote Player 4 to avatar Avatar 6
+2026.10.05 22:06:14 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 6 False 1
+2026.10.05 22:06:14 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:16 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 6 False 8
+2026.10.05 22:06:17 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:17 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:17 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:20 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:23 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:24 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:26 Debug      -  [Behaviour] Switching Remote Player 5 to avatar Avatar 7
+2026.10.05 22:06:26 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 9 False 1
+2026.10.05 22:06:27 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.05 22:06:28 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 9 False 8
+2026.10.05 22:06:29 Debug      -  [Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 39 False 5
+2026.10.05 22:06:30 Debug      -  Measure Human Avatar Avatar isRemeasure:True

@@ -143,7 +143,8 @@ class AvatarInitialized:
 
 @dataclass(frozen=True)
 class AvatarRemeasured:
-    """`Measure Human Avatar Avatar isRemeasure:True`, the local avatar's only."""
+    """`Measure Human Avatar Avatar isRemeasure:True`: any avatar's humanoid remeasure, the local
+    one's or another player's. The line names no avatar, so only its neighbours can attribute it."""
 
 
 @dataclass(frozen=True)

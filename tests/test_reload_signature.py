@@ -14,6 +14,7 @@ ones.
 The synthetic cases below hold the guards the fixture cannot break: a fixture with no
 spontaneous save inside a switch passes whether or not the saving window is checked.
 """
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -27,12 +28,22 @@ WORN = "avtr_00000001-0000-0000-0000-000000000000"
 OTHER = "avtr_00000002-0000-0000-0000-000000000000"
 
 
+def _clock(raw: str, prev: float) -> float:
+    """The line's own timestamp as the read time, a hair after the previous line's, so the
+    accept's quiet window is measured on the client's clock rather than on line counts."""
+    try:
+        stamp = datetime.strptime(raw[:19], "%Y.%m.%d %H:%M:%S").timestamp()
+    except ValueError:
+        return prev
+    return max(stamp, prev + 0.001)
+
+
 def _replay():
     """(label, source, worn, kind) at every label line; accepts checked inline. Also the room
     key after each `Joining` line, per launch: {log: [key, ...]}."""
     log, seen, rooms, accepted, now, n = _ClientLog(), [], {}, None, 0.0, 0
     for raw in FIXTURE.read_text(encoding="utf-8").splitlines():
-        now += 0.01
+        now = _clock(raw, now)
         if raw.startswith("## log "):
             n = int(raw.split()[2])
             log.reset("service", None, None)      # a fresh launch is a replay
@@ -187,3 +198,80 @@ def test_the_room_is_unknown_between_leaving_and_the_next_joining():
     feed(L("[Behaviour] Joining wrld_y:2~region(us)"),
          L("[Behaviour] Entering Room: Somewhere"), log=log)
     assert log.room is None
+
+
+# --------------------------------------------------------------------------
+# The accept against other players' remeasures (real lines)
+# --------------------------------------------------------------------------
+
+NOISE = Path(__file__).parent / "fixtures" / "client_log_remeasure_noise.txt"
+NOISE_ME = "Local Player"
+
+
+def _noise_blocks():
+    """{block: [line, ...]}, the launch's identity under ""."""
+    blocks, name = {"": []}, ""
+    for raw in NOISE.read_text(encoding="utf-8").splitlines():
+        if raw.startswith("## "):
+            name = raw[3:]
+            blocks[name] = []
+        elif raw and not raw.startswith("#"):
+            blocks[name].append(raw)
+    return blocks
+
+
+def _restamp(raw: str, hms: str) -> str:
+    return raw[:11] + hms + raw[19:]
+
+
+def _feed_real(lines):
+    """Feed the launch head, then `lines`, on the log's clock; the events returned per line."""
+    log, now = _ClientLog(), 0.0
+    log.reset("service", None, None)
+    got = []
+    for raw in _noise_blocks()[""] + list(lines):
+        now = _clock(raw, now)
+        got.append((raw, log.feed(parse_line(raw), now)))
+    return log, [(raw, g[0]) for raw, g in got if g is not None]
+
+
+def test_the_local_accept_in_a_quiet_log_is_read():
+    """Intended: the real calibration's accept, 2 s after the avatar settled and 27 s after the
+    last other player's load line, is read as the accept, and nothing after it is."""
+    log, got = _feed_real(_noise_blocks()["calibration"])
+    assert log.switch.kind(WORN) == "calibration"
+    assert [(raw[11:19], what) for raw, what in got] == [("21:46:17", "settled"),
+                                                         ("21:46:19", "accepted")]
+
+
+def test_another_players_load_during_a_held_calibration_does_not_release():
+    """Intended: with the user still in calibration (the real accept line removed), the
+    remeasure written for another player's load at 21:46:42 is not the accept, and an accept
+    inside the quiet window after that load is missed rather than guessed: a missed accept
+    falls to the give-up, an early one ends the hold before the constraints solve. The accept
+    once the log has been quiet for ACCEPT_QUIET_SECS is read."""
+    block = _noise_blocks()["calibration"]
+    held = [ln for ln in block if not ln.startswith("2026.10.05 21:46:19")]
+    upto = [ln for ln in held if ln[11:19] <= "21:46:42"]
+    accept = next(ln for ln in block if ln.startswith("2026.10.05 21:46:19"))
+    log, got = _feed_real(upto + [_restamp(accept, "21:46:50")])
+    assert [what for _, what in got] == ["settled"]
+    assert not log.switch.accepted
+    log, got = _feed_real(upto + [_restamp(accept, "21:47:03")])
+    assert [(raw[11:19], what) for raw, what in got] == [("21:46:17", "settled"),
+                                                         ("21:47:03", "accepted")]
+
+
+def test_a_burst_of_unattributed_remeasures_does_not_release_a_held_calibration():
+    """Intended: the real calibration's switch, moved to 22:05:30 in the burst world and never
+    accepted, reads none of the 27 remeasures that follow in the next minute as its accept,
+    since each comes within ACCEPT_QUIET_SECS of another player's load or of the one before."""
+    cal = [ln for ln in _noise_blocks()["calibration"] if "21:46:16" <= ln[11:19] <= "21:46:17"]
+    burst = _noise_blocks()["burst"]
+    lines = ([ln for ln in burst if ln[11:19] < "22:05:30"]
+             + [_restamp(ln, "22:05:30") for ln in cal]
+             + [ln for ln in burst if ln[11:19] >= "22:05:30"])
+    log, got = _feed_real(lines)
+    assert sum("isRemeasure:True" in ln and ln[11:19] > "22:05:30" for ln in lines) == 27
+    assert [what for _, what in got] == ["settled"]
+    assert log.switch.kind(WORN) == "calibration" and not log.switch.accepted
