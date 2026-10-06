@@ -118,14 +118,23 @@ reworded line shows; a switch that settles after its decision logs how late, onc
 
 **The release.** A calibration restore writes the payload and 1 as a swap does, then
 `MARK_FLOOR_SECS` later 3 (hold until released); a swap never writes 3. The accept is the first
-`Measure Human Avatar Avatar isRemeasure:True` read after the switch settled, a local-only line
-(the placeholder's remeasure comes before and is not it): once it is read and the 3 is out, 2
-follows `WRITE_SETTLE_SECS` later, so 1, 3 and 2 land in separate frames. The release keeps its
-own token and timer rather than the exchange's, because the reconcile must keep reading through a
-wait that can last a minute and is then the only source of restored values whose echo never
-came; whatever abandons an exchange abandons it, and it gives up, logged, `RELEASE_LIMIT_SECS`
-after the 3, below the avatar's own timeout. A log replay during the wait loses the switch the
-accept would be read against, and says so.
+`Measure Human Avatar Avatar isRemeasure:True` read after the switch settled with the log quiet
+for `ACCEPT_QUIET_SECS` before it. The line is not local-only: it names no avatar, follows other
+players' loads, mostly within ten seconds, and comes in unattributed bursts every one to three
+seconds in some worlds (2026-10-05, 225 such lines in 14 h of logs), and the accept writes no
+other line. So any other player's `Switching` or `Initialize ... VRCPlayer[Remote]` line, and any
+remeasure that is not the placeholder's and not taken as an accept, is noise, and a remeasure
+read within `ACCEPT_QUIET_SECS` of noise is noise itself rather than the accept. That fails the
+safe way: an accept missed in a busy room falls to the give-up and the avatar's own timeout, a
+late release, where a stray read as the accept would end the hold before the constraints solve.
+It is not airtight: the first stray after a quiet spell still reads as the accept (0.8 strays an
+hour in those logs). Once the accept is read and the 3 is out, 2 follows `WRITE_SETTLE_SECS`
+later, so 1, 3 and 2 land in separate frames. The release keeps its own token and timer rather
+than the exchange's, because the reconcile must keep reading through a wait that can last a
+minute and is then the only source of restored values whose echo never came; whatever abandons an
+exchange abandons it, and it gives up, logged, `RELEASE_LIMIT_SECS` after the 3, below the
+avatar's own timeout. A log replay during the wait loses the switch the accept would be read
+against, and says so.
 
 **Reconciling against the client's tree.** The stream alone cannot carry the snapshot: the client
 sends a value only when it changes, so one that never reaches us is never re-sent while it stands,
@@ -249,6 +258,11 @@ MARK_FLOOR_SECS = 0.2
 #: From `Restore` 3 to giving up on the accept; below the avatar's own timeout on the release.
 RELEASE_LIMIT_SECS = 90.0
 
+#: How long the client log must show no other player's load line and no stray remeasure before a
+#: remeasure counts as the accept. Other players' loads were followed by a remeasure mostly within
+#: ten seconds; at 20 s the strays that still pass fell from 15.7 to 0.8 an hour (2026-10-05).
+ACCEPT_QUIET_SECS = 20.0
+
 #: How often each baselined namespace is read back from the client's tree. A value the stream
 #: missed is in the next snapshot once a read lands after it came to rest.
 RECONCILE_SECS = 1.0
@@ -301,7 +315,8 @@ class _Switch:
     loaded: Set[str] = field(default_factory=set)  # loaded before the avatar initialised
     inits: int = 0              # local `Initialize ... Avatar` lines: the placeholder's, the avatar's
     settled_at: Optional[float] = None  # when the avatar's own line was read
-    accepted: bool = False      # a remeasure read after it
+    accepted: bool = False      # a remeasure read after it, in a quiet log
+    placeholder_remeasured: bool = False  # the placeholder's one remeasure, between its Initialize and the avatar's
 
     def kind(self, worn: Optional[str]) -> str:
         """`join`, `reset`, `calibration`, or `none` when the switch shows none of them."""
@@ -343,6 +358,7 @@ class _ClientLog:
         self.room = room                     # `world:instance`, None while unknown
         self.switch: Optional[_Switch] = None
         self.moved = False                   # a room transition since the latest switch
+        self.noise_at: Optional[float] = None  # the latest line that can fake an accept
         self.warned = False                  # a signature warning given since this replay
 
     def feed(self, event, now: float) -> Optional[Tuple[str, _Switch]]:
@@ -361,6 +377,21 @@ class _ClientLog:
             # Every player's switch is logged; only the local player's is ours.
             if self.self_name is not None and event.player == self.self_name:
                 self.switch, self.moved = _Switch(moved=self.moved), False
+            else:
+                self.noise_at = now
+        elif isinstance(event, AvatarInitialized) and not event.local:
+            self.noise_at = now
+        elif isinstance(event, AvatarRemeasured):
+            # The placeholder's one remeasure comes between its Initialize and the avatar's, and is no
+            # noise; a second line in that interval is a burst's or another player's, and is.
+            if sw is not None and sw.inits == 1 and not sw.placeholder_remeasured:
+                sw.placeholder_remeasured = True
+            elif (sw is not None and sw.settled_at is not None and not sw.accepted
+                    and (self.noise_at is None or now - self.noise_at >= ACCEPT_QUIET_SECS)):
+                sw.accepted = True
+                return "accepted", sw
+            else:
+                self.noise_at = now
         elif sw is None:
             pass
         elif isinstance(event, AvatarDataSaved):
@@ -371,15 +402,10 @@ class _ClientLog:
             if sw.inits < 2:
                 sw.loaded.add(event.avatar_id)
         elif isinstance(event, AvatarInitialized):
-            if event.local:
-                sw.inits += 1
-                if sw.inits == 2:
-                    sw.settled_at = now
-                    return "settled", sw
-        elif isinstance(event, AvatarRemeasured):
-            if sw.settled_at is not None and not sw.accepted:
-                sw.accepted = True
-                return "accepted", sw
+            sw.inits += 1
+            if sw.inits == 2:
+                sw.settled_at = now
+                return "settled", sw
         return None
 
 
