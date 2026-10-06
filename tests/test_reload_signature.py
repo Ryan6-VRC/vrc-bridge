@@ -275,3 +275,21 @@ def test_a_burst_of_unattributed_remeasures_does_not_release_a_held_calibration(
     assert sum("isRemeasure:True" in ln and ln[11:19] > "22:05:30" for ln in lines) == 27
     assert [what for _, what in got] == ["settled"]
     assert log.switch.kind(WORN) == "calibration" and not log.switch.accepted
+
+
+def test_a_second_remeasure_while_the_avatar_loads_is_noise():
+    """Intended: only the placeholder's one remeasure between its Initialize and the avatar's is
+    exempt from the quiet window. A second one in that interval (a burst's, or another player's
+    load landing mid-load) is noise, so a remeasure right after the avatar settles is not read
+    as the accept, and one after the window is."""
+    block = _noise_blocks()["calibration"]
+    head = [ln for ln in block if ln[11:19] <= "21:46:16"]
+    settle = next(ln for ln in block if ln.startswith("2026.10.05 21:46:17"))
+    accept = next(ln for ln in block if ln.startswith("2026.10.05 21:46:19"))
+    stray = _restamp(accept, "21:46:16")
+    log, got = _feed_real(head + [stray, settle, accept])
+    assert [what for _, what in got] == ["settled"]
+    assert not log.switch.accepted
+    log, got = _feed_real(head + [stray, settle, _restamp(accept, "21:46:37")])
+    assert [(raw[11:19], what) for raw, what in got] == [("21:46:17", "settled"),
+                                                         ("21:46:37", "accepted")]

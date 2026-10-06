@@ -316,6 +316,7 @@ class _Switch:
     inits: int = 0              # local `Initialize ... Avatar` lines: the placeholder's, the avatar's
     settled_at: Optional[float] = None  # when the avatar's own line was read
     accepted: bool = False      # a remeasure read after it, in a quiet log
+    placeholder_remeasured: bool = False  # the placeholder's one remeasure, between its Initialize and the avatar's
 
     def kind(self, worn: Optional[str]) -> str:
         """`join`, `reset`, `calibration`, or `none` when the switch shows none of them."""
@@ -381,9 +382,10 @@ class _ClientLog:
         elif isinstance(event, AvatarInitialized) and not event.local:
             self.noise_at = now
         elif isinstance(event, AvatarRemeasured):
-            # The placeholder's comes between its Initialize and the avatar's, and is no noise.
-            if sw is not None and sw.inits == 1:
-                pass
+            # The placeholder's one remeasure comes between its Initialize and the avatar's, and is no
+            # noise; a second line in that interval is a burst's or another player's, and is.
+            if sw is not None and sw.inits == 1 and not sw.placeholder_remeasured:
+                sw.placeholder_remeasured = True
             elif (sw is not None and sw.settled_at is not None and not sw.accepted
                     and (self.noise_at is None or now - self.noise_at >= ACCEPT_QUIET_SECS)):
                 sw.accepted = True
