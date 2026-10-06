@@ -98,7 +98,7 @@ from vrbridge.engine import ControllerEventType
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.mappings.osc_paramlog import PARAMS_PREFIX, to_address
 from vrbridge.osc_manager import FETCH_NOT_FOUND, FETCH_OK
-from vrbridge.roster import LogTailer, Roster
+from vrbridge.roster import LogTailer, Roster, log_service_name
 from vrbridge.settings import settings
 
 # ------------------------------ Contract ----------------------------------
@@ -111,9 +111,6 @@ PROTOCOL_VERSION = 1
 
 #: Every controller event type a client may name.
 CONTROLLER_TYPES = tuple(v for k, v in vars(ControllerEventType).items() if k.isupper())
-
-#: The zeroconf form of a service name carries the type; the client's log line does not.
-OSCQUERY_SERVICE_SUFFIX = "._oscjson._tcp.local."
 
 #: One OSCQuery node read for `get`. A loopback GET; the bound is for a peer that stops answering.
 FETCH_TIMEOUT_SECS = 2.0
@@ -168,13 +165,6 @@ def _finite(value):
     if isinstance(value, list):
         return [_finite(v) for v in value]
     return value
-
-
-def _instance_name(service_name: Optional[str]) -> Optional[str]:
-    """`VRChat-Client-XXXX._oscjson._tcp.local.` -> `VRChat-Client-XXXX`, as the log writes it."""
-    if service_name and service_name.endswith(OSCQUERY_SERVICE_SUFFIX):
-        return service_name[:-len(OSCQUERY_SERVICE_SUFFIX)]
-    return service_name
 
 
 def _string_list(msg: dict, key: str) -> list:
@@ -419,7 +409,7 @@ class ExternalAIMapping(Mapping):
             self._server, self._serve_thread = server, thread
         thread.start()
         tailer = LogTailer(self._on_roster, log_dir=self._tune.resolved_log_dir(),
-                           service_name=_instance_name(self.bridge.osc.current_service_name),
+                           service_name=log_service_name(self.bridge.osc.current_service_name),
                            logger=self.bridge.log)
         self._tailer = tailer
         tailer.start()
@@ -643,7 +633,7 @@ class ExternalAIMapping(Mapping):
         self._broadcast("target", {"host": target[0], "port": target[1]}, lambda sub: True)
         tailer = self._tailer
         if tailer is not None:
-            tailer.retarget(_instance_name(self.bridge.osc.current_service_name))
+            tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
 
     def _on_roster(self, roster: Roster, change: str) -> None:
         # The tailer thread, with its lock held: read the roster handed in, never the tailer.

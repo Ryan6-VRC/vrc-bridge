@@ -11,6 +11,10 @@ one file per client launch. Three layers, separable for testing:
   consumer can choose between sending a delta and sending a snapshot.
 - `LogTailer` is the thread that replays a chosen file and then follows its tail.
 
+`parse_line` also reads the local avatar's load lines (`AvatarSwitch` .. `AvatarRemeasured`),
+which the roster ignores; `LogTailer` hands every event it tails to an optional `on_event`,
+which is how `osc_persist` tells a calibration reload from Reset Avatar.
+
 Rulings:
 
 - **Players are keyed on the `usr_` id**; display names ride along and are not
@@ -50,6 +54,15 @@ LOG_GLOB = "output_log_*.txt"
 SERVICE_SCAN_LINES = 400
 """The `Advertising Service` line is written near the top of a launch's log."""
 RETRY_SECS = 5.0
+#: The zeroconf form of a service name carries the type; the client's log line does not.
+OSCQUERY_SERVICE_SUFFIX = "._oscjson._tcp.local."
+
+
+def log_service_name(service_name: Optional[str]) -> Optional[str]:
+    """`VRChat-Client-XXXX._oscjson._tcp.local.` -> `VRChat-Client-XXXX`, as the log writes it."""
+    if service_name and service_name.endswith(OSCQUERY_SERVICE_SUFFIX):
+        return service_name[:-len(OSCQUERY_SERVICE_SUFFIX)]
+    return service_name
 
 # --- events -----------------------------------------------------------------
 
@@ -100,6 +113,38 @@ class LeftRoom:
 
 
 @dataclass(frozen=True)
+class AvatarSwitch:
+    """`Switching <player> to avatar <name>`: the start of an avatar load, any player's."""
+    player: str
+    avatar: str
+
+
+@dataclass(frozen=True)
+class AvatarDataSaved:
+    """The local client saving an avatar's saved parameters."""
+    avatar_id: str
+
+
+@dataclass(frozen=True)
+class AvatarDataLoaded:
+    """The local client loading an avatar's saved parameters."""
+    avatar_id: str
+
+
+@dataclass(frozen=True)
+class AvatarInitialized:
+    """`Initialize <kind> Avatar VRCPlayer[Local|Remote]`: an avatar, or the loading
+    placeholder before it, coming up."""
+    kind: str
+    local: bool
+
+
+@dataclass(frozen=True)
+class AvatarRemeasured:
+    """`Measure Human Avatar Avatar isRemeasure:True`, the local avatar's only."""
+
+
+@dataclass(frozen=True)
 class Unparsed:
     """A line naming a roster verb whose body did not match the known shape."""
     verb: str
@@ -107,7 +152,8 @@ class Unparsed:
 
 
 RosterEvent = Union[SelfIdentity, ServiceAdvertised, EnteringRoom, JoiningWorld, JoinedRoom,
-                    PlayerJoined, PlayerLeft, LeftRoom, Unparsed]
+                    PlayerJoined, PlayerLeft, LeftRoom, AvatarSwitch, AvatarDataSaved,
+                    AvatarDataLoaded, AvatarInitialized, AvatarRemeasured, Unparsed]
 
 # --- parsing ----------------------------------------------------------------
 
@@ -119,6 +165,13 @@ _ENTERING = re.compile(r"^\[Behaviour\] Entering Room: (?P<name>.*)$")
 _JOINING = re.compile(r"^\[Behaviour\] Joining (?P<world>wrld_[^\s:]+)(?::(?P<instance>.*))?$")
 _JOINED = "[Behaviour] Successfully joined room"
 _LEFT_ROOM = "[Behaviour] OnLeftRoom"
+# Non-greedy, so a player name is split at its first " to avatar "; a consumer comparing the
+# player to its own name then fails closed for a name that contains it.
+_SWITCH = re.compile(r"^\[Behaviour\] Switching (?P<player>.+?) to avatar (?P<avatar>.*)$")
+_SAVED = re.compile(r"^Saving Avatar Data:(?P<id>avtr_\S+)$")
+_LOADED = re.compile(r"^Loading Avatar Data:(?P<id>avtr_\S+)$")
+_INIT = re.compile(r"^\[Behaviour\] Initialize (?P<kind>\w+) Avatar VRCPlayer\[(?P<who>Local|Remote)\]")
+_REMEASURED = "Measure Human Avatar Avatar isRemeasure:True"
 
 
 def strip_prefix(line: str) -> str:
@@ -144,6 +197,20 @@ def parse_line(line: str) -> Optional[RosterEvent]:
     m = _JOINING.match(msg)
     if m:
         return JoiningWorld(m["world"], m["instance"])
+    m = _SWITCH.match(msg)
+    if m:
+        return AvatarSwitch(m["player"], m["avatar"])
+    m = _SAVED.match(msg)
+    if m:
+        return AvatarDataSaved(m["id"])
+    m = _LOADED.match(msg)
+    if m:
+        return AvatarDataLoaded(m["id"])
+    m = _INIT.match(msg)
+    if m:
+        return AvatarInitialized(m["kind"], m["who"] == "Local")
+    if msg == _REMEASURED:
+        return AvatarRemeasured()
     m = _ENTERING.match(msg)
     if m:
         return EnteringRoom(m["name"])
@@ -291,12 +358,17 @@ class LogTailer:
     roster it is handed is consistent for the length of the call — and a slow
     callback delays the next poll. It is suppressed during a replay, which ends
     in one `"snapshot"` call. Other threads read through `snapshot()`.
+
+    `on_event(event)`, when given, runs the same way for every event tailed after
+    the replay, roster-changing or not, after the roster has applied it.
     """
 
     def __init__(self, on_change: Callable[[Roster, str], None], log_dir: Optional[Path] = None,
                  service_name: Optional[str] = None, poll_secs: float = 0.25,
-                 logger: Optional[logging.Logger] = None, retry_secs: float = RETRY_SECS) -> None:
+                 logger: Optional[logging.Logger] = None, retry_secs: float = RETRY_SECS,
+                 on_event: Optional[Callable[[RosterEvent], None]] = None) -> None:
         self.on_change = on_change
+        self.on_event = on_event
         self.log_dir = Path(log_dir) if log_dir is not None else DEFAULT_LOG_DIR
         self.poll_secs = poll_secs
         self.retry_secs = retry_secs
@@ -418,3 +490,5 @@ class LogTailer:
             change = self.roster.apply(event)
             if notify and change is not None:
                 self.on_change(self.roster, change)
+            if notify and event is not None and self.on_event is not None:
+                self.on_event(event)

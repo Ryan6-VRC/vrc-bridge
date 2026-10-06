@@ -1,4 +1,4 @@
-"""Keep the suite off the real network.
+"""Keep the suite off the real network and the real client log.
 
 `OSCManager` browses mDNS for a VRChat to talk to. That browse used to share the Zeroconf
 instance pinned to the serve interface, which made it deaf -- so the suite's isolation from a
@@ -40,3 +40,15 @@ def no_real_mdns_discovery(request, monkeypatch):
         real_init(self, *args, **kwargs)
 
     monkeypatch.setattr(om.OSCManager, "__init__", init)
+
+
+@pytest.fixture(autouse=True)
+def persist_log_dir(tmp_path, monkeypatch):
+    """Every `osc_persist` tailer reads an empty temp directory, whatever the settings file
+    says: a real client's log on the developer's machine must never classify a test's reload.
+    A test that wants a client log writes it here."""
+    import vrbridge.mappings.osc_persist as op
+    d = tmp_path / "vrchat-logs"
+    d.mkdir()
+    monkeypatch.setattr(op, "_default_log_dir", lambda: d)
+    return d

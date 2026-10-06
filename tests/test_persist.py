@@ -14,9 +14,14 @@ the wire: the payload written before the 1 (`Rig.placed_from`). The intents the 
 * **Anything that moves the avatar during a wait abandons the exchange,** and the timer that lost
   the race writes nothing.
 * **Idempotent per value, and each value goes back with the type it arrived with.**
-* **A calibration reload restores and holds until the accept;** a reload with an `Upright` since
-  the change (Reset Avatar, a join), an idle headset, or desktop forgets, and a swap never
-  writes 3.
+* **A calibration reload restores and holds until the accept;** the client log tells it from
+  Reset Avatar and a join, and anything the log does not prove -- no bound switch, a log not
+  chosen by service name, desktop -- forgets. A swap never writes 3.
+* **`Scope` widens the lifetime to the instance,** only on proof from the log, and is never
+  payload.
+
+The client log is a real file the tailer follows (`ClientLogFile`), in the temp directory the
+suite's autouse `persist_log_dir` points every tailer at.
 
 Timing: thread-per-datagram dispatch means two datagrams sent back to back can reach the mapping
 in either order, so the avatar's boot steps are spaced by `STEP`, as the real ones are by frames.
@@ -39,6 +44,10 @@ from vrbridge.osc_manager import REFIRE_FOLD_WINDOW_SECS
 from zeroconf import ServiceInfo
 
 from .fake_vrchat import FakeVRChat
+
+SERVICE = "VRChat-Client-ABC123"
+ME = "Local Player"
+WORLD = "wrld_00000000-0000-4000-8000-0000000000aa"
 
 A = "avtr_aaaaaaaa-0000-0000-0000-000000000001"
 A2 = "avtr_aaaaaaaa-0000-0000-0000-000000000002"   # A', a different avatar with the same prefab
@@ -74,18 +83,61 @@ def wait_for(cond, timeout=3.0) -> bool:
     return False
 
 
-class Rig:
-    """A started bridge pinned at the fake, the mapping registered and active."""
+class ClientLogFile:
+    """The client's log, written as the client writes it: one file per launch, advertising its
+    OSCQuery service near the top, in a room from the start."""
 
-    def __init__(self, vrc: FakeVRChat, *, copies=1, activate=True, tree=False, **kw):
+    def __init__(self, log_dir, instance="1"):
+        self.path = log_dir / "output_log_2026-10-05_12-00-00.txt"
+        self.path.write_text("", encoding="utf-8")
+        self.write(f"Advertising Service {SERVICE} of type OSCQuery on 9001",
+                   f"User Authenticated: {ME} (usr_00000000-0000-4000-8000-000000000001)")
+        self.room(instance)
+
+    def write(self, *msgs):
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write("".join(f"2026.10.05 12:00:00 Debug      -  {m}\n" for m in msgs))
+
+    def room(self, instance):
+        self.write("[Behaviour] Entering Room: Example World",
+                   f"[Behaviour] Joining {WORLD}:{instance}~region(us)",
+                   "[Behaviour] Successfully joined room")
+
+    def switch(self, kind, worn, before=None, instance="1"):
+        """One local avatar load as the log shows it. `kind`: calibration, reset, join (into
+        `instance`), swap (from `before`), or none (no signature at all)."""
+        if kind == "join":
+            self.write("[Behaviour] OnLeftRoom")
+            self.room(instance)
+        self.write(f"[Behaviour] Switching {ME} to avatar Some Avatar")
+        if kind == "calibration":
+            self.write(f"Saving Avatar Data:{worn}")
+        elif kind == "swap":
+            self.write(f"Saving Avatar Data:{before}")
+        self.write("[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
+                   "Measure Human Avatar Avatar isRemeasure:True")   # the placeholder's
+        if kind in ("reset", "join", "swap"):
+            self.write(f"Loading Avatar Data:{worn}")
+        self.write("[Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 2 True 8")
+
+    def accept(self):
+        self.write("Measure Human Avatar Avatar isRemeasure:True")
+
+
+class Rig:
+    """A started bridge pinned at the fake, the mapping registered and active, its tailer
+    following `self.client_log`."""
+
+    def __init__(self, vrc: FakeVRChat, *, log_dir, copies=1, activate=True, tree=False, **kw):
         self.vrc = vrc
         # tree=True: a bridge that found the fake as VRChat, so it has an OSCQuery tree to
         # read; pinned, the default, it has none and the stream is all it sees.
         self.bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False,
                                target=None if tree else ("127.0.0.1", vrc.osc_port))
         self.bridge.osc.start()
+        self.client_log = ClientLogFile(log_dir)
         if tree:
-            name = "VRChat-Client-ABC123._oscjson._tcp.local."
+            name = f"{SERVICE}._oscjson._tcp.local."
             self.bridge.osc._consider_service(name, ServiceInfo(
                 "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
                 port=vrc.http_port, properties={}, server="h.local."))
@@ -97,30 +149,40 @@ class Rig:
         self.m.register()
         if activate:
             self.m.activate()
+        # The tailer's replay done: chosen by service name with a tree, else by newest.
+        assert wait_for(lambda: self.m._client_log.rule is not None)
 
     def close(self):
+        self.m.close()
         self.bridge.osc.stop()
 
     # -- the client's side of the wire --
 
-    def change(self, avatar_id):
+    def change(self, avatar_id, log=None, **switch):
+        """The announcement at apply; with `log`, the client log's switch for it, written as the
+        change goes out (`ClientLogFile.switch`)."""
+        if log is not None:
+            self.client_log.switch(log, avatar_id, **switch)
         self.vrc.emit(AVATAR_CHANGE_ADDR, avatar_id)
         time.sleep(STEP)
 
-    def boot(self, *namespaces, announce=5):
-        """The incoming avatar's boot: every namespace's Announce, then its Boot a step later."""
+    def boot(self, *namespaces, announce=5, scope=None):
+        """The incoming avatar's boot: every namespace's Announce (and Scope), then its Boot a
+        step later."""
         for ns in namespaces:
             self.vrc.emit(addr(ns, "Announce"), announce)
+            if scope is not None:
+                self.vrc.emit(addr(ns, "Scope"), scope)
         time.sleep(STEP)
         for ns in namespaces:
             self.boots[ns] = random.uniform(0.001, 1.0)
             self.vrc.emit(addr(ns, "Boot"), self.boots[ns])
         time.sleep(STEP)
 
-    def load(self, avatar_id, *namespaces, announce=5):
+    def load(self, avatar_id, *namespaces, announce=5, scope=None, log=None, **switch):
         """An announcement at apply followed by the new avatar's boot: a menu swap, a join."""
-        self.change(avatar_id)
-        self.boot(*namespaces, announce=announce)
+        self.change(avatar_id, log, **switch)
+        self.boot(*namespaces, announce=announce, scope=scope)
 
     def set(self, ns, leaf, value):
         self.vrc.emit(addr(ns, leaf), value)
@@ -157,12 +219,12 @@ class Rig:
 
 
 @pytest.fixture
-def rig():
+def rig(persist_log_dir):
     rigs = []
 
     def make(**kw):
         vrc = FakeVRChat().__enter__()
-        r = Rig(vrc, **kw)
+        r = Rig(vrc, log_dir=persist_log_dir, **kw)
         rigs.append((vrc, r))
         return r
 
@@ -971,87 +1033,212 @@ def test_a_pinned_bridge_reads_no_tree(rig, fast_reconcile):
 # Calibration reloads
 # --------------------------------------------------------------------------
 
-UPRIGHT, VRMODE = osc_persist.UPRIGHT_ADDR, osc_persist.VRMODE_ADDR
+VRMODE = osc_persist.VRMODE_ADDR
+# Long enough for a decision that waited out the log deadline.
+DECIDED = osc_persist.LOG_DEADLINE_SECS + QUIET
 
 
-def worn_in_vr(r, ns="GripSync", vr=1, upright=0.9, **payload):
-    """A worn with the headset live: VRMode and an Upright arrive over the wire, never primed,
-    so a VRMode the mapping does not watch is never seen. Spaced so a reload's announcement of
+def watch_log(r):
+    r.m.log = mock.MagicMock(wraps=r.m.log)
+
+
+def said(r, text, level="info"):
+    return any(text in (c.args[0] % c.args[1:])
+               for c in getattr(r.m.log, level).call_args_list)
+
+
+def decided(r, text, level="info"):
+    """The mapping logged `text` since the setup ended (`worn_in_vr` clears what it logged): what
+    a forget is asserted on, so a test cannot pass on a decision that has not happened yet, nor
+    on the setup's own."""
+    return wait_for(lambda: said(r, text, level), timeout=DECIDED + 1.0)
+
+
+def worn_in_vr(r, ns="GripSync", vr=1, scope=None, **payload):
+    """A worn after a join the log shows, with the headset's VRMode over the wire (never primed,
+    so a VRMode the mapping does not watch is never seen). Spaced so a reload's announcement of
     A is not folded into the join's."""
-    worn_a_with(r, ns, **payload)
+    r.load(A, ns, scope=scope, log="join")
+    for leaf, value in payload.items():
+        r.set(ns, leaf, value)
     r.vrc.emit(VRMODE, vr)
-    if upright is not None:
-        r.vrc.emit(UPRIGHT, upright)
     time.sleep(REPEAT_GAP)
+    if isinstance(r.m.log, mock.MagicMock):
+        r.m.log.reset_mock()
 
 
 def test_a_calibration_reload_restores_and_holds_until_the_accept(rig):
-    """Intended: a reload of the worn avatar in VR with no Upright since the change is a
-    calibration's, and the avatar is held until the user accepts. The snapshot goes out ahead of
-    1, then 3 holds the avatar, and 2 releases it only at the accept, the first Upright."""
-    r = rig()
+    """Intended: in VR, with the log chosen by service name, a reload whose switch saved the worn
+    avatar's data before the placeholder is a calibration's, and the avatar is held until the
+    user accepts. The snapshot goes out ahead of 1, then 3 holds the avatar, and 2 releases it
+    only at the accept: the first remeasure after the avatar settled, not the placeholder's,
+    which the switch also writes."""
+    r = rig(tree=True)
     worn_in_vr(r, Word0=137.0, Detached=True)
-    r.load(A, "GripSync")
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 137.0, "Detached": True}
     time.sleep(QUIET)
     assert r.restores("GripSync") == [1, 3], "released before any accept"
-    r.vrc.emit(UPRIGHT, 1.0)
+    r.client_log.accept()
     assert wait_for(lambda: r.restores("GripSync") == [1, 3, 2]), r.restores("GripSync")
 
 
-@pytest.mark.parametrize("before, after", [(0.9, 0.95), (1.0, 1.0)],
-                         ids=["upright-differs", "upright-equals-cached"])
-def test_a_reset_shaped_reload_forgets(rig, before, after):
-    """Intended: Reset Avatar and a join send Upright within a few tens of ms of Boot, so a
-    reload with an Upright before the decision is not a calibration's, and the lifetime rule
-    forgets. Upright saturates at exactly 1.0, so the first one after the reload can equal the
-    last one before it; the change filter must not eat it."""
-    r = rig()
-    worn_in_vr(r, upright=before, Word0=137.0)
-    r.load(A, "GripSync")
-    r.vrc.emit(UPRIGHT, after)
-    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+@pytest.mark.parametrize("kind, why", [
+    ("reset", "the client log shows Reset Avatar"),
+    ("join", "the client log shows a world join"),
+    ("none", "no save of the worn avatar's data"),
+])
+def test_a_reload_the_log_does_not_show_as_a_calibration_forgets(rig, kind, why):
+    """Intended: Reset Avatar (Loading of the worn id), a join (a room transition) and a switch
+    with no signature are all the worn avatar reloaded, and the lifetime rule forgets each:
+    Reset Avatar stays the user's escape from a bad persisted state."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync", log=kind)
+    assert decided(r, why)
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
     assert r.written("GripSync", "Word0") == []
 
 
-def test_a_reset_whose_first_upright_is_handled_before_its_change_forgets(rig):
-    """Intended: dispatch is thread-per-datagram, so Reset Avatar's first Upright, 30 ms after
-    its change, can be handled first, and can equal the cached value. Neither may make the reload
-    read as held: an Upright just before the change's handler counts as after the change."""
-    r = rig()
-    worn_in_vr(r, upright=1.0, Word0=137.0)
-    r.vrc.emit(UPRIGHT, 1.0)
+def test_a_join_forgets_even_with_a_save_in_its_switch(rig):
+    """Intended: the room transition decides before any save does; a join's switch that also
+    saved the worn avatar's data is still a join."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.client_log.write("[Behaviour] OnLeftRoom")
+    r.client_log.room("1")
+    r.load(A, "GripSync", log="calibration")
+    assert decided(r, "the client log shows a world join")
+    assert r.restores("GripSync") == []
+
+
+def test_a_room_event_inside_the_switch_makes_it_a_join(rig):
+    """Intended: a room transition landing while the switch is current marks that switch, not
+    only the next one."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.client_log.write(f"[Behaviour] Switching {ME} to avatar Some Avatar",
+                       f"Saving Avatar Data:{A}", "[Behaviour] OnLeftRoom",
+                       "[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
+                       "[Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 2 True 8")
     r.load(A, "GripSync")
-    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    assert decided(r, "the client log shows a world join")
+    assert r.restores("GripSync") == []
+
+
+def test_a_remote_switch_inside_the_local_one_is_ignored(rig):
+    """Intended: every player's switch is logged; a remote one landing inside ours neither
+    replaces nor settles it, so the calibration still restores."""
+    r = rig(tree=True)
+    worn_in_vr(r, Word0=137.0)
+    r.client_log.write(f"[Behaviour] Switching {ME} to avatar Some Avatar",
+                       f"Saving Avatar Data:{A}",
+                       "[Behaviour] Switching Someone Else to avatar Other Avatar",
+                       "[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
+                       "[Behaviour] Initialize Limb Avatar VRCPlayer[Remote] 3 False 1",
+                       "[Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 2 True 8")
+    r.load(A, "GripSync")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
+
+
+def test_a_spontaneous_save_after_the_placeholder_is_not_a_calibration(rig):
+    """Intended: the client also saves the worn avatar's data on its own, seconds after a load;
+    only a save before the placeholder initialises is the switch's."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.client_log.write(f"[Behaviour] Switching {ME} to avatar Some Avatar",
+                       "[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
+                       f"Saving Avatar Data:{A}",
+                       "[Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 2 True 8")
+    r.load(A, "GripSync")
+    assert decided(r, "no save of the worn avatar's data")
+    assert r.restores("GripSync") == []
+
+
+def test_a_reload_with_no_switch_in_the_log_forgets_by_the_deadline_and_never_late(rig):
+    """Intended: the decision waits on the log only until LOG_DEADLINE_SECS after Boot, then
+    forgets inside the late limit, warns once that a VR reload showed no switch, and a switch
+    that settles afterwards writes nothing; it only logs how late it was."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    booted = time.monotonic()
+    r.load(A, "GripSync")
+    assert decided(r, "the client log showed no switch for this change")
+    assert time.monotonic() - booted < osc_persist.LATE_LIMIT_SECS + 2 * STEP + 0.1
+    assert said(r, "a VR reload, and no switch settled", "warning")
+    r.client_log.switch("calibration", A)
+    assert decided(r, "after the decision went without it")
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
     assert r.written("GripSync", "Word0") == []
 
 
-@pytest.mark.parametrize("stale", [False, True], ids=["never", "stale"])
-def test_a_reload_with_an_idle_headset_forgets(rig, monkeypatch, stale):
-    """Intended: an idle headset sends no Upright for minutes, so the missing accept proves
-    nothing. Only an Upright within LIVE_SECS before the change lets a reload be a
-    calibration's; without one it forgets."""
-    if stale:
-        monkeypatch.setattr(osc_persist, "LIVE_SECS", REPEAT_GAP / 2)
-    r = rig()
-    worn_in_vr(r, upright=0.9 if stale else None, Word0=137.0)
-    r.load(A, "GripSync")
-    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_a_switch_settled_outside_the_bind_window_is_not_this_changes(rig, monkeypatch, side):
+    """Intended: a switch is this change's only when its avatar settled within LOG_BIND_SECS of
+    the change, either side; one from an earlier load, or one landing well after, proves
+    nothing about this reload, and it forgets."""
+    monkeypatch.setattr(osc_persist, "LOG_BIND_SECS", 0.1)
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    if side == "before":
+        r.client_log.switch("calibration", A)
+        time.sleep(0.3)
+        r.load(A, "GripSync")
+    else:
+        r.change(A)
+        time.sleep(0.15)
+        r.client_log.switch("calibration", A)
+        r.boot("GripSync")
+    assert decided(r, "the client log showed no switch for this change")
+    time.sleep(QUIET)
     assert r.restores("GripSync") == []
-    assert r.written("GripSync", "Word0") == []
+
+
+def test_a_pinned_bridge_forgets_a_calibration(rig):
+    """Intended: a pinned bridge has no service name, so its tailer follows the newest log,
+    which may be another client's; nothing it shows may make a reload restore."""
+    r = rig()
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync", log="calibration")
+    assert decided(r, "chosen by newest")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
 
 
 def test_a_desktop_reload_forgets(rig):
-    """Intended: desktop calibration is out of scope, so a reload in VRMode 0 forgets even
-    when every Upright rule holds."""
-    r = rig()
+    """Intended: desktop has no calibration, so a reload in VRMode 0 forgets even when its
+    switch has a calibration's signature."""
+    r = rig(tree=True)
+    watch_log(r)
     worn_in_vr(r, vr=0, Word0=137.0)
-    r.load(A, "GripSync")
-    time.sleep(osc_persist.RELOAD_SETTLE_SECS + QUIET)
+    r.load(A, "GripSync", log="calibration")
+    assert decided(r, "VRMode is 0, not 1")
     assert r.restores("GripSync") == []
+
+
+def test_a_vr_reload_whose_switch_names_nothing_warns_once_per_replay(rig):
+    """Intended: a bound switch that neither saved nor loaded the worn id is how a reworded
+    client line shows, so it warns -- once per log replay, not once per reload."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    for _ in range(2):
+        r.load(A, "GripSync", log="none")
+        assert decided(r, "no save of the worn avatar's data")
+        time.sleep(REPEAT_GAP)
+    warned = [c for c in r.m.log.warning.call_args_list if "neither saved nor loaded" in c.args[0]
+              % c.args[1:]]
+    assert len(warned) == 1
 
 
 def test_an_accept_inside_the_write_settle_keeps_1_3_2_in_separate_frames(rig, monkeypatch):
@@ -1059,14 +1246,14 @@ def test_an_accept_inside_the_write_settle_keeps_1_3_2_in_separate_frames(rig, m
     land in separate frames. An accept arriving before the 1 is out still waits for the 3, and
     the 2 follows the 3 by the write settle."""
     monkeypatch.setattr(osc_persist, "WRITE_SETTLE_SECS", 0.3)
-    r = rig()
+    r = rig(tree=True)
     arrived = {}
     restore = addr("GripSync", "Restore")
     r.vrc.on_receive = lambda a, v: arrived.setdefault((a, v), time.perf_counter())
     worn_in_vr(r, Word0=137.0)
-    r.load(A, "GripSync")
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.written("GripSync", "Word0") == [137.0])
-    r.vrc.emit(UPRIGHT, 1.0)                  # inside the 0.3 s before the 1
+    r.client_log.accept()                     # inside the 0.3 s before the 1
     assert wait_for(lambda: (restore, 2) in arrived), r.restores("GripSync")
     assert r.restores("GripSync") == [1, 3, 2]
     # A timer never fires early; the margin is for loopback arrival lag.
@@ -1077,12 +1264,12 @@ def test_an_accept_inside_the_write_settle_keeps_1_3_2_in_separate_frames(rig, m
 def test_an_avatar_change_before_the_accept_abandons_the_release(rig):
     """Intended: the held animator is gone once another change arrives, so the accept after it
     releases nothing."""
-    r = rig()
+    r = rig(tree=True)
     worn_in_vr(r, Word0=137.0)
-    r.load(A, "GripSync")
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.restores("GripSync") == [1, 3])
     r.change(B)
-    r.vrc.emit(UPRIGHT, 1.0)
+    r.client_log.accept()
     time.sleep(QUIET)
     assert r.restores("GripSync") == [1, 3]
 
@@ -1095,44 +1282,198 @@ def test_a_reload_during_a_pending_release_restores_what_the_tree_holds(rig, fas
     r = rig(tree=True)
     worn_in_vr(r, Word0=137.0)
     r.vrc.echo_inbound = False
-    r.load(A, "GripSync")
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.restores("GripSync") == [1, 3])
     r.holds("GripSync", Word0=137.0)          # placed from the restore; no echo arrived
     time.sleep(RECONCILED)
     r.vrc.messages.clear()
-    r.load(A, "GripSync")                     # still inside LIVE_SECS of the last Upright
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 137.0}
-    r.vrc.emit(UPRIGHT, 1.0)
+    r.client_log.accept()
     assert wait_for(lambda: r.restores("GripSync") == [1, 3, 2])
     time.sleep(QUIET)
     assert r.restores("GripSync") == [1, 3, 2]
 
 
+def test_a_log_replay_during_a_hold_says_the_release_is_lost(rig):
+    """Intended: a replay forgets the switch the accept would be matched against, so the
+    release falls to the give-up; that must be said, not left silent."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, Word0=137.0)
+    r.load(A, "GripSync", log="calibration")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3])
+    r.m._tailer.retarget(SERVICE)
+    assert decided(r, "re-read during a calibration hold", "warning")
+
+
 def test_a_release_with_no_accept_gives_up_at_the_limit(rig, monkeypatch):
     """Intended: the bridge stops waiting below the avatar's own timeout, says so, and a late
-    Upright after that writes nothing."""
+    accept after that writes nothing."""
     monkeypatch.setattr(osc_persist, "RELEASE_LIMIT_SECS", 0.2)
-    r = rig()
-    r.m.log = mock.MagicMock(wraps=r.m.log)
+    r = rig(tree=True)
+    watch_log(r)
     worn_in_vr(r, Word0=137.0)
-    r.load(A, "GripSync")
+    r.load(A, "GripSync", log="calibration")
     assert wait_for(lambda: r.restores("GripSync") == [1, 3])
     time.sleep(0.2 + QUIET)
-    r.vrc.emit(UPRIGHT, 1.0)
+    r.client_log.accept()
     time.sleep(QUIET)
     assert r.restores("GripSync") == [1, 3]
-    assert any("no Upright within" in c.args[0] for c in r.m.log.warning.call_args_list)
+    assert said(r, "no accept within", "warning")
 
 
 def test_a_swap_never_writes_3(rig):
     """Intended: a swap's avatar is not held, so it keeps 1 alone and its timing, even in VR
-    with no Upright since the change, where a reload would be a calibration's."""
-    r = rig()
+    with the log bound."""
+    r = rig(tree=True)
     worn_in_vr(r, Word0=137.0)
-    r.load(A2, "GripSync")
+    r.load(A2, "GripSync", log="swap", before=A)
     assert r.completed("GripSync")
     time.sleep(osc_persist.MARK_FLOOR_SECS + QUIET)
-    r.vrc.emit(UPRIGHT, 1.0)
+    r.client_log.accept()
     time.sleep(QUIET)
     assert r.restores("GripSync") == [1]
+
+
+# --------------------------------------------------------------------------
+# Scope
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("scope, restored", [(None, False), (1, True), (2, True)])
+def test_a_swap_chain_inside_one_instance_restores_from_scope_1(rig, scope, restored):
+    """Intended: A -> B -> A' forgets at the default scope, and from Scope 1 restores A's state,
+    B carrying no namespace, because the instance is the lifetime there."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=scope, Word0=137.0)
+    r.change(B, log="swap", before=A)
+    r.load(A2, "GripSync", scope=scope, log="swap", before=B)
+    if restored:
+        assert r.completed("GripSync"), r.restores("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 137.0}
+    else:
+        assert decided(r, "which is not a single swap")
+        assert r.restores("GripSync") == []
+
+
+@pytest.mark.parametrize("vr", [0, 1], ids=["desktop", "vr"])
+@pytest.mark.parametrize("scope, restored", [(None, False), (1, False), (2, True)])
+def test_reset_avatar_restores_only_at_scope_2(rig, vr, scope, restored):
+    """Intended: Scope 2 keeps the state across Reset Avatar, in VR and on desktop; Scope 1 and
+    the default clear it, so Reset Avatar stays the escape unless the avatar gave it up. The
+    restore after a Reset is a 1 alone: nothing is held."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, vr=vr, scope=scope, Word0=137.0)
+    r.load(A, "GripSync", scope=scope, log="reset")
+    if restored:
+        assert r.completed("GripSync"), r.restores("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 137.0}
+        assert decided(r, "Scope 2: instance, keeps Reset")
+        time.sleep(osc_persist.MARK_FLOOR_SECS + QUIET)
+        assert r.restores("GripSync") == [1]
+    else:
+        assert decided(r, "nothing to restore: a reload of the worn avatar")
+        time.sleep(QUIET)
+        assert r.restores("GripSync") == []
+
+
+@pytest.mark.parametrize("scope", [1, 2])
+@pytest.mark.parametrize("instance, restored", [("1", True), ("2", False)],
+                         ids=["same-instance", "new-instance"])
+def test_scope_1_and_2_keep_the_instance_and_clear_on_a_new_one(rig, scope, instance, restored):
+    """Intended: a rejoin of the same instance restores at Scope 1 and 2; a new instance, of the
+    same world, clears."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=scope, Word0=137.0)
+    r.load(A, "GripSync", scope=scope, log="join", instance=instance)
+    if restored:
+        assert r.completed("GripSync"), r.restores("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 137.0}
+    else:
+        assert decided(r, "falling back to Scope 0's rule, since the room")
+        assert r.restores("GripSync") == []
+
+
+def test_a_calibration_under_scope_1_still_holds_until_the_accept(rig):
+    """Intended: Scope widens the lifetime and changes nothing about the hold."""
+    r = rig(tree=True)
+    worn_in_vr(r, scope=1, Word0=137.0)
+    r.load(A, "GripSync", scope=1, log="calibration")
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3]), r.restores("GripSync")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [1, 3]
+    r.client_log.accept()
+    assert wait_for(lambda: r.restores("GripSync") == [1, 3, 2])
+
+
+def test_a_stale_scope_never_opts_in_an_avatar_that_sent_none(rig):
+    """Intended: a Scope-0 avatar never sends Scope (0 onto a declared 0), so the value is only
+    the one that arrived since this change. Scope-2 A, then B with the same prefab at Scope 0,
+    then Reset Avatar on B: it clears, as Scope 0 does."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=2, Word0=137.0)
+    r.load(B, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync")
+    time.sleep(REPEAT_GAP)
+    r.vrc.messages.clear()
+    r.m.log.reset_mock()
+    r.load(B, "GripSync", log="reset")
+    assert decided(r, "(Scope 0: swap); nothing to restore")
+    assert r.restores("GripSync") == []
+
+
+@pytest.mark.parametrize("streamed", [True, False], ids=["streamed", "tree-only"])
+def test_scope_is_never_payload(rig, fast_reconcile, streamed):
+    """Intended: Scope is reserved: never stored as payload from the stream, never folded from
+    the tree when the stream missed it, never written back."""
+    r = rig(tree=True)
+    scope = 2 if streamed else None
+    worn_in_vr(r, scope=scope, Word0=137.0)
+    r.holds("GripSync", Word0=137.0, Scope=2)
+    time.sleep(RECONCILED)
+    r.load(A2, "GripSync", scope=scope, log="swap", before=A)
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+    assert r.written("GripSync", "Scope") == []
+
+
+@pytest.mark.parametrize("how", ["pinned", "unbound"])
+def test_scope_without_proof_from_the_log_falls_back_to_scope_0(rig, how):
+    """Intended: Scope 1 and 2 stand on the log: chosen by service name and this change's
+    switch bound. Without either, the decision runs Scope 0's rule, which forgets a reload, and
+    says so."""
+    r = rig(tree=how == "unbound")
+    watch_log(r)
+    worn_in_vr(r, scope=2, Word0=137.0)
+    r.load(A, "GripSync", scope=2, log="reset" if how == "pinned" else None)
+    assert decided(r, "falling back to Scope 0's rule")
+    assert r.restores("GripSync") == []
+
+
+def test_a_pinned_bridge_still_restores_one_swap_at_scope_2(rig):
+    """Intended: falling back to Scope 0 is Scope 0's whole rule, so a single swap still
+    restores without the log."""
+    r = rig()
+    watch_log(r)
+    worn_in_vr(r, scope=2, Word0=137.0)
+    r.load(A2, "GripSync", scope=2)
+    assert r.completed("GripSync")
+    assert said(r, "one swap; falling back to Scope 0's rule")
+
+
+@pytest.mark.parametrize("value", [3, -1, True, 2.0], ids=["3", "-1", "bool", "float"])
+def test_a_scope_that_is_not_0_1_or_2_as_an_int_is_0(rig, value):
+    """Intended: only a true int 0, 1 or 2 is a scope; bool True is not 1, and a float is a
+    mis-authored parameter. Anything else is 0, logged, and Reset Avatar clears."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=value, Word0=137.0)
+    r.load(A, "GripSync", scope=value, log="reset")
+    assert decided(r, "(Scope 0: swap); nothing to restore")
+    assert said(r, "counts as 0")
+    assert r.restores("GripSync") == []
