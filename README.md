@@ -193,7 +193,7 @@ One guard worth knowing: a manifest that declares channels at `index_puppet`'s o
 
 Keep a world-placed prop where it was when you swap to another avatar carrying the same prop. The avatar publishes its state under `/avatar/parameters/BridgePersist/<Name>/`; the bridge remembers it through one swap and writes it back into the new avatar a short settle after that avatar reports it has booted (`BridgePersist/<Name>/Boot`), then, after a second and shorter wait, sets `BridgePersist/<Name>/Restore` to 1 to say the values are in place. The avatar never answers, and one that hears nothing within its own wait starts as it would with no bridge running. Nothing is configured on the bridge side: the avatar's namespace, and the identity it announces, are the whole contract. The avatar half comes from vrc-patterns: the [`bridge-persist`](https://github.com/Ryan6-VRC/vrc-patterns/tree/main/bridge-persist) entry is the layer to build into a gimmick of your own, and the [`compositions/grab-sync-persist`](https://github.com/Ryan6-VRC/vrc-patterns/tree/main/compositions/grab-sync-persist) composition is a ready prop that carries it.
 
-It restores only a single swap to an avatar carrying the same prefab. Swapping through a third avatar, Reset Avatar, joining any world (including a rejoin), and VRChat restarting all forget. A bridge started after the avatar loaded restores nothing on the first swap, only once an avatar has loaded in front of it. Each time an avatar loads with persistence on, the bridge logs at the default log level either that it restored the namespace or why it did not.
+By default it restores a single swap to an avatar carrying the same prefab, and a full-body calibration, which reloads your avatar. Swapping through a third avatar, Reset Avatar, joining any world (including a rejoin), and VRChat restarting all forget. An avatar can ask to keep its state for as long as you stay in the instance with the vrc-patterns entry's `scope` setting; at `instance-keep-reset` even Reset Avatar keeps it, so leaving the instance is the only way to clear it. Telling a calibration from Reset Avatar, and one instance from the next, takes VRChat's log, found the same way as [the roster](#the-roster) under `[external_ai] log_dir`; when the bridge cannot match the log to its client (a target set by hand with `--osc-port`, for one), calibrations forget and a longer `scope` falls back to the default. A bridge started after the avatar loaded restores nothing on the first swap, only once an avatar has loaded in front of it. Each time an avatar loads with persistence on, the bridge logs at the default log level either that it restored the namespace or why it did not.
 
 Every shipped router runs it, in every mode, so `vrbridge` with any `--router` needs nothing extra. It does nothing on an avatar that publishes no `BridgePersist` namespace. On the library path, register it yourself:
 
@@ -221,7 +221,7 @@ Turn it on in `vrbridge.toml`:
 enabled = true        # registered by every router, in every mode
 bind = "127.0.0.1"    # loopback: only programs on this PC. "0.0.0.0" opens it to your LAN
 port = 9002
-log_dir = ""          # VRChat's log folder; empty means the default location
+log_dir = ""          # VRChat's log folder, which persistence reads too; empty means the default location
 ```
 
 **There is no authentication.** On loopback, anything running on your PC can connect; bound to the LAN, anything on your network can. Only widen `bind` on a network you trust.

@@ -151,15 +151,18 @@ def test_quant_directory_addresses():
 
 
 def test_bridge_persist_contract():
-    """The namespace root, the reserved names, the Restore values, the two bridge-side
+    """The namespace root, the reserved names, the Restore and Scope values, the two bridge-side
     waits and the late limit are the wire contract with the avatar half, whose window has
     to outlast the late limit plus the write settle. Changed here alone, a restore either never starts or lands
     after the avatar gave up, with nothing logged."""
     from vrbridge.mappings import osc_persist as bp
     assert bp.NAMESPACE_ROOT == "/avatar/parameters/BridgePersist/"
     assert bp.AVATAR_CHANGE_ADDR == "/avatar/change"
-    assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE) == ("Id", "Announce", "Boot", "Restore")
-    assert (bp.REST, bp.RESTORED) == (0, 1)
+    assert (bp.ID, bp.ANNOUNCE, bp.BOOT, bp.RESTORE, bp.SCOPE) == (
+        "Id", "Announce", "Boot", "Restore", "Scope")
+    assert bp.RESERVED == ("Id", "Announce", "Boot", "Restore", "Scope")
+    assert (bp.REST, bp.RESTORED, bp.RELEASED, bp.HOLD) == (0, 1, 2, 3)
+    assert (bp.SCOPE_SWAP, bp.SCOPE_INSTANCE, bp.SCOPE_KEEP_RESET) == (0, 1, 2)
     assert bp.ANNOUNCE_SETTLE_SECS == 0.2
     assert bp.LATE_LIMIT_SECS == 0.6
     assert bp.WRITE_SETTLE_SECS == 0.05
@@ -185,13 +188,14 @@ def test_external_ai_addresses():
     address, and its id check is VRChat's prefix. The service suffix is the OSCQuery type the
     zeroconf name carries and the client's log line does not; renamed here alone, the roster
     never binds to the discovered client and silently follows the newest log."""
+    from vrbridge import roster
     from vrbridge.mappings import external_ai as ea
     from vrbridge.mappings import osc_paramlog as pl
     assert pl.PARAMS_PREFIX == "/avatar/parameters/"
     assert ea.PARAMS_PATTERN == "/avatar/parameters/*"
     assert ea.AVATAR_CHANGE_ADDR == "/avatar/change"
     assert ea.AVATAR_ID_PREFIX == "avtr_"
-    assert ea.OSCQUERY_SERVICE_SUFFIX == "._oscjson._tcp.local."
+    assert roster.OSCQUERY_SERVICE_SUFFIX == "._oscjson._tcp.local."
     assert ea.PROTOCOL_VERSION == 1
 
 

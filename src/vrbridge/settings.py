@@ -332,7 +332,7 @@ class ExternalAISettings:
     enabled: bool = False                # registered by every shipped router when true
     bind: str = "127.0.0.1"              # the interface to listen on; "0.0.0.0" for the LAN
     port: int = 9002                     # 0 takes any free port, for embedding and tests
-    log_dir: str = ""                    # the client's log directory; empty is roster.DEFAULT_LOG_DIR
+    log_dir: str = ""                    # the client's log directory, osc_persist's too; empty is roster.DEFAULT_LOG_DIR
 
     def validate(self, at: str) -> None:
         if not self.bind:

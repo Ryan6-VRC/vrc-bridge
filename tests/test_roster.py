@@ -15,6 +15,7 @@ import time
 import pytest
 
 from vrbridge.roster import (
+    AvatarDataLoaded, AvatarDataSaved, AvatarInitialized, AvatarRemeasured, AvatarSwitch,
     EnteringRoom, JoinedRoom, JoiningWorld, LeftRoom, LogTailer, PlayerJoined, PlayerLeft,
     Roster, SelfIdentity, ServiceAdvertised, Unparsed, parse_line, select_log_file,
 )
@@ -77,14 +78,46 @@ def test_a_join_or_leave_in_an_unknown_shape_is_reported_not_dropped(msg):
 @pytest.mark.parametrize("msg", [
     "[Behaviour] OnPlayerLeftRoom",
     "[Behaviour] Destroying Alice Example",
-    "[Behaviour] Switching Alice Example to avatar Some Avatar",
     "[Behaviour] Joining or Creating Room: Example World",
+    "[Behaviour] Switching to network region usw (current state: ConnectedToNameServer)",
+    "Measure Human Avatar Avatar isRemeasure:False",
+    "Saving Avatar Data:",
     "Something else entirely",
     "",
 ])
 def test_neighbouring_lines_are_ignored(msg):
     """Intended: only the listed shapes are events; OnPlayerLeftRoom is not OnPlayerLeft."""
     assert parse_line(line(msg)) is None
+
+
+AVTR = "avtr_00000000-0000-4000-8000-0000000000bb"
+
+
+@pytest.mark.parametrize("msg, expected", [
+    ("[Behaviour] Switching Alice Example to avatar Some Avatar",
+     AvatarSwitch("Alice Example", "Some Avatar")),
+    (f"Saving Avatar Data:{AVTR}", AvatarDataSaved(AVTR)),
+    (f"Loading Avatar Data:{AVTR}", AvatarDataLoaded(AVTR)),
+    ("[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
+     AvatarInitialized("Limb", True)),
+    ("[Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 2 True 8",
+     AvatarInitialized("SixPoint", True)),
+    ("[Behaviour] Initialize ThreePoint Avatar VRCPlayer[Remote] 1 False 8",
+     AvatarInitialized("ThreePoint", False)),
+    ("Measure Human Avatar Avatar isRemeasure:True", AvatarRemeasured()),
+])
+def test_each_avatar_load_line_parses(msg, expected):
+    """Intended: the local avatar's load lines osc_persist classifies a reload by, with Local
+    told from Remote; the roster itself ignores them."""
+    assert parse_line(line(msg)) == expected
+    assert Roster().apply(expected) is None
+
+
+def test_a_switch_splits_the_player_at_the_first_to_avatar():
+    """Intended: a player name containing " to avatar " splits early, so a consumer comparing
+    the player to its own name fails closed rather than matching someone else."""
+    ev = parse_line(line("[Behaviour] Switching Mr to avatar Man to avatar Some Avatar"))
+    assert ev == AvatarSwitch("Mr", "Man to avatar Some Avatar")
 
 
 # --- roster rules -----------------------------------------------------------
