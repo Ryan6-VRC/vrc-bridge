@@ -54,6 +54,8 @@ LOG_GLOB = "output_log_*.txt"
 SERVICE_SCAN_LINES = 400
 """The `Advertising Service` line is written near the top of a launch's log."""
 RETRY_SECS = 5.0
+#: The selection rule while the named client's log is not found yet: the tailer keeps looking.
+SERVICE_NOT_FOUND = "newest (service not found)"
 #: The zeroconf form of a service name carries the type; the client's log line does not.
 OSCQUERY_SERVICE_SUFFIX = "._oscjson._tcp.local."
 
@@ -346,7 +348,7 @@ def select_log_file(log_dir: Path, service_name: Optional[str]) -> Selection:
     for p in files:
         if _advertised_service(p) == service_name:
             return Selection(p, "service")
-    return Selection(files[0], "newest (service not found)")
+    return Selection(files[0], SERVICE_NOT_FOUND)
 
 # --- tailer -----------------------------------------------------------------
 
@@ -419,8 +421,10 @@ class LogTailer:
         while not self._stop.is_set():
             try:
                 with self._flag_lock:
+                    # A log chosen while the named client's was not found yet is retried too:
+                    # the client can be selected before its log names it.
                     due = self._retarget_pending or (
-                        self.path is None
+                        (self.path is None or self.rule == SERVICE_NOT_FOUND)
                         and time.monotonic() - self._last_attempt >= self.retry_secs)
                 if due:
                     self._select_and_replay()
@@ -433,11 +437,15 @@ class LogTailer:
 
     def _select_and_replay(self) -> None:
         with self._flag_lock:
+            forced = self._retarget_pending
             self._retarget_pending = False
             self._last_attempt = time.monotonic()
             service = self._service_name
         sel = self.select_file(service)
         with self.lock:
+            if not forced and sel.path is not None and (sel.path, sel.rule) == (self.path,
+                                                                                self.rule):
+                return  # a retry that found nothing new: no replay, no snapshot
             if sel.path is None:
                 if not self._idle_logged:
                     self.log.info("roster: no %s in %s; idle, retrying every %.0f s",

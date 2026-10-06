@@ -44,6 +44,11 @@ REFIRE_ON_REPEAT: Set[str] = {"/avatar/change"}
 #: failure the carve-out exists to prevent.
 REFIRE_FOLD_WINDOW_SECS = 0.25
 
+#: Before a VRChat rival displaces an incumbent VRChat that did not answer its OSCQuery, the
+#: incumbent is asked once more after this long: one hitch on a live client's HTTP must not
+#: hand the slot to a second client for good.
+INCUMBENT_RETRY_SECS = 0.5
+
 
 #: The scores _service_rank hands out. Named because the VRChat score is no longer only an
 #: input to target selection: fetch() reports it out as PeerIdentity.is_vrchat, so
@@ -571,19 +576,42 @@ class OSCManager:
         if self._service_info and name == self._service_info.name:
             return
         rank = self._service_rank(name, getattr(info, 'server', None))
+        incumbent = None
         with self._client_lock:
             # News about the service we are already pointing at is an *update*, not
-            # a rival bid, and must never be rank-compared: VRChat keeps its service
-            # name across a restart and comes back on a fresh OSC port, so the ranks
-            # tie, the tie is refused, and we go on sending into the dead port until
-            # a remove_service happens to fire first. Following it is the whole
-            # point of watching for updates.
+            # a rival bid, and must never be rank-compared: a republication under the
+            # same name on a fresh OSC port ties, the tie is refused, and we go on
+            # sending into the dead port until a remove_service happens to fire first.
+            # Following it is the whole point of watching for updates.
             is_current = (self._current_service_name is not None
                           and name == self._current_service_name)
             # Only a strictly better rank unseats an incumbent, so VRCFT cannot take
-            # the slot off VRChat.
+            # the slot off VRChat -- with one exception below.
             if self._client is not None and not is_current and self._current_rank >= rank:
-                return
+                if not (rank == self._current_rank == _RANK_VRCHAT and self._peer_http):
+                    return
+                incumbent = self._peer_http
+                # Its latest advertisement, if it republished on a new port and that update
+                # is still queued behind this one.
+                with self._discovered_services_lock:
+                    latest = self._discovered_services.get(self._current_service_name)
+                if latest is not None and latest.addresses:
+                    incumbent = (_addr_to_ip(latest.addresses[0]), latest.port)
+        if incumbent is not None:
+            alive = self._host_info(*incumbent) is not None
+            if not alive:
+                time.sleep(INCUMBENT_RETRY_SECS)
+                alive = self._host_info(*incumbent) is not None
+        if incumbent is not None and alive:
+            # Two live VRChat clients: the first keeps the slot. A restarted client is the
+            # other case -- each launch advertises a new service name, and a killed one
+            # sends no mDNS goodbye -- so a VRChat rival takes the slot from an incumbent
+            # whose OSCQuery no longer answers. Without that the bridge stays on the dead
+            # client: no target selection fires, so nothing keyed on one (persistence's
+            # clear, the client-log binding) learns of the restart. The probes block
+            # zeroconf's dispatch thread for at most two _host_info timeouts and the retry
+            # wait, as an incumbent's refresh already blocks it below.
+            return
         # Query HOST_INFO
         host = _addr_to_ip(info.addresses[0]) if info.addresses else "127.0.0.1"
         hi = self._host_info(host, info.port)

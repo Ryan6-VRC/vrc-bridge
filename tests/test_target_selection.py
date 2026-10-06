@@ -13,6 +13,7 @@ against what the code did would have frozen it.
 """
 from zeroconf import ServiceInfo
 
+import vrbridge.osc_manager as om
 from vrbridge.osc_manager import FETCH_NOT_FOUND, OSCManager
 
 from .fake_vrchat import FakeVRChat
@@ -34,9 +35,8 @@ def test_a_restarted_vrchat_on_a_new_port_is_followed():
     """Intended: a service that republishes under the same name is an update to the
     target we hold, so we re-resolve and follow it.
 
-    VRChat keeps its service name across a restart and returns on a fresh OSC port.
-    Rank-comparing that republication ties, and a tie used to be refused -- leaving
-    every send going to the port the previous run had abandoned.
+    A republication under the same name on a fresh OSC port, rank-compared, ties, and a
+    tie used to be refused -- leaving every send going to the abandoned port.
     """
     with FakeVRChat() as first, FakeVRChat() as second:
         mgr = OSCManager(advertise=False)
@@ -137,6 +137,68 @@ def test_our_own_advertisement_is_never_targeted():
 # standing. Reaching that guard needs a candidate that gets *past* the rank gate --
 # either the incumbent itself, or a strictly better rival. A lower-ranked stranger
 # never reaches it, so pointing one at a dead port tests nothing.
+
+
+def test_a_restarted_vrchat_under_a_new_name_replaces_a_dead_incumbent(monkeypatch):
+    """Intended: every client launch advertises a new service name, and a killed client
+    sends no mDNS goodbye, so the restarted client arrives as a rival of equal rank. When
+    the incumbent's OSCQuery no longer answers, the rival takes the slot and a target
+    selection fires -- which is what tells persistence and the client-log binding that
+    the client restarted. `_host_info` is patched for the dead port, as below, to skip
+    its full timeout."""
+    restarted = "VRChat-Client-ABCDEF._oscjson._tcp.local."
+    with FakeVRChat() as first, FakeVRChat() as second:
+        mgr = OSCManager(advertise=False)
+        selected = []
+        mgr.add_target_listener(selected.append)
+        mgr._consider_service(VRCHAT, service(VRCHAT, first.http_port))
+        real = OSCManager._host_info
+        monkeypatch.setattr(OSCManager, "_host_info", staticmethod(
+            lambda host, port: None if port == first.http_port else real(host, port)))
+        monkeypatch.setattr(om, "INCUMBENT_RETRY_SECS", 0.0)
+
+        mgr._consider_service(restarted, service(restarted, second.http_port))
+
+        assert mgr._client_target == ("127.0.0.1", second.osc_port)
+        assert mgr.current_service_name == restarted
+        assert selected == [("127.0.0.1", first.osc_port), ("127.0.0.1", second.osc_port)]
+
+
+def test_one_missed_probe_of_a_live_incumbent_does_not_hand_over_the_slot(monkeypatch):
+    """Intended: a live client's HTTP can hitch once; the incumbent is asked again before a
+    rival may displace it, so a second live client does not take the slot for good."""
+    rival = "VRChat-Client-ABCDEF._oscjson._tcp.local."
+    with FakeVRChat() as first, FakeVRChat() as second:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(VRCHAT, service(VRCHAT, first.http_port))
+        real, missed = OSCManager._host_info, []
+
+        def flaky(host, port):
+            if port == first.http_port and not missed:
+                missed.append(port)
+                return None
+            return real(host, port)
+
+        monkeypatch.setattr(OSCManager, "_host_info", staticmethod(flaky))
+        monkeypatch.setattr(om, "INCUMBENT_RETRY_SECS", 0.0)
+        mgr._consider_service(rival, service(rival, second.http_port))
+
+        assert missed, "the incumbent was never probed"
+        assert mgr._client_target == ("127.0.0.1", first.osc_port)
+        assert mgr.current_service_name == VRCHAT
+
+
+def test_a_second_live_vrchat_does_not_take_the_slot():
+    """Intended: two clients on one PC each advertise; while the incumbent answers, the
+    first keeps the slot, as before."""
+    rival = "VRChat-Client-ABCDEF._oscjson._tcp.local."
+    with FakeVRChat() as first, FakeVRChat() as second:
+        mgr = OSCManager(advertise=False)
+        mgr._consider_service(VRCHAT, service(VRCHAT, first.http_port))
+        mgr._consider_service(rival, service(rival, second.http_port))
+
+        assert mgr._client_target == ("127.0.0.1", first.osc_port)
+        assert mgr.current_service_name == VRCHAT
 
 
 def test_an_incumbent_that_republishes_without_an_osc_port_is_kept():
