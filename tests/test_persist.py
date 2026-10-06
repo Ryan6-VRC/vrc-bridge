@@ -532,6 +532,8 @@ def test_a_timer_that_lost_the_race_to_an_abandonment_is_a_no_op(rig, monkeypatc
     r.vrc.emit(addr("GripSync", "Boot"), 0.5)
     if phase == "write":
         assert wait_for(lambda: r.written("GripSync", "Word0") == [1.0])
+        # The payload leaves before the write-settle timer is armed, under the same lock hold.
+        assert wait_for(lambda: r.m._ns["GripSync"].timer is not None)
     else:
         time.sleep(STEP)
     t = r.m._ns["GripSync"].timer
@@ -1057,12 +1059,13 @@ def decided(r, text, level="info"):
 def worn_in_vr(r, ns="GripSync", vr=1, scope=None, **payload):
     """A worn after a join the log shows, with the headset's VRMode over the wire (never primed,
     so a VRMode the mapping does not watch is never seen). Spaced so a reload's announcement of
-    A is not folded into the join's."""
+    A is not folded into the join's, and past the bind window."""
     r.load(A, ns, scope=scope, log="join")
     for leaf, value in payload.items():
         r.set(ns, leaf, value)
     r.vrc.emit(VRMODE, vr)
-    time.sleep(REPEAT_GAP)
+    # Past the bind window too, so the join's own switch is never the next change's.
+    time.sleep(max(REPEAT_GAP, osc_persist.LOG_BIND_SECS + 0.3))
     if isinstance(r.m.log, mock.MagicMock):
         r.m.log.reset_mock()
 
@@ -1466,7 +1469,8 @@ def test_a_pinned_bridge_still_restores_one_swap_at_scope_2(rig):
     assert said(r, "one swap; falling back to Scope 0's rule")
 
 
-@pytest.mark.parametrize("value", [3, -1, True, 2.0], ids=["3", "-1", "bool", "float"])
+@pytest.mark.parametrize("value", [3, -1, True, 2.0, 0.0],
+                         ids=["3", "-1", "bool", "float", "zero-float"])
 def test_a_scope_that_is_not_0_1_or_2_as_an_int_is_0(rig, value):
     """Intended: only a true int 0, 1 or 2 is a scope; bool True is not 1, and a float is a
     mis-authored parameter. Anything else is 0, logged, and Reset Avatar clears."""
@@ -1477,3 +1481,43 @@ def test_a_scope_that_is_not_0_1_or_2_as_an_int_is_0(rig, value):
     assert decided(r, "(Scope 0: swap); nothing to restore")
     assert said(r, "counts as 0")
     assert r.restores("GripSync") == []
+
+
+def test_a_trip_to_another_instance_on_an_avatar_without_the_namespace_still_clears(rig):
+    """Intended: an instance change clears Scope 1 and 2 even when it happens on an avatar that
+    carries no namespace, so nothing of this namespace boots there. A (Scope 2) in instance 1,
+    B, a trip to instance 2 and back to instance 1 on B, then A again: it forgets."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=2, Word0=137.0)
+    r.change(B, log="swap", before=A)
+    time.sleep(REPEAT_GAP)
+    r.change(B, log="join", instance="2")
+    time.sleep(REPEAT_GAP)
+    r.change(B, log="join", instance="1")
+    time.sleep(REPEAT_GAP)
+    r.load(A2, "GripSync", scope=2, log="swap", before=B)
+    assert decided(r, "falling back to Scope 0's rule, since the room is unknown")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+
+
+@pytest.mark.parametrize("scope, instance, restored", [
+    (None, "1", False), (None, "2", False), (2, "1", True), (2, "2", False),
+], ids=["scope0-same-instance", "scope0-new-instance", "scope2-same-instance",
+        "scope2-new-instance"])
+def test_a_join_that_changes_the_avatar_is_a_join_not_a_swap(rig, scope, instance, restored):
+    """Intended: a join can load a different avatar with the same prefab (one id announced), and
+    the log shows the room transition. At Scope 0 any join clears, so it forgets; at Scope 2 a
+    rejoin of the same instance restores and a new instance forgets."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=scope, Word0=137.0)
+    r.load(A2, "GripSync", scope=scope, log="join", instance=instance)
+    if restored:
+        assert r.completed("GripSync"), r.restores("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 137.0}
+    else:
+        assert decided(r, "a swap made by a world join")
+        time.sleep(QUIET)
+        assert r.restores("GripSync") == []

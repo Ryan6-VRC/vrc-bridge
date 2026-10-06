@@ -73,16 +73,19 @@ since the namespace last booted; and the client's room at its last decision.
   `/avatar/change` equal to the checkpoint's, and that value a non-zero int. The arrival mark is
   what stops an avatar that sends no `Announce` from being matched against the outgoing avatar's
   value, which is still standing.
-* **Scope 0** then needs exactly one id announced (a swap), or none and a calibration's switch in
-  the log (below). An empty list is otherwise a reload of the worn avatar -- a world join, a
-  rejoin and Reset Avatar are one event on the wire -- and two or more entries is not one swap.
+* **Scope 0** then needs exactly one id announced (a swap) whose switch, if the log binds one,
+  met no room transition, or none and a calibration's switch in the log (below). An empty list
+  is otherwise a reload of the worn avatar -- a world join, a rejoin and Reset Avatar are one
+  event on the wire -- and two or more entries is not one swap. A swap waits for the log like a
+  reload does, and restores without it at the deadline, as it did before the log was read.
 * **Scope 1 and 2** need the log chosen by service name, this change's switch bound in it, and
-  the client's room at this decision equal to the room recorded at the namespace's previous one
-  (an unknown room equals nothing). With those, any id list restores: a swap chain, a rejoin of
-  the same instance, and a calibration, which holds as at 0. Any other reload of the worn avatar
-  -- Reset Avatar, or a reload the log cannot name -- restores at 2 and forgets at 1. Missing any
-  of the three, the decision falls back to scope 0's rule, logged, which forgets in every case
-  the log was needed for.
+  the client's room at this decision equal to the room recorded at the namespace's previous one.
+  A `Joining` line into any other instance drops every recorded room, worn or not, so a trip
+  away and back is never the same room. With those, any id list restores: a swap chain, a rejoin
+  of the same instance, and a calibration, which holds as at 0. Any other reload of the worn
+  avatar -- Reset Avatar, or a reload the log cannot name -- restores at 2 and forgets at 1. A
+  room proven different forgets. Missing the log, the switch or a known room, the decision falls
+  back to scope 0's rule, logged: a single swap still restores, and every reload forgets.
 * A newly selected send target is a join -- a client that started or restarted -- and deletes
   every namespace. Merely emptying the lists would not do: a restarted client back on a different
   avatar announces an id that is not the one worn at boot, which would read as one swap.
@@ -520,6 +523,13 @@ class BridgePersistMapping(Mapping):
     def _on_log_event(self, event) -> None:
         now = time.monotonic()
         with self._lock:
+            if isinstance(event, JoiningWorld):
+                # A move to another instance is seen here even by a namespace whose avatar is
+                # not worn: one that comes back to its room after it must not match it.
+                room = _room_key(event.world_id, event.instance)
+                for ns in self._ns.values():
+                    if ns.room is not None and ns.room != room:
+                        ns.room = None
             got = self._client_log.feed(event, now)
             if got is None:
                 return
@@ -577,7 +587,7 @@ class BridgePersistMapping(Mapping):
                 ns.announce_arrived = True
             elif rest == SCOPE:
                 ns.scope = value
-                if _applied_scope(value) != value or isinstance(value, bool):
+                if not (_is_int(value) and value in SCOPE_NAMES):
                     self.log.info("BridgePersist/%s: Scope %r is not 0, 1 or 2 as an int; it "
                                   "counts as 0.", name, value)
             elif rest == BOOT:
@@ -648,8 +658,10 @@ class BridgePersistMapping(Mapping):
         reload = not at.ids
         vr = self.bridge.osc.get_cached(VRMODE_ADDR)
         in_vr = _is_int(vr) and vr == 1
+        # A swap waits too, so a join that changed the avatar is seen as the join it is.
         needs_log = log.rule == "service" and (
-            scope != SCOPE_SWAP or (reload and at.checkpoint is not None and in_vr))
+            scope != SCOPE_SWAP or len(at.ids) == 1
+            or (reload and at.checkpoint is not None and in_vr))
         if sw is None and needs_log and not final:
             return _PENDING
         if not at.baselined:
@@ -669,9 +681,12 @@ class BridgePersistMapping(Mapping):
                        f"(chosen by {log.rule or 'nothing yet'})")
             elif sw is None:
                 why = "the client log showed no switch for this change"
-            elif room is None or room != ns.room:
-                why = (f"the room ({room or 'unknown'}) is not the one at this namespace's last "
-                       f"decision ({ns.room or 'unknown'})")
+            elif room is not None and ns.room is not None and room != ns.room:
+                return None, (f"an instance change: the room is {room}, and was {ns.room} at "
+                              f"this namespace's last decision")
+            elif room is None or ns.room is None:
+                why = (f"the room is unknown (now {room or 'unknown'}; at this namespace's last "
+                       f"decision, or since left, {ns.room or 'unknown'})")
             else:
                 why = None
             if why is None:
@@ -706,6 +721,8 @@ class BridgePersistMapping(Mapping):
         if len(at.ids) > 1:
             return None, (f"{len(at.ids)} avatars were announced since its last boot "
                           f"({', '.join(map(str, at.ids))}), which is not a single swap{fallback}")
+        if sw is not None and sw.moved:
+            return None, f"a swap made by a world join (the client log shows one){fallback}"
         return SWAP, f"one swap{fallback}"
 
     def _decide(self, name: str, token: int, at_boot: _AtBoot) -> None:

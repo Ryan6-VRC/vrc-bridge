@@ -17,7 +17,8 @@ import pytest
 from vrbridge.roster import (
     AvatarDataLoaded, AvatarDataSaved, AvatarInitialized, AvatarRemeasured, AvatarSwitch,
     EnteringRoom, JoinedRoom, JoiningWorld, LeftRoom, LogTailer, PlayerJoined, PlayerLeft,
-    Roster, SelfIdentity, ServiceAdvertised, Unparsed, parse_line, select_log_file,
+    SERVICE_NOT_FOUND, Roster, SelfIdentity, ServiceAdvertised, Unparsed, parse_line,
+    select_log_file,
 )
 
 ALICE = "usr_00000000-0000-4000-8000-000000000001"
@@ -266,6 +267,30 @@ def test_tailer_idles_without_files_and_picks_one_up_on_retarget(tmp_path, caplo
         finally:
             t.stop()
     assert sum("idle" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_a_tailer_that_has_not_found_its_client_keeps_looking_without_replaying(tmp_path):
+    """Intended: the client can be selected before its log names it, so a log chosen as
+    "newest (service not found)" is re-checked on the retry interval. A retry that finds
+    nothing new replays nothing; once the log names the client it is followed by service."""
+    _file(tmp_path, "output_log_2026-09-30_10-00-00.txt",
+          "[Behaviour] Entering Room: Example World", mtime=time.time() - 60)
+    rec = _Recorder()
+    t = LogTailer(rec, log_dir=tmp_path, service_name="VRChat-Client-ABC123", poll_secs=0.02,
+                  retry_secs=0.05)
+    t.start()
+    try:
+        assert rec.wait_for(1) == ["snapshot"]
+        assert t.rule == SERVICE_NOT_FOUND
+        time.sleep(0.3)
+        assert len(rec.calls) == 1, "a retry that found nothing new replayed"
+        # The client's own log, appearing after the bridge chose: newer, and naming it.
+        named = _file(tmp_path, "output_log_2026-09-30_10-05-00.txt",
+                      "Advertising Service VRChat-Client-ABC123 of type OSCQuery on 5000")
+        assert rec.wait_for(2) == ["snapshot", "snapshot"]
+        assert (t.path, t.rule) == (named, "service")
+    finally:
+        t.stop()
 
 
 def test_tailer_logs_an_unparsed_join_once(tmp_path, caplog):
