@@ -1,6 +1,6 @@
 """The client-log reload signature, re-derived from real log lines.
 
-`fixtures/client_log_reloads.txt` is eight client launches' worth of real log lines, scrubbed, with
+`fixtures/client_log_reloads.txt` is nine client launches' worth of real log lines, scrubbed, with
 each local switch labelled from ground truth that is not the log, and each label naming its
 source: `operator` (labelled live), `trackingtype` (`TrackingType` 6 -> 4 on the wire at the
 accept), `upright-fast` (a first `Upright` tens of ms after the change, so not held),
@@ -80,17 +80,18 @@ def test_every_labelled_reload_gets_its_verdict_from_the_log():
 
 def test_the_fixture_still_holds_the_independently_labelled_cases():
     """Intended: the evidence the classifier was approved on, counted by source. Calibrations:
-    6 operator-labelled, 6 marked by TrackingType at the accept, 10 resting on a slow Upright in
-    a calibration run. Resets: 2 operator-labelled, 2 with a first Upright in tens of ms. Joins
+    8 operator-labelled (2 of them six-point), 6 marked by TrackingType at the accept, 10 resting
+    on a slow Upright in a calibration run. Resets: 3 operator-labelled, 2 with a first Upright in
+    tens of ms. Joins
     and swaps are structural regression rows; 4 same-id reloads have no ground truth."""
     counts = {}
     for label, source, _, _ in _replay()[0]:
         counts[(label, source)] = counts.get((label, source), 0) + 1
     assert counts == {
-        ("calibration", "operator"): 6, ("calibration", "trackingtype"): 6,
+        ("calibration", "operator"): 8, ("calibration", "trackingtype"): 6,
         ("calibration", "upright-run"): 10,
-        ("reset", "operator"): 2, ("reset", "upright-fast"): 2,
-        ("join", "structural"): 11, ("swap", "structural"): 27, ("unlabelled", "none"): 4,
+        ("reset", "operator"): 3, ("reset", "upright-fast"): 2,
+        ("join", "structural"): 12, ("swap", "structural"): 28, ("unlabelled", "none"): 4,
     }
 
 
