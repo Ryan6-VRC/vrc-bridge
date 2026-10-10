@@ -132,10 +132,12 @@ def _addr_to_ip(addr_bytes):
 
 
 def _own_addresses() -> Set[str]:
-    """This machine's addresses by its hostname; empty if the lookup fails."""
+    """This machine's addresses by its hostname; empty if the lookup fails.
+
+    UnicodeError too: getaddrinfo runs an odd hostname through the IDNA codec."""
     try:
         return {ai[4][0] for ai in socket.getaddrinfo(socket.gethostname(), None)}
-    except OSError:
+    except (OSError, UnicodeError):
         return set()
 
 class OSCManager:
@@ -611,6 +613,12 @@ class OSCManager:
                 return
             host = _addr_to_ip(info.addresses[0]) if info.addresses else "127.0.0.1"
             if not self._same_host(host, self._pinned_target[0]):
+                # Named, so a VPN or virtual adapter advertising an address we do not hold
+                # reads as a host mismatch rather than as no client on the pinned port.
+                if self.log:
+                    self.log.debug("Pinned target: %s advertises %s, not the pinned host %s "
+                                   "or one of this machine's addresses; not read",
+                                   name, host, self._pinned_target[0])
                 return
             try:
                 osc_port = int(self._host_info(host, info.port)["OSC_PORT"])

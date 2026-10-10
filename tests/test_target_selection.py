@@ -373,6 +373,37 @@ def test_a_loopback_pin_does_not_match_another_machine(monkeypatch):
         assert mgr._peer_http is None
 
 
+def test_a_pinned_peer_that_moves_off_the_pinned_port_stops_being_read():
+    """Intended: the tree we read must be the client we send to. A peer re-resolving onto
+    another OSC port is no longer that client, so it is dropped and reads say it went."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        assert mgr._peer_http is not None
+
+        vrc._host_info_override = {"OSC_PORT": vrc.osc_port + 1}
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+
+        assert mgr._peer_http is None and mgr.current_service_name is None
+        assert mgr.fetch("/avatar/parameters/Thing").reason == FETCH_PEER_GONE
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+
+
+def test_a_restarted_client_on_the_pinned_port_becomes_the_peer():
+    """Intended: a client restarted with the same --osc ports advertises under a new name,
+    and a killed one sends no goodbye, so the new name on the pinned port takes over."""
+    restarted_name = "VRChat-Client-777777._oscjson._tcp.local."
+    with FakeVRChat() as first, FakeVRChat() as second:
+        second._host_info_override = {"OSC_PORT": first.osc_port}
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", first.osc_port))
+        mgr._consider_service(VRCHAT, service(VRCHAT, first.http_port))
+
+        mgr._consider_service(restarted_name, service(restarted_name, second.http_port))
+
+        assert mgr._peer_http == ("127.0.0.1", second.http_port)
+        assert mgr.current_service_name == restarted_name
+
+
 def test_a_pinned_target_survives_its_peer_being_removed():
     """Intended: nothing on the discovery side clears a target discovery never set.
 
