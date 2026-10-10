@@ -530,3 +530,44 @@ def test_shipped_routers_register_it_only_when_enabled(router_name, enabled, tmp
         if ext is not None:
             ext.close()
         set_settings(None)
+
+
+def _wait_for(pred, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while not pred() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return pred()
+
+
+def test_a_pinned_bridge_rebinds_its_roster_to_the_client_on_its_port(rig, vrc, tmp_path):
+    """Intended: a pinned bridge starts before browsing finds anything, so its roster begins
+    on the newest log. When the client advertising the pinned port is found, the roster binds
+    to that client's log, and again when it restarts under a new name -- whichever client was
+    started last. The send target never moves.
+
+    Measured live before this: the roster stayed on the other client's newer log."""
+    import os
+    restarted = "VRChat-Client-RESTART"
+    logs = {}
+    for i, name in enumerate((SERVICE, restarted, "VRChat-Client-OTHER")):
+        logs[name] = tmp_path / f"output_log_2026-09-30_12-00-0{i}.txt"
+        logs[name].write_text(log_line(f"Advertising Service {name} of type OSCQuery on 5432{i}"),
+                              encoding="utf-8")
+        os.utime(logs[name], (1_000_000 + i, 1_000_000 + i))   # OTHER is the newest
+    r = rig(log_dir=tmp_path)
+    pinned = r.bridge.osc.current_target
+    assert _wait_for(lambda: r.m._tailer.path == logs["VRChat-Client-OTHER"])
+
+    r.discover()
+    assert _wait_for(lambda: r.m._tailer.path == logs[SERVICE]), \
+        "the roster stayed on the newest log after the pinned client was found"
+
+    with FakeVRChat(host_info={"OSC_PORT": vrc.osc_port}) as again:
+        name = f"{restarted}._oscjson._tcp.local."
+        r.bridge.osc._consider_service(name, ServiceInfo(
+            "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+            port=again.http_port, properties={}, server="h.local."))
+        assert _wait_for(lambda: r.m._tailer.path == logs[restarted]), \
+            "a restarted client under a new name did not rebind the roster"
+
+    assert r.bridge.osc.current_target == pinned

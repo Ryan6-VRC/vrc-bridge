@@ -376,6 +376,7 @@ class ExternalAIMapping(Mapping):
         for event_type in CONTROLLER_TYPES:
             self.bridge.on_controller(event_type, "both", self._gate(self._on_controller))
         self.bridge.on_target_selected(self._gate(self._on_target))
+        self.bridge.osc.add_peer_listener(self._on_peer)
         self.bridge.on_stop(self._on_stop)
 
     def activate(self) -> None:
@@ -413,6 +414,9 @@ class ExternalAIMapping(Mapping):
                            logger=self.bridge.log)
         self._tailer = tailer
         tailer.start()
+        # Again: a peer found between the read above and `self._tailer = tailer` is
+        # otherwise lost, since _on_peer saw no tailer to retarget.
+        tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
         self.bridge.log.info("external_ai: listening on %s:%d", bind, self.port)
 
     def _shutdown(self) -> None:
@@ -634,6 +638,12 @@ class ExternalAIMapping(Mapping):
         tailer = self._tailer
         if tailer is not None:
             tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
+
+    def _on_peer(self, service_name: str) -> None:
+        # A pinned target's client found or restarted: rebind the roster log, nothing else.
+        tailer = self._tailer
+        if tailer is not None:
+            tailer.retarget(log_service_name(service_name))
 
     def _on_roster(self, roster: Roster, change: str) -> None:
         # The tailer thread, with its lock held: read the roster handed in, never the tailer.

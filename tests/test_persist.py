@@ -1521,3 +1521,40 @@ def test_a_join_that_changes_the_avatar_is_a_join_not_a_swap(rig, scope, instanc
         assert decided(r, "a swap made by a world join")
         time.sleep(QUIET)
         assert r.restores("GripSync") == []
+
+
+def test_a_pinned_peer_clears_on_a_restart_and_not_on_its_first_find(rig):
+    """Intended: under a pin the first find is the client we already send to, so nothing is
+    forgotten; the same port under a new name is that client restarted, a join, and clears."""
+    from zeroconf import ServiceInfo
+
+    def found(name, http_port):
+        r.bridge.osc._consider_service(name, ServiceInfo(
+            "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+            port=http_port, properties={}, server="h.local."))
+
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    assert r.m._ns, "the setup booted no namespace, so a clear would be invisible"
+    found(f"{SERVICE}._oscjson._tcp.local.", r.vrc.http_port)
+    assert r.m._ns, "the first find of a pinned peer cleared persistence"
+
+    with FakeVRChat(host_info={"OSC_PORT": r.vrc.osc_port}) as again:
+        found("VRChat-Client-RESTART._oscjson._tcp.local.", again.http_port)
+        assert not r.m._ns, "a restarted pinned client did not clear persistence"
+
+
+def test_a_pinned_bridge_binds_its_client_log_when_its_peer_is_found(rig):
+    """Intended: persistence's client log follows the client on the pinned port once it is
+    found, as the roster's does, and clears nothing -- the send target has not moved."""
+    from zeroconf import ServiceInfo
+    r = rig()
+    pinned = r.bridge.osc.current_target
+    assert r.m._tailer.rule != "service"
+    name = f"{SERVICE}._oscjson._tcp.local."
+    r.bridge.osc._consider_service(name, ServiceInfo(
+        "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+        port=r.vrc.http_port, properties={}, server="h.local."))
+    assert wait_for(lambda: r.m._tailer.rule == "service"), \
+        "persistence's log stayed bound by newest after the pinned client was found"
+    assert r.bridge.osc.current_target == pinned

@@ -187,6 +187,8 @@ class OSCManager:
         self._peer_lost = False
         # Fired once a discovered send target is chosen. See add_target_listener.
         self._target_listeners: list[Callable[[tuple[str, int]], None]] = []
+        # Fired when a pinned target's readable peer is found or renamed. See add_peer_listener.
+        self._peer_listeners: list[Callable[[str], None]] = []
         self._cache: Dict[str, Any] = {}
         # monotonic stamp of the last fire per REFIRE_ON_REPEAT address; under _cache_lock.
         self._last_fired: Dict[str, float] = {}
@@ -267,6 +269,17 @@ class OSCManager:
         naming a target takes the question away rather than entering it as a bid.
         """
         self._target_listeners.append(fn)
+
+    def add_peer_listener(self, fn: Callable[[str], None]):
+        """Call `fn(service_name)` when a pinned target's readable peer is found, or is
+        found again under a new name (a restarted client).
+
+        For what binds to the client rather than to the send target -- the client-log
+        tailers. A pin never fires the target listeners, and those clear state on what they
+        read as a join, so this is its own event: nothing was selected and the target has
+        not moved. Same thread and rules as add_target_listener.
+        """
+        self._peer_listeners.append(fn)
 
     def start(self):
         # A fresh session has lost nothing. start()'s own bind_port failure invites an
@@ -605,9 +618,11 @@ class OSCManager:
         # A pin still gets a *readable* peer: the VRChat client whose HOST_INFO names the
         # pinned host and OSC port is the one we are sending to, so its tree is the worn
         # avatar's. Only the peer fields are set -- never `_client`/`_client_target`, and no
-        # target listener fires, because nothing was selected. The host matches when it is
-        # the pinned one or both are this machine's (_same_host): VRChat's address record is
-        # the LAN address, while a two-clients-one-PC pin is 127.0.0.1.
+        # target listener fires, because nothing was selected; a new peer name fires the
+        # peer listeners instead. The host matches when it is the pinned one or both are
+        # this machine's (_same_host). VRChat's `_oscjson._tcp` record and HOST_INFO carry
+        # 127.0.0.1 (measured); only its `_osc._udp` record carries the LAN address, so the
+        # own-address half is for a client that advertises otherwise.
         if self._pinned_target is not None:
             if self._service_rank(name, getattr(info, 'server', None)) != _RANK_VRCHAT:
                 return
@@ -636,6 +651,7 @@ class OSCManager:
                     return
                 if self._current_service_name == name and self._peer_http == (host, info.port):
                     return
+                renamed = self._current_service_name != name
                 self._peer_http = (host, info.port)
                 self._peer_lost = False
                 self._current_service_name = name
@@ -643,6 +659,14 @@ class OSCManager:
             if self.log:
                 self.log.info("OSCQuery peer for the pinned target %s:%d is %s",
                               host, osc_port, name)
+            # Outside the lock, per listener, for the reasons the target listeners are.
+            if renamed:
+                for fn in list(self._peer_listeners):
+                    try:
+                        fn(name)
+                    except Exception:
+                        if self.log:
+                            self.log.exception("Peer listener raised for %s", name)
             return
         # Skip ourselves
         if self._service_info and name == self._service_info.name:
