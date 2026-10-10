@@ -414,6 +414,9 @@ class ExternalAIMapping(Mapping):
                            logger=self.bridge.log)
         self._tailer = tailer
         tailer.start()
+        # Again: a peer found between the read above and `self._tailer = tailer` is
+        # otherwise lost, since _on_peer saw no tailer to retarget.
+        tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
         self.bridge.log.info("external_ai: listening on %s:%d", bind, self.port)
 
     def _shutdown(self) -> None:

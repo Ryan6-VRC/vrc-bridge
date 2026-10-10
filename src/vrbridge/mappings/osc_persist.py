@@ -87,7 +87,8 @@ since the namespace last booted; and the client's room at its last decision.
   room proven different forgets. Missing the log, the switch or a known room, the decision falls
   back to scope 0's rule, logged: a single swap still restores, and every reload forgets.
 * A newly selected send target is a join -- a client that started or restarted -- and deletes
-  every namespace. Merely emptying the lists would not do: a restarted client back on a different
+  every namespace. Under a pin the target never moves, so a pinned target's peer found again
+  under a new name (a restarted client) is the join instead; the first find is not. Merely emptying the lists would not do: a restarted client back on a different
   avatar announces an id that is not the one worn at boot, which would read as one swap.
 * **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
   loaded restores nothing until the next boot; the reconcile below corrects a baselined
@@ -474,6 +475,8 @@ class BridgePersistMapping(Mapping):
         self._tokens = 0
         # Bumped by every event that can move the worn avatar under a reconcile read in flight.
         self._epoch = 0
+        # Whether a pinned target's peer has been found before, so the next one is a restart.
+        self._peer_seen = False
         # When the last /avatar/change was handled.
         self._change_at = float("-inf")
         # Set when a decision went without the switch it waited for, so the switch's late
@@ -497,13 +500,13 @@ class BridgePersistMapping(Mapping):
         # republication returns early in _consider_service and never reaches it. Every one of
         # those is a join or a gap in what we watched, so each clears.
         self.bridge.on_target_selected(self._on_target_selected)
-        # A pinned target's client found or restarted: rebind the client log and clear
-        # nothing, since the send target has not moved.
-        self.bridge.osc.add_peer_listener(
-            lambda name: self._tailer.retarget(log_service_name(name)))
+        self.bridge.osc.add_peer_listener(self._on_peer)
         self.bridge.on_stop(lambda ctx: self.close())
         self._tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
         self._tailer.start()
+        # Again: a peer found between the read above and the listener's registration is
+        # otherwise lost, and a stale read may have overwritten the listener's retarget.
+        self._tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
         threading.Thread(target=_reconcile_loop, args=(weakref.ref(self),), daemon=True,
                          name="BridgePersist-reconcile").start()
 
@@ -595,6 +598,20 @@ class BridgePersistMapping(Mapping):
             self.bridge.osc.forget(VRMODE_ADDR)
             self._client_log.reset(None, None, None)
         self._tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
+
+    def _on_peer(self, name: str) -> None:
+        """A pinned target's client found (first) or restarted under a new name (after).
+
+        The first find only binds the client log: the client was already the one we send
+        to. A later one is a restarted client, the join `_on_target_selected` clears for,
+        which a pin never fires.
+        """
+        with self._lock:
+            restarted, self._peer_seen = self._peer_seen, True
+        if restarted:
+            self._on_target_selected(None, self.bridge.osc.current_target)
+        else:
+            self._tailer.retarget(log_service_name(name))
 
     def _on_namespace(self, ctx, address: str, value) -> None:
         parsed = _split(address)
