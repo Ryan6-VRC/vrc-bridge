@@ -200,6 +200,17 @@ def test_a_run_that_dies_at_startup_says_why_in_its_log_file(tmp_path, monkeypat
     assert "the settings file is invalid" in text and "Traceback" in text
 
 
+def test_the_log_level_holds_from_the_first_line(tmp_path, main_that_dies_at_construction):
+    """Intended: the file follows `--log-level`, with no line exempt. The startup line is
+    INFO and is written before the bridge exists, so the level has to be set before it."""
+    path = tmp_path / "bridge.log"
+    with pytest.raises(SystemExit):
+        main_that_dies_at_construction(["--log-level", "WARNING", "--log-file", str(path)])
+    text = path.read_text(encoding="utf-8")
+    assert " INFO " not in text, text
+    assert "stopped on an unhandled error" in text
+
+
 def test_a_named_log_file_prunes_nothing_beside_it(tmp_path, main_that_dies_at_construction):
     """Intended: pruning is for the directory the bridge made. A path the user named may
     sit among files that only look like ours."""
@@ -241,7 +252,8 @@ def test_an_exception_on_a_worker_thread_reaches_the_logger(monkeypatch, bridge_
     seen = _Capture()
     bridge_logger.addHandler(seen)
     bridge_logger.setLevel(logging.DEBUG)
-    monkeypatch.setattr(threading, "excepthook", cli._log_thread_exception)
+    earlier = []
+    monkeypatch.setattr(threading, "excepthook", cli._thread_excepthook(earlier.append))
 
     def die():
         raise RuntimeError("worker gone")
@@ -253,3 +265,21 @@ def test_an_exception_on_a_worker_thread_reaches_the_logger(monkeypatch, bridge_
     assert record.getMessage() == "Unhandled exception in thread Doomed"
     assert record.exc_info[0] is RuntimeError
     assert bridge_logger.level == logging.DEBUG, "reporting it reset the run's log level"
+    assert [a.exc_type for a in earlier] == [RuntimeError], \
+        "a hook installed before ours was discarded instead of chained"
+
+
+def test_the_interpreters_own_thread_hook_is_not_run_a_second_time(monkeypatch, capsys,
+                                                                   bridge_logger):
+    """Intended: chaining is for a hook somebody installed. The default one prints the
+    traceback to stderr, which the console handler has already done."""
+    monkeypatch.setattr(threading, "excepthook",
+                        cli._thread_excepthook(threading.__excepthook__))
+
+    def die():
+        raise RuntimeError("worker gone")
+
+    t = threading.Thread(target=die, name="Doomed")
+    t.start()
+    t.join()
+    assert "Exception in thread Doomed" not in capsys.readouterr().err

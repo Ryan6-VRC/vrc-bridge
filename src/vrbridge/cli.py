@@ -202,8 +202,9 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
         default=None,
         metavar="PATH",
         help=(
-            "Append this run's log to PATH. Default: a new file per run under logs/ "
-            "beside vrbridge.toml, deleted after 14 days."
+            "Append this run's log to PATH. Default: a new file per run in logs/ under "
+            "the bridge's base directory (the checkout root in a source install), "
+            "deleted after 14 days."
         ),
     )
 
@@ -225,17 +226,25 @@ def log_file_path(args) -> Path | None:
     return default_log_path()
 
 
-def _log_thread_exception(args) -> None:
+def _thread_excepthook(previous):
     """A `threading.excepthook` that goes through the logger, so an exception that kills a
-    worker thread reaches the log file and not only a console nobody may be watching."""
-    if args.exc_type is SystemExit:
-        return
-    name = args.thread.name if args.thread is not None else "?"
-    # getLogger, not setup_logging: that one sets the level, and would take a DEBUG run
-    # back to INFO the first time a thread died.
-    logging.getLogger("vrbridge").error(
-        "Unhandled exception in thread %s", name,
-        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    worker thread reaches the log file and not only a console nobody may be watching.
+
+    `previous` is the hook this one replaces, and it still runs afterwards if someone
+    installed it. The interpreter's own is not called again: it prints the traceback to
+    stderr, where the logger's console handler has just put it.
+    """
+    def hook(args) -> None:
+        if args.exc_type is not SystemExit:
+            name = args.thread.name if args.thread is not None else "?"
+            # getLogger, not setup_logging: that one sets the level, and would take a
+            # DEBUG run back to INFO the first time a thread died.
+            logging.getLogger("vrbridge").error(
+                "Unhandled exception in thread %s", name,
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        if previous is not threading.__excepthook__:
+            previous(args)
+    return hook
 
 
 def osc_target(args, parser: argparse.ArgumentParser) -> tuple[str, int] | None:
@@ -271,7 +280,9 @@ def main(argv: list[str] | None = None) -> None:
     # Resolved before the log file opens, so a refused flag leaves no empty file behind.
     target = osc_target(args, parser)
 
-    log = setup_logging()
+    # The level holds from the first record, not from VRBridge's constructor: the file
+    # follows --log-level, and a line written before that would be the one exception.
+    log = setup_logging(level=getattr(logging, args.log_level))
     path = log_file_path(args)
     if path is not None:
         try:
@@ -292,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
              Path(vrbridge.__file__).resolve().parent, config,
              "" if config.is_file() else " (absent, so defaults)",
              path if path is not None else "none")
-    threading.excepthook = _log_thread_exception
+    threading.excepthook = _thread_excepthook(threading.excepthook)
 
     try:
         bridge = VRBridge(

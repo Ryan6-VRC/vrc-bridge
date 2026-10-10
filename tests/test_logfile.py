@@ -22,9 +22,10 @@ def aged(path, days: float):
     return path
 
 
-def test_the_default_file_is_per_run_beside_the_settings_file(tmp_path, monkeypatch):
-    """Intended: `logs/` under the same root as `vrbridge.toml`, and a name carrying the pid
-    so two bridges started in one second on one PC write two files."""
+def test_the_default_file_is_per_run_under_the_base_directory(tmp_path, monkeypatch):
+    """Intended: `logs/` under `app_base_dir()` -- not wherever `$VRBRIDGE_CONFIG` points --
+    and a name carrying the pid so two bridges started in one second on one PC write two
+    files."""
     monkeypatch.setattr(logfile, "app_base_dir", lambda: tmp_path)
     path = default_log_path()
     assert path.parent == tmp_path / "logs"
@@ -93,23 +94,48 @@ def test_a_run_past_the_cap_keeps_its_newest_lines_in_two_files(tmp_path, monkey
     assert len(live.encode()) <= 600 and len(rolled.encode()) <= 600
 
 
-def test_a_rollover_the_os_refuses_loses_no_record(tmp_path, monkeypatch, bridge_logger):
-    """Intended: Windows refuses the rollover's rename while another process holds the file
-    open, which is exactly when someone is reading it. The stock handler then drops every
-    record until the reader lets go; ours writes on past the cap instead."""
+def test_a_rollover_the_os_refuses_loses_neither_a_record_nor_the_backup(
+        tmp_path, monkeypatch, bridge_logger):
+    """Intended: Windows refuses the rollover's move while another process holds the file
+    open, which is exactly when someone is reading it. The stock handler deletes the old
+    backup before that move and then drops every record until the reader lets go; ours
+    keeps the backup, writes on past the cap, and rolls over once the file is free."""
     monkeypatch.setattr(logfile, "MAX_BYTES", 600)
     path = tmp_path / "run.log"
+    rolled = tmp_path / "run.log.1"
     attach_log_file(path)
+    for i in range(12):
+        bridge_logger.info("before %03d", i)
+    backup = rolled.read_text(encoding="utf-8")
+    assert backup, "the setup never rolled over, so there is no backup to lose"
 
-    def refused(src, dst):
-        raise PermissionError(32, "The process cannot access the file", str(src))
+    def refused(*a, **k):
+        raise PermissionError(32, "The process cannot access the file")
 
     with monkeypatch.context() as m:
+        m.setattr(os, "replace", refused)
         m.setattr(os, "rename", refused)
+        m.setattr(os, "remove", refused)
         for i in range(60):
-            bridge_logger.info("record %03d", i)
+            bridge_logger.info("held %03d", i)
     live = path.read_text(encoding="utf-8")
-    assert all(f"record {i:03d}" in live for i in range(60))
+    assert all(f"held {i:03d}" in live for i in range(60))
+    assert rolled.read_text(encoding="utf-8") == backup
+
+    bridge_logger.info("released")
+    assert "released" in path.read_text(encoding="utf-8")
+    assert "held 059" in rolled.read_text(encoding="utf-8"), \
+        "the rollover was not retried once the file was free"
+
+
+def test_attaching_the_same_file_twice_is_one_handler(tmp_path, bridge_logger):
+    """Intended: a second attach of one path -- `main()` run twice in a process, an embedder
+    calling it from two places -- must not write every line twice."""
+    path = tmp_path / "run.log"
+    first = attach_log_file(path)
+    assert attach_log_file(tmp_path / "." / "run.log") is first
+    bridge_logger.info("once")
+    assert path.read_text(encoding="utf-8").count("once") == 1
 
 
 def test_prune_takes_only_our_own_old_files(tmp_path):
@@ -118,11 +144,24 @@ def test_prune_takes_only_our_own_old_files(tmp_path):
     old = aged(tmp_path / "vrbridge_20260101_000000_1.log", 15)
     old_rolled = aged(tmp_path / "vrbridge_20260101_000000_1.log.1", 15)
     recent = aged(tmp_path / "vrbridge_20260102_000000_2.log", 13)
-    foreign = aged(tmp_path / "notes.log", 400)
-    lookalike = aged(tmp_path / "vrbridge_notes.logbook", 400)
+    kept_by_hand = [aged(tmp_path / name, 400) for name in (
+        "notes.log", "vrbridge_notes.log", "vrbridge_notes.logbook",
+        "vrbridge_20260101_000000_1.log.2", "vrbridge_20260101_000000_1.log.bak",
+        "my_vrbridge_20260101_000000_1.log")]
     assert prune_logs(tmp_path) == 2
     assert not old.exists() and not old_rolled.exists()
-    assert recent.exists() and foreign.exists() and lookalike.exists()
+    assert recent.exists()
+    assert all(p.exists() for p in kept_by_hand), [p.name for p in kept_by_hand if not p.exists()]
+
+
+def test_prune_never_deletes_a_link(tmp_path, monkeypatch):
+    """Intended: a link carrying one of our names is somebody's arrangement, not our file.
+    Faked rather than created: making a real symlink needs a privilege most Windows
+    accounts lack, and a skipped test guards nothing."""
+    link = aged(tmp_path / "vrbridge_20260101_000000_1.log", 400)
+    monkeypatch.setattr(type(link), "is_symlink", lambda self: True)
+    assert prune_logs(tmp_path) == 0
+    assert link.exists()
 
 
 def test_prune_of_a_directory_not_made_yet_is_nothing(tmp_path):
