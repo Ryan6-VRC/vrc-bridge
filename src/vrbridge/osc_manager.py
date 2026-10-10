@@ -172,6 +172,9 @@ class OSCManager:
         self._client_lock = threading.Lock()
         self._client: Optional[udp_client.SimpleUDPClient] = None
         self._client_target: Optional[tuple[str,int]] = None
+        # Whether this outage's dropped send has been reported; see send(). Written without
+        # a lock: a race costs one extra or one missing line.
+        self._drop_warned = False
         # The peer's OSCQuery *HTTP* endpoint, which is a different port from the OSC one
         # in _client_target and the only thing fetch() can ask. _consider_service already
         # learns it as info.port to read OSC_PORT and used to discard it afterwards.
@@ -457,7 +460,17 @@ class OSCManager:
         with self._client_lock:
             client = self._client; target = self._client_target
         if not client:
-            if self.log: self.log.warning("No VRChat OSC target yet; drop send %s=%s", address, value)
+            if self.log:
+                # Once per outage. A pad touched before a client is found drops sends at
+                # controller rate, and one WARNING each buries whatever else the log holds.
+                # The return value is the contract; the line only says the outage began.
+                if self._drop_warned:
+                    self.log.debug("No OSC target; drop send %s=%s", address, value)
+                else:
+                    self._drop_warned = True
+                    self.log.warning("No VRChat OSC target yet; drop send %s=%s. Further "
+                                     "drops are logged at DEBUG until a target is set.",
+                                     address, value)
             return False
         try:
             client.send_message(address, value)
@@ -715,6 +728,9 @@ class OSCManager:
                 return
             self._client = udp_client.SimpleUDPClient(host, osc_port)
             self._client_target = (host, osc_port)
+            # Re-armed here rather than on a successful send: a target that comes and goes
+            # with nothing sent in between is still a new outage.
+            self._drop_warned = False
             self._peer_http = (host, info.port)
             # A peer is readable again, so a previous withdrawal is no longer the answer.
             self._peer_lost = False
