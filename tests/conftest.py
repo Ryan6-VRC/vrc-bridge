@@ -52,3 +52,23 @@ def persist_log_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(op, "_default_log_dir", lambda: d)
     return d
+
+
+@pytest.fixture
+def bridge_logger():
+    """The process-wide `vrbridge` logger at INFO, put back as it was found afterwards.
+
+    Anything that attaches a log file needs this: the handler outlives the test otherwise,
+    holding its file open, and a logger no earlier test configured passes nothing at INFO --
+    so a file test's result would depend on which test ran before it.
+    """
+    import logging
+    log = logging.getLogger("vrbridge")
+    handlers, level = list(log.handlers), log.level
+    log.setLevel(logging.INFO)
+    yield log
+    for h in list(log.handlers):
+        if h not in handlers:
+            log.removeHandler(h)
+            h.close()
+    log.setLevel(level)

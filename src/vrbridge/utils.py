@@ -11,12 +11,16 @@ if TYPE_CHECKING:
     from .engine import VRBridge
 
 
+#: One line shape for the console and the log file (logfile.attach_log_file).
+LOG_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+
+
 def setup_logging(name: str = "vrbridge", level: int = logging.INFO) -> logging.Logger:
     """Create a module-level logger with a simple format if one doesn't exist yet."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         h = logging.StreamHandler()
-        fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+        fmt = logging.Formatter(LOG_FORMAT)
         h.setFormatter(fmt)
         logger.addHandler(h)
     logger.propagate = False
