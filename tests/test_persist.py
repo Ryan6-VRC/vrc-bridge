@@ -1521,3 +1521,19 @@ def test_a_join_that_changes_the_avatar_is_a_join_not_a_swap(rig, scope, instanc
         assert decided(r, "a swap made by a world join")
         time.sleep(QUIET)
         assert r.restores("GripSync") == []
+
+
+def test_a_pinned_bridge_binds_its_client_log_when_its_peer_is_found(rig):
+    """Intended: persistence's client log follows the client on the pinned port once it is
+    found, as the roster's does, and clears nothing -- the send target has not moved."""
+    from zeroconf import ServiceInfo
+    r = rig()
+    pinned = r.bridge.osc.current_target
+    assert r.m._tailer.rule != "service"
+    name = f"{SERVICE}._oscjson._tcp.local."
+    r.bridge.osc._consider_service(name, ServiceInfo(
+        "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+        port=r.vrc.http_port, properties={}, server="h.local."))
+    assert wait_for(lambda: r.m._tailer.rule == "service"), \
+        "persistence's log stayed bound by newest after the pinned client was found"
+    assert r.bridge.osc.current_target == pinned

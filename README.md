@@ -290,7 +290,7 @@ The bridge does not reset anything when the avatar changes; what your writes mea
 
 ### The roster
 
-VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log file (`output_log_*.txt` under `log_dir`). It picks the log of the VRChat client the bridge is talking to, by matching the OSCQuery service name that client writes into its log at startup, and falls back to the newest log until a client is found. That is what keeps the roster right with two VRChat clients on one PC: each bridge follows the log of the client it found. A bridge whose target was set by hand (`--osc-port`) is never told a client was selected, so it follows the newest log unless the client advertising its pinned port was found before the roster started. Persistence (`BridgePersistMapping`) binds its log and clears on a join the same way, so a pinned bridge misses a client restart for both. On a two-clients-one-PC run, start each client before its bridge.
+VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log file (`output_log_*.txt` under `log_dir`). It picks the log of the VRChat client the bridge is talking to, by matching the OSCQuery service name that client writes into its log at startup, and falls back to the newest log until a client is found. That is what keeps the roster right with two VRChat clients on one PC: each bridge follows the log of the client it found. A bridge whose target was set by hand (`--osc-port`) follows the newest log until the VRChat client advertising its pinned OSC port is found, then binds the roster and persistence's log to that client, and again if the client restarts, however the clients were started.
 
 ## Interoperates with
 

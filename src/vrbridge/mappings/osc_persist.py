@@ -497,6 +497,10 @@ class BridgePersistMapping(Mapping):
         # republication returns early in _consider_service and never reaches it. Every one of
         # those is a join or a gap in what we watched, so each clears.
         self.bridge.on_target_selected(self._on_target_selected)
+        # A pinned target's client found or restarted: rebind the client log and clear
+        # nothing, since the send target has not moved.
+        self.bridge.osc.add_peer_listener(
+            lambda name: self._tailer.retarget(log_service_name(name)))
         self.bridge.on_stop(lambda ctx: self.close())
         self._tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
         self._tailer.start()
