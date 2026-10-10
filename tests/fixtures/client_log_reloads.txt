@@ -1,4 +1,4 @@
-# Real VRChat client-log lines, 2026-10-02 to 2026-10-05, one block per client launch.
+# Real VRChat client-log lines, 2026-10-02 to 2026-10-06, one block per client launch.
 # Filtered to the lines roster.parse_line reads (player join/leave dropped); every usr_, avtr_,
 # wrld_ id, player, avatar and room name and service id replaced, consistently across files.
 # `## log <n>` starts a launch (a replay: the reader resets). `## <worn id> <label> <source> --
@@ -646,3 +646,52 @@
 ## avtr_00000006-0000-0000-0000-000000000000 swap structural -- a different avatar id from the one worn
 2026.10.05 19:05:32 Debug      -  Measure Human Avatar Avatar isRemeasure:True
 2026.10.05 19:06:17 Debug      -  Saving Avatar Data:avtr_00000006-0000-0000-0000-000000000000
+
+## log 9
+2026.10.06 19:23:50 Debug      -  Advertising Service VRChat-Client-000009 of type OSCQuery on 49558
+2026.10.06 19:23:51 Debug      -  User Authenticated: Local Player (usr_00000001-0000-0000-0000-000000000000)
+2026.10.06 19:24:00 Debug      -  [Behaviour] Entering Room: Room 2
+2026.10.06 19:24:00 Debug      -  [Behaviour] Joining wrld_00000002-0000-0000-0000-000000000000:76106~hidden(usr_00000001-0000-0000-0000-000000000000)~region(us)
+2026.10.06 19:24:00 Debug      -  [Behaviour] Successfully joined room
+2026.10.06 19:24:12 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 11
+2026.10.06 19:24:12 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 1 True 1
+2026.10.06 19:24:12 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:24:28 Debug      -  Loading Avatar Data:avtr_00000009-0000-0000-0000-000000000000
+2026.10.06 19:24:28 Debug      -  Loading Avatar Data:avtr_00000009-0000-0000-0000-000000000000
+2026.10.06 19:24:28 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 1 True 8
+## avtr_00000009-0000-0000-0000-000000000000 join structural -- a room transition precedes the switch
+2026.10.06 19:24:29 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:25:27 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 8
+2026.10.06 19:25:28 Debug      -  Saving Avatar Data:avtr_00000009-0000-0000-0000-000000000000
+2026.10.06 19:25:28 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 1 True 1
+2026.10.06 19:25:28 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:25:42 Debug      -  Loading Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:25:42 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 1 True 8
+## avtr_00000005-0000-0000-0000-000000000000 swap structural -- a different avatar id from the one worn
+2026.10.06 19:25:43 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:26:37 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 8
+2026.10.06 19:26:37 Debug      -  Saving Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:26:37 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 1 True 1
+2026.10.06 19:26:37 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:26:37 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 1 True 8
+## avtr_00000005-0000-0000-0000-000000000000 calibration operator -- operator-labelled slow calibration, six-point
+2026.10.06 19:26:47 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+## accepted
+2026.10.06 19:26:52 Debug      -  Saving Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:27:34 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 8
+2026.10.06 19:27:34 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 1 True 1
+2026.10.06 19:27:34 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:27:35 Debug      -  Loading Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:27:35 Debug      -  Loading Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:27:35 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 1 True 8
+## avtr_00000005-0000-0000-0000-000000000000 reset operator -- operator-labelled Reset Avatar, standing still, six-point
+2026.10.06 19:27:35 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:28:20 Debug      -  [Behaviour] Switching Local Player to avatar Avatar 8
+2026.10.06 19:28:20 Debug      -  Saving Avatar Data:avtr_00000005-0000-0000-0000-000000000000
+2026.10.06 19:28:20 Debug      -  [Behaviour] Initialize Limb Avatar VRCPlayer[Local] 1 True 1
+2026.10.06 19:28:20 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+2026.10.06 19:28:21 Debug      -  [Behaviour] Initialize SixPoint Avatar VRCPlayer[Local] 1 True 8
+## avtr_00000005-0000-0000-0000-000000000000 calibration operator -- operator-labelled fast calibration, six-point
+2026.10.06 19:28:21 Debug      -  Measure Human Avatar Avatar isRemeasure:True
+## accepted
+2026.10.06 19:28:35 Debug      -  Saving Avatar Data:avtr_00000005-0000-0000-0000-000000000000
