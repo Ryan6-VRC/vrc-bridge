@@ -5,7 +5,7 @@ Starts the bridge, selects a mapping or router, and runs the event loop.
 
 Usage:
     vrbridge [--log-level INFO] [--log-callbacks] [--router {name}] [--no-steamvr]
-             [--osc-port PORT [--osc-host HOST]] [--osc-bind-port PORT]
+             [--osc-port PORT [--osc-host HOST]] [--osc-bind-port PORT] [--no-advertise]
 
 The three OSC flags take their host/port/bind-port shape from the standalone OSC probe
 this repo is developed alongside, deliberately: both do the same job -- name the ports
@@ -177,6 +177,15 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
         ),
     )
 
+    parser.add_argument(
+        "--no-advertise",
+        action="store_true",
+        help=(
+            "Do not advertise over mDNS. Requires --osc-port. Needed when two clients run "
+            "on one PC, or the other client's discovery also lands here."
+        ),
+    )
+
     return parser
 
 
@@ -188,12 +197,19 @@ def osc_target(args, parser: argparse.ArgumentParser) -> tuple[str, int] | None:
     would take longest to see. The flag defaults to None and not to the host it resolves
     to, so that "given" is what is tested -- comparing against the default instead made
     `--osc-host 127.0.0.1` the one spelling that slipped through.
+
+    --no-advertise alone is refused too: unadvertised and unpinned, the bridge sends
+    nowhere until something is discovered, and no VRChat can discover it in turn.
     """
     if args.osc_port is None:
         if args.osc_host is not None:
             parser.error("--osc-host sets the host for --osc-port, which was not given; "
                          "without --osc-port the send target is discovered and "
                          "--osc-host has no effect.")
+        if args.no_advertise:
+            parser.error("--no-advertise needs --osc-port: unadvertised and unpinned, "
+                         "VRChat cannot find the bridge to send to it, and the bridge "
+                         "has no named port to send to.")
         return None
     host = DEFAULT_OSC_HOST if args.osc_host is None else args.osc_host
     return (host, args.osc_port)
@@ -208,6 +224,7 @@ def main(argv: list[str] | None = None) -> None:
         log_level=args.log_level,
         enable_steamvr=not args.no_steamvr,
         log_callbacks=args.log_callbacks,
+        advertise=not args.no_advertise,
         target=osc_target(args, parser),
         bind_port=args.osc_bind_port,
     )

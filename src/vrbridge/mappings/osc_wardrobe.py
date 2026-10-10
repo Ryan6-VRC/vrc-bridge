@@ -110,8 +110,9 @@ class WardrobeMapping(Mapping):
         # mapping's __init__. `load_from_settings` is the convenience path.
         self._manifests: Dict[int, Manifest] = dict(manifests or {})
         # Names the manifest outright, for a peer that serves no OSCQuery at all -- a
-        # pinned --osc-port target, the Av3Emulator. There is nothing to read there, so
-        # without this such a session can never arm.
+        # pinned --osc-port target such as the Av3Emulator. There is nothing to read there,
+        # so without this such a session can never arm. A pinned VRChat client that
+        # advertises its port is read like a discovered one.
         self._pinned_manifest_id = pinned_manifest_id
 
         # The OSC server is thread-per-datagram, so two presses and an avatar change can be
@@ -363,9 +364,11 @@ class WardrobeMapping(Mapping):
             # pin is answered by naming the manifest.
             if self.bridge.osc.target_is_pinned:
                 self._report(("no-peer", "pinned"), "warning",
-                             "The send target was pinned, so no OSCQuery tree exists to read "
-                             "%s from. Construct the wardrobe with pinned_manifest_id= to "
-                             "name the manifest instead.", MARKER_ADDR)
+                             "The send target was pinned and no VRChat client advertising "
+                             "its OSC port has been discovered, so %s cannot be read. If the "
+                             "peer advertises nothing (the Av3Emulator), construct the "
+                             "wardrobe with pinned_manifest_id= to name the manifest.",
+                             MARKER_ADDR)
             else:
                 self._report(("no-peer", "undiscovered"), "warning",
                              "No OSCQuery peer discovered yet, so %s cannot be read; press "

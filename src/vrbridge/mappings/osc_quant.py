@@ -93,10 +93,11 @@ class QuantChannelDirectory(Mapping):
         # fixture set, and a config error surfaces at the caller's construction site.
         self._manifests: Dict[int, QuantManifest] = dict(manifests or {})
         # Names the manifest outright for a peer that serves no OSCQuery at all (a pinned
-        # --osc-port target, the Av3Emulator). There is nothing to read there. Deliberately
-        # a constructor kwarg and NOT a CLI flag: the CLI constructs routers with nothing
-        # else, no shipped router registers this mapping, and the embedder who does register
-        # it holds the constructor anyway.
+        # --osc-port target such as the Av3Emulator). There is nothing to read there; a
+        # pinned VRChat client that advertises its port is read like a discovered one.
+        # Deliberately a constructor kwarg and NOT a CLI flag: the CLI constructs routers
+        # with nothing else, no shipped router registers this mapping, and the embedder who
+        # does register it holds the constructor anyway.
         self._pinned_manifest_id = pinned_manifest_id
 
         # One lock over the latch state; never held across a fetch (the wardrobe's
@@ -237,9 +238,10 @@ class QuantChannelDirectory(Mapping):
         if result.reason == FETCH_NO_PEER:
             if self.bridge.osc.target_is_pinned:
                 self._report(("no-peer", "pinned"), "warning",
-                             "The send target was pinned, so no OSCQuery tree exists to "
-                             "read %s from. Construct the directory with "
-                             "pinned_manifest_id= to name the manifest instead.",
+                             "The send target was pinned and no VRChat client advertising "
+                             "its OSC port has been discovered, so %s cannot be read. If "
+                             "the peer advertises nothing (the Av3Emulator), construct the "
+                             "directory with pinned_manifest_id= to name the manifest.",
                              MARKER_ADDR)
             else:
                 self._report(("no-peer", "undiscovered"), "warning",
@@ -330,7 +332,8 @@ class QuantChannelDirectory(Mapping):
 
     def _report(self, key: tuple, level: str, msg: str, *args) -> None:
         """Log an outcome once per state, not once per attempt -- the wardrobe's `_report`:
-        a pinned session would otherwise say FETCH_NO_PEER every other second forever."""
+        a pinned session with no advertising peer would otherwise say FETCH_NO_PEER every
+        other second forever."""
         with self._lock:
             if self._reported == key:
                 return

@@ -265,8 +265,9 @@ def test_change_sends_an_avatar_id_and_refuses_anything_else(rig, vrc):
 
 def test_get_reads_each_node_by_name(rig, vrc):
     """Intended: a served node answers found with its value, an undeclared one found false
-    with no error, since a 404 is an answer about the avatar. A discovered target, because a
-    pinned one serves no tree; its selection is also announced as a `target` event."""
+    with no error, since a 404 is an answer about the avatar. A discovered target, because
+    the pinned rig is never offered as a service; its selection is also announced as a
+    `target` event."""
     r = rig(discovered=True)
     c, w = r.client()
     assert w["target"] is None and w["pinned"] is False

@@ -71,7 +71,7 @@ _OSCQUERY_TYPES: Dict[Optional[str], Callable[[Any], Any]] = {
 #: worth reporting once rather than retrying. _host_info swallows all three into None,
 #: and a caller inheriting that cannot keep CLAUDE.md rule 7's named-offender promise.
 FETCH_OK = "ok"
-FETCH_NO_PEER = "no-peer"        # nothing has ever been resolved (a pinned target never will)
+FETCH_NO_PEER = "no-peer"        # nothing resolved (pinned: no client advertises the pinned port)
 FETCH_PEER_GONE = "peer-gone"    # a peer was resolved, then withdrew its service
 FETCH_NOT_FOUND = "not-found"    # 404: the peer serves no such node
 FETCH_TRANSPORT = "transport"    # timeout, refused, or a non-404 HTTP status
@@ -108,8 +108,8 @@ class FetchResult:
 
     `peer` names the target whose endpoint was queried -- not necessarily one that answered,
     since a refusal or a timeout reports FETCH_TRANSPORT against a peer that said nothing.
-    It is None only where there was no target to ask: a pin, discovery that has not
-    resolved, and a peer that withdrew.
+    It is None only where there was no peer to ask: a pin no VRChat client's HOST_INFO
+    matches, discovery that has not resolved, and a peer that withdrew.
     """
     reason: str
     value: Any = None
@@ -165,8 +165,9 @@ class OSCManager:
         # The peer's OSCQuery *HTTP* endpoint, which is a different port from the OSC one
         # in _client_target and the only thing fetch() can ask. _consider_service already
         # learns it as info.port to read OSC_PORT and used to discard it afterwards.
-        # Stays None under a pinned target, which advertises nothing and serves no tree --
-        # so fetch() answers FETCH_NO_PEER there rather than appearing to work.
+        # Under a pinned target it is the VRChat client advertising the pinned host and OSC
+        # port, and stays None while none does -- so fetch() answers FETCH_NO_PEER against
+        # a peer that advertises nothing (the Av3Emulator) rather than appearing to work.
         self._peer_http: Optional[tuple[str, int]] = None
         # Whether the peer above was resolved and then withdrew, as against never having been
         # resolved at all. Both leave _peer_http None, and collapsing them cost fetch() the
@@ -193,9 +194,8 @@ class OSCManager:
         if target is not None:
             # Built here and not in start(), so that no window exists in which the
             # browser could fill the slot first: a SimpleUDPClient is a connectionless
-            # sender and needs no server of ours running. _current_service_name stays
-            # None, which is also what stops remove_service from ever clearing a
-            # target no discovered service backs.
+            # sender and needs no server of ours running. remove_service checks the pin
+            # before clearing anything, so discovery never clears a target it did not set.
             self._client = udp_client.SimpleUDPClient(target[0], target[1])
             self._client_target = (target[0], target[1])
             if self.log:
@@ -526,11 +526,15 @@ class OSCManager:
                 if name in self.outer._discovered_services:
                     del self.outer._discovered_services[name]
 
-            # If current target removed, clear and wait for next best
+            # If current target removed, clear and wait for next best. Under a pin the
+            # service named here is only the readable peer, so the send target stands:
+            # discovery never set it and may never clear it.
             with self.outer._client_lock:
                 if self.outer._current_service_name == name:
-                    self.outer._client = None
-                    self.outer._client_target = None
+                    pinned = self.outer._pinned_target is not None
+                    if not pinned:
+                        self.outer._client = None
+                        self.outer._client_target = None
                     # Cleared with the client, or fetch() would keep querying the HTTP
                     # endpoint of a peer we have stopped sending to and report its answers
                     # as current.
@@ -547,7 +551,10 @@ class OSCManager:
                     # set -- which this same block clears. A stale value is unreachable
                     # from either, so keep the census current if a third reader appears.
                     self.outer._current_rank = -1
-                    if self.outer.log: self.outer.log.warning("Target %s removed; awaiting replacement...", name)
+                    if self.outer.log:
+                        self.outer.log.warning(
+                            "OSCQuery peer %s removed; sends stay on the pinned target" if pinned
+                            else "Target %s removed; awaiting replacement...", name)
 
     def _service_rank(self, name: str, server: str | None) -> int:
         s = (name or "") + " " + (server or "")
@@ -570,7 +577,41 @@ class OSCManager:
         # Returning here rather than earlier leaves discovery *observing* while it stops
         # *deciding*: _BrowserListener has already recorded the service, so
         # is_service_running -- which osc_vrcft depends on -- answers as it always did.
+        #
+        # A pin still gets a *readable* peer: the VRChat client whose HOST_INFO names the
+        # pinned host and OSC port is the one we are sending to, so its tree is the worn
+        # avatar's. Only the peer fields are set -- never `_client`/`_client_target`, and no
+        # target listener fires, because nothing was selected. The host compares literally:
+        # a pin on 127.0.0.1 does not match a client advertising this machine's LAN address.
         if self._pinned_target is not None:
+            if self._service_rank(name, getattr(info, 'server', None)) != _RANK_VRCHAT:
+                return
+            host = _addr_to_ip(info.addresses[0]) if info.addresses else "127.0.0.1"
+            if host != self._pinned_target[0]:
+                return
+            try:
+                osc_port = int(self._host_info(host, info.port)["OSC_PORT"])
+            except Exception:
+                return  # unresolved says nothing about the port; leave any peer standing
+            with self._client_lock:
+                if osc_port != self._pinned_target[1]:
+                    if self._current_service_name == name:
+                        # Our peer moved off the pinned port, so its tree is no longer
+                        # the one we send to.
+                        self._peer_http = None
+                        self._peer_lost = True
+                        self._current_service_name = None
+                        self._current_rank = -1
+                    return
+                if self._current_service_name == name and self._peer_http == (host, info.port):
+                    return
+                self._peer_http = (host, info.port)
+                self._peer_lost = False
+                self._current_service_name = name
+                self._current_rank = _RANK_VRCHAT
+            if self.log:
+                self.log.info("OSCQuery peer for the pinned target %s:%d is %s",
+                              host, osc_port, name)
             return
         # Skip ourselves
         if self._service_info and name == self._service_info.name:
@@ -706,7 +747,11 @@ class OSCManager:
 
     @property
     def current_service_name(self) -> Optional[str]:
-        """The discovered send target's mDNS service name, or None (pinned, or nothing found yet)."""
+        """The mDNS service name of the peer we read from, or None (nothing found yet).
+
+        Discovered, it is the send target's; pinned, the VRChat client advertising the
+        pinned port, which a client that advertises nothing never has.
+        """
         with self._client_lock:
             return self._current_service_name
 
@@ -715,9 +760,10 @@ class OSCManager:
         """True when the send target was named rather than discovered.
 
         Exists so a caller can tell the three states behind a missing OSCQuery peer apart:
-        a pin (which serves no tree and never will), discovery that has not resolved yet
-        (normal for the first seconds of any run), and a target that went away. They need
-        different messages, and only the first has `pinned_manifest_id` as its answer.
+        a pin no advertising VRChat client matches (the Av3Emulator serves no tree and never
+        will), discovery that has not resolved yet (normal for the first seconds of any run),
+        and a peer that went away. They need different messages, and only the first has
+        `pinned_manifest_id` as its answer.
         """
         return self._pinned_target is not None
 
@@ -809,10 +855,6 @@ class OSCManager:
             # `_result` is defined below them rather than above -- its promise is about the
             # returns that follow it, and a helper whose scope overshot its docstring would
             # be the same trap it exists to close.
-            if self.target_is_pinned:
-                return FetchResult(
-                    FETCH_NO_PEER,
-                    detail="the send target was pinned, and a pinned peer serves no tree")
             if lost:
                 # Separated from "never discovered" because the remedies differ: this one
                 # needs the client to come back, and no amount of waiting on discovery to
@@ -821,6 +863,11 @@ class OSCManager:
                 return FetchResult(
                     FETCH_PEER_GONE,
                     detail="the OSCQuery peer we were reading from withdrew its service")
+            if self.target_is_pinned:
+                return FetchResult(
+                    FETCH_NO_PEER,
+                    detail="the send target was pinned, and no VRChat client advertising "
+                           "its OSC port has been discovered")
             return FetchResult(FETCH_NO_PEER,
                                detail="no OSCQuery peer has been discovered yet")
 

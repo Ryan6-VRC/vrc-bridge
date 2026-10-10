@@ -151,8 +151,8 @@ An address the stream wrote while the read was out keeps the stream's value: the
 object is snapshotted before the GET and must be the same object at apply, so a read never
 overwrites a newer delivered value. Floats compare as float32, since the tree's JSON and
 python-osc render one float32 differently. A value the stream missed is therefore in `live` within
-one period of coming to rest. Under a pinned target there is no tree to read and the stream is all
-there is.
+one period of coming to rest. Under a pinned target that no VRChat client advertises (the
+Av3Emulator) there is no tree to read and the stream is all there is.
 
 **The change filter.** `_update_cache_and_fire` suppresses a value equal to the last one seen, and
 its cache outlives every avatar. So every announcement, and a target selection, `forget()`s the

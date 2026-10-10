@@ -36,7 +36,7 @@ vrbridge --help           # all options
 
 Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/` in a source checkout, or under your per-user data directory for an installed package. Set `VRBRIDGE_FILES_DIR` to put them somewhere else.
 
-By default the bridge discovers VRChat over OSCQuery and sends to the port it advertises. To drive something that announces nothing — Lyuma's Av3Emulator in Unity play mode, for instance — name its ports instead. `--osc-port 9000` sends there and stops discovery from ever taking the target back; `--osc-bind-port 9001` listens on the port such a peer already sends to, since it has no way to learn the free port the bridge would otherwise pick. `--osc-host` sets the host for `--osc-port` and defaults to loopback; it aims sends only, since the bridge always listens on loopback, so a peer named on another machine can be sent to but cannot answer. Use both port flags together: a peer that cannot discover you needs to be told where to send as much as it needs to be sent to. Note that a pinned run still advertises itself, so a running VRChat can still find the bridge and push avatar parameters into it.
+By default the bridge discovers VRChat over OSCQuery and sends to the port it advertises. To drive something that announces nothing — Lyuma's Av3Emulator in Unity play mode, for instance — name its ports instead. `--osc-port 9000` sends there and stops discovery from ever taking the target back; `--osc-bind-port 9001` listens on the port such a peer already sends to, since it has no way to learn the free port the bridge would otherwise pick. `--osc-host` sets the host for `--osc-port` and defaults to loopback; it aims sends only, since the bridge always listens on loopback, so a peer named on another machine can be sent to but cannot answer. Use both port flags together: a peer that cannot discover you needs to be told where to send as much as it needs to be sent to. A pinned run still reads OSCQuery from the VRChat client whose advertised OSC port is the pinned one, and still advertises itself, so a running VRChat can still find the bridge and push avatar parameters into it. `--no-advertise` stops that, for two VRChat clients on one PC: launch each with `--osc=inPort:ip:outPort` and give each its own bridge, pinned to that client's ports with `--osc-port`/`--osc-bind-port` and run with `--no-advertise`, so the other client's discovery does not also land here. `--no-advertise` is refused without `--osc-port`, since an unadvertised, unpinned bridge can neither find a client nor be found.
 
 Settings come from `$VRBRIDGE_CONFIG` if it is set, else `vrbridge.toml` at the checkout root for a source run (gitignored, so `git status` never shows it) or in your per-user data directory for an installed package. A missing file means defaults; an unreadable or invalid one stops the bridge with an error naming it. To see which file and values are in force:
 
@@ -138,7 +138,7 @@ bridge.start()
 
 The manifest is read off the worn avatar **on every press**, not when the avatar changes. That is deliberate: a cold avatar download can take a minute, so anything reading on the change would be asking about an avatar that does not exist yet. Reading at the press costs about a millisecond and is always about the avatar whose button you pressed — while an avatar is loading you are the placeholder, which sends nothing, so a press can only ever come from an avatar that is fully there.
 
-**If you pin the send target** with `--osc-port` — at the Av3Emulator, or anything else that advertises nothing — there is no OSCQuery tree to read the marker from, so the wardrobe can never arm on its own. Name the manifest instead:
+**If you pin the send target** with `--osc-port`, the bridge reads the marker from the VRChat client advertising the pinned OSC port. A pinned peer that advertises nothing — the Av3Emulator, for instance — has no OSCQuery tree to read the marker from, so the wardrobe can never arm on its own. Name the manifest instead:
 
 ```python
 wardrobe = WardrobeMapping.load_from_settings(bridge, pinned_manifest_id=1)
@@ -185,7 +185,7 @@ bridge.start()
 # a consumer asks:  table = directory.active_manifest()   # None until armed
 ```
 
-**If you pin the send target** with `--osc-port` (the Av3Emulator advertises nothing and serves no tree), name the manifest instead: `QuantChannelDirectory.load_from_settings(bridge, pinned_manifest_id=1)`. There is deliberately no CLI flag for this — the mapping is only reachable from code that already holds the constructor.
+**If you pin the send target** with `--osc-port`, the bridge reads the tree of the VRChat client advertising the pinned OSC port. For a pinned peer that advertises nothing (the Av3Emulator serves no tree), name the manifest instead: `QuantChannelDirectory.load_from_settings(bridge, pinned_manifest_id=1)`. There is deliberately no CLI flag for this — the mapping is only reachable from code that already holds the constructor.
 
 One guard worth knowing: a manifest that declares channels at `index_puppet`'s own addresses must agree with your `[puppet]` settings (`quant_level`, `float_smooth_tau_secs`), or the directory refuses to arm it and the log names both values. The manifest and the settings describe the same wire; when they diverge, one of them is stale.
 
@@ -269,7 +269,7 @@ Events:
 {"ev":"pong","seq":14,"t":1790000001.0,"id":4}
 ```
 
-- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand, which serves no values to read.
+- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand that no VRChat client advertising its OSC port backs, which leaves no values to read.
 - `target` goes to every connection when the bridge finds VRChat, or finds it again after a restart.
 - `roster` is the whole roster: sent when you subscribe, and again whenever the room changes (you join or leave a world). Between those, `join` and `leave` name one player each.
 - `error` with `"dropped": n` means your program read too slowly and the bridge discarded the `n` oldest events waiting for it, keeping the newest. Read faster, or re-`get` what you care about.
@@ -290,7 +290,7 @@ The bridge does not reset anything when the avatar changes; what your writes mea
 
 ### The roster
 
-VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log file (`output_log_*.txt` under `log_dir`). It picks the log of the VRChat client the bridge is talking to, by matching the OSCQuery service name that client writes into its log at startup, and falls back to the newest log until a client is found. That is what keeps the roster right with two VRChat clients on one PC: each bridge follows the log of the client it found. A bridge whose target was set by hand (`--osc-port`) found no client, so it always follows the newest log.
+VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log file (`output_log_*.txt` under `log_dir`). It picks the log of the VRChat client the bridge is talking to, by matching the OSCQuery service name that client writes into its log at startup, and falls back to the newest log until a client is found. That is what keeps the roster right with two VRChat clients on one PC: each bridge follows the log of the client it found. A bridge whose target was set by hand (`--osc-port`) is never told a client was selected, so it follows the newest log unless the client advertising its pinned port was found before the roster started.
 
 ## Interoperates with
 

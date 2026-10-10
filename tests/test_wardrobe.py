@@ -227,8 +227,8 @@ def test_fetch_percent_encodes_the_address():
 
 
 def test_fetch_without_a_discovered_peer_says_so():
-    """Intended: a pinned target advertises nothing and serves no tree, so there is no one
-    to ask -- distinct from asking and being refused."""
+    """Intended: a pinned target no VRChat client advertises serves no tree, so there is
+    no one to ask -- distinct from asking and being refused."""
     mgr = OSCManager(advertise=False, target=("127.0.0.1", 9000))
     assert mgr.fetch(MARKER_ADDR).reason == FETCH_NO_PEER
 
