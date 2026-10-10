@@ -14,7 +14,7 @@ against what the code did would have frozen it.
 from zeroconf import ServiceInfo
 
 import vrbridge.osc_manager as om
-from vrbridge.osc_manager import FETCH_NOT_FOUND, OSCManager
+from vrbridge.osc_manager import FETCH_NO_PEER, FETCH_NOT_FOUND, FETCH_PEER_GONE, OSCManager
 
 from .fake_vrchat import FakeVRChat
 
@@ -305,26 +305,124 @@ def test_a_live_vrchat_does_not_take_the_slot_from_a_pinned_target():
         assert mgr.send("/input/Voice", 1) is True
         assert emulator.wait_for_count(1)
         assert vrc.messages == [], "a datagram reached the discovered client"
+        assert mgr._peer_http is None, "a client on another port became the readable peer"
+        assert mgr.fetch("/avatar/parameters/Thing").reason == FETCH_NO_PEER
 
 
-def test_a_pinned_target_survives_a_service_removal():
+def test_a_pinned_target_reads_the_client_advertising_its_port():
+    """Intended: a pin on a VRChat client's OSC port reads that client's tree.
+
+    The two-clients-one-PC case: each bridge is pinned to its own client's ports, and the
+    client still advertises OSCQuery, so its HOST_INFO naming the pinned port identifies
+    the tree to read. Only the readable peer is set -- the send target is the pin's, and
+    no target listener fires, because nothing was selected.
+    """
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        client = mgr._client
+        fired = []
+        mgr.add_target_listener(fired.append)
+        vrc.set_node("/avatar/parameters/OscWardrobe/Manifest", 7)
+
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+
+        result = mgr.fetch("/avatar/parameters/OscWardrobe/Manifest")
+        assert result.ok and result.value == 7
+        assert result.peer.name == VRCHAT and result.peer.is_vrchat
+        assert mgr.current_service_name == VRCHAT
+        assert mgr._client is client, "the pinned sender was rebuilt by discovery"
+        assert fired == [], "a pin's readable peer was announced as a target selection"
+
+
+def lan_service(name: str, http_port: int, address: str) -> ServiceInfo:
+    """A service whose mDNS address record is `address`, as VRChat advertises its LAN one."""
+    return ServiceInfo("_oscjson._tcp.local.", name,
+                       addresses=[bytes(int(o) for o in address.split("."))],
+                       port=http_port, properties={}, server="somehost.local.")
+
+
+def test_a_loopback_pin_matches_a_client_advertising_this_machines_lan_address(monkeypatch):
+    """Intended: the two-clients-one-PC case. The pin is 127.0.0.1 and VRChat's address
+    record is this machine's LAN address; both are this machine, so the port match fires.
+    HOST_INFO is answered by the fake on loopback, since the LAN address is made up."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        monkeypatch.setattr(mgr, "_own_addrs", {"192.168.1.50"})
+        real = OSCManager._host_info
+        monkeypatch.setattr(OSCManager, "_host_info",
+                            staticmethod(lambda host, port: real("127.0.0.1", port)))
+
+        mgr._consider_service(VRCHAT, lan_service(VRCHAT, vrc.http_port, "192.168.1.50"))
+
+        assert mgr._peer_http == ("192.168.1.50", vrc.http_port)
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+
+
+def test_a_loopback_pin_does_not_match_another_machine(monkeypatch):
+    """Intended: a LAN address that is not this machine's is someone else's client, even
+    on the pinned port."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        monkeypatch.setattr(mgr, "_own_addrs", {"192.168.1.50"})
+        real = OSCManager._host_info
+        monkeypatch.setattr(OSCManager, "_host_info",
+                            staticmethod(lambda host, port: real("127.0.0.1", port)))
+
+        mgr._consider_service(VRCHAT, lan_service(VRCHAT, vrc.http_port, "192.168.1.77"))
+
+        assert mgr._peer_http is None
+
+
+def test_a_pinned_peer_that_moves_off_the_pinned_port_stops_being_read():
+    """Intended: the tree we read must be the client we send to. A peer re-resolving onto
+    another OSC port is no longer that client, so it is dropped and reads say it went."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        assert mgr._peer_http is not None
+
+        vrc._host_info_override = {"OSC_PORT": vrc.osc_port + 1}
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+
+        assert mgr._peer_http is None and mgr.current_service_name is None
+        assert mgr.fetch("/avatar/parameters/Thing").reason == FETCH_PEER_GONE
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+
+
+def test_a_restarted_client_on_the_pinned_port_becomes_the_peer():
+    """Intended: a client restarted with the same --osc ports advertises under a new name,
+    and a killed one sends no goodbye, so the new name on the pinned port takes over."""
+    restarted_name = "VRChat-Client-777777._oscjson._tcp.local."
+    with FakeVRChat() as first, FakeVRChat() as second:
+        second._host_info_override = {"OSC_PORT": first.osc_port}
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", first.osc_port))
+        mgr._consider_service(VRCHAT, service(VRCHAT, first.http_port))
+
+        mgr._consider_service(restarted_name, service(restarted_name, second.http_port))
+
+        assert mgr._peer_http == ("127.0.0.1", second.http_port)
+        assert mgr.current_service_name == restarted_name
+
+
+def test_a_pinned_target_survives_its_peer_being_removed():
     """Intended: nothing on the discovery side clears a target discovery never set.
 
-    `remove_service`'s only condition is `_current_service_name == name`, so what keeps
-    a pin safe is that a pin never names itself there. That nameless-ness is asserted
-    directly: without it this test passes for any pin name but the one literal it
-    removes, and a later change that starts naming the pin would go unnoticed.
+    The pin's own client is named in `_current_service_name` once it is the readable
+    peer, so this is the removal `remove_service` matches: the peer goes, the send target
+    stays, and a read says the peer withdrew.
     """
-    with FakeVRChat() as peer:
-        mgr = OSCManager(advertise=False, target=("127.0.0.1", peer.osc_port))
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
         listener = OSCManager._BrowserListener(mgr)
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        assert mgr.current_service_name == VRCHAT
 
-        assert mgr._current_service_name is None, \
-            "a pin that names itself is reachable by remove_service"
         listener.remove_service(None, "_oscjson._tcp.local.", VRCHAT)
 
-        assert mgr._client_target == ("127.0.0.1", peer.osc_port)
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
         assert mgr._client is not None
+        assert mgr.send("/input/Voice", 1) is True
+        assert mgr.fetch("/avatar/parameters/Thing").reason == FETCH_PEER_GONE
 
 
 def test_discovery_still_observes_while_pinned():

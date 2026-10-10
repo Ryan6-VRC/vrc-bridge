@@ -108,3 +108,20 @@ def test_the_suite_imports_the_checkout_it_lives_in():
     print(f"vrbridge.osc_manager under test: {resolved}")
     assert resolved.is_relative_to(Path(__file__).resolve().parents[1]), (
         f"the suite imported {resolved}, which is outside this checkout")
+
+
+def test_no_advertise_reaches_the_bridge_flag_with_a_pin(parser):
+    """Intended: the two-clients-one-PC run -- each bridge pinned to its client's ports and
+    unadvertised, so the other client's discovery does not also land here."""
+    args = parser.parse_args(["--no-advertise", "--osc-port", "9000", "--osc-bind-port", "9001"])
+    assert args.no_advertise is True
+    assert osc_target(args, parser) == ("127.0.0.1", 9000)
+    assert parser.parse_args([]).no_advertise is False
+
+
+def test_no_advertise_without_a_port_is_refused(parser):
+    """Intended: fail loud. Unadvertised and unpinned, VRChat cannot find the bridge and
+    the bridge has nowhere named to send, so the run would do nothing and say nothing."""
+    args = parser.parse_args(["--no-advertise"])
+    with pytest.raises(SystemExit):
+        osc_target(args, parser)
