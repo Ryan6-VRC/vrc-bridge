@@ -334,6 +334,45 @@ def test_a_pinned_target_reads_the_client_advertising_its_port():
         assert fired == [], "a pin's readable peer was announced as a target selection"
 
 
+def lan_service(name: str, http_port: int, address: str) -> ServiceInfo:
+    """A service whose mDNS address record is `address`, as VRChat advertises its LAN one."""
+    return ServiceInfo("_oscjson._tcp.local.", name,
+                       addresses=[bytes(int(o) for o in address.split("."))],
+                       port=http_port, properties={}, server="somehost.local.")
+
+
+def test_a_loopback_pin_matches_a_client_advertising_this_machines_lan_address(monkeypatch):
+    """Intended: the two-clients-one-PC case. The pin is 127.0.0.1 and VRChat's address
+    record is this machine's LAN address; both are this machine, so the port match fires.
+    HOST_INFO is answered by the fake on loopback, since the LAN address is made up."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        monkeypatch.setattr(mgr, "_own_addrs", {"192.168.1.50"})
+        real = OSCManager._host_info
+        monkeypatch.setattr(OSCManager, "_host_info",
+                            staticmethod(lambda host, port: real("127.0.0.1", port)))
+
+        mgr._consider_service(VRCHAT, lan_service(VRCHAT, vrc.http_port, "192.168.1.50"))
+
+        assert mgr._peer_http == ("192.168.1.50", vrc.http_port)
+        assert mgr._client_target == ("127.0.0.1", vrc.osc_port)
+
+
+def test_a_loopback_pin_does_not_match_another_machine(monkeypatch):
+    """Intended: a LAN address that is not this machine's is someone else's client, even
+    on the pinned port."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", vrc.osc_port))
+        monkeypatch.setattr(mgr, "_own_addrs", {"192.168.1.50"})
+        real = OSCManager._host_info
+        monkeypatch.setattr(OSCManager, "_host_info",
+                            staticmethod(lambda host, port: real("127.0.0.1", port)))
+
+        mgr._consider_service(VRCHAT, lan_service(VRCHAT, vrc.http_port, "192.168.1.77"))
+
+        assert mgr._peer_http is None
+
+
 def test_a_pinned_target_survives_its_peer_being_removed():
     """Intended: nothing on the discovery side clears a target discovery never set.
 

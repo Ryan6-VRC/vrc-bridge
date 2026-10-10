@@ -130,6 +130,14 @@ def _addr_to_ip(addr_bytes):
             return socket.inet_ntoa(addr_bytes)
         return "127.0.0.1"
 
+
+def _own_addresses() -> Set[str]:
+    """This machine's addresses by its hostname; empty if the lookup fails."""
+    try:
+        return {ai[4][0] for ai in socket.getaddrinfo(socket.gethostname(), None)}
+    except OSError:
+        return set()
+
 class OSCManager:
     """OSC + OSCQuery with proper advertisement.
     - Binds OSC UDP on a free port; returns it from /?HOST_INFO (no hardcoded ports).
@@ -191,6 +199,9 @@ class OSCManager:
         # _consider_service can refuse to revise it -- see the guard there.
         self._pinned_target = target
         self._bind_port = bind_port
+        # Read once: a pin on loopback has to match a client whose mDNS address record is
+        # this machine's LAN address. See _same_host.
+        self._own_addrs = _own_addresses() if target is not None else set()
         if target is not None:
             # Built here and not in start(), so that no window exists in which the
             # browser could fill the slot first: a SimpleUDPClient is a connectionless
@@ -556,6 +567,17 @@ class OSCManager:
                             "OSCQuery peer %s removed; sends stay on the pinned target" if pinned
                             else "Target %s removed; awaiting replacement...", name)
 
+    def _same_host(self, a: str, b: str) -> bool:
+        """Literally equal, or both this machine: loopback, `localhost`, or an own address."""
+        def own(h: str) -> bool:
+            try:
+                if ipaddress.ip_address(h).is_loopback:
+                    return True
+            except ValueError:
+                pass
+            return h == "localhost" or h in self._own_addrs
+        return a == b or (own(a) and own(b))
+
     def _service_rank(self, name: str, server: str | None) -> int:
         s = (name or "") + " " + (server or "")
         if self._service_info and name == self._service_info.name:
@@ -581,13 +603,14 @@ class OSCManager:
         # A pin still gets a *readable* peer: the VRChat client whose HOST_INFO names the
         # pinned host and OSC port is the one we are sending to, so its tree is the worn
         # avatar's. Only the peer fields are set -- never `_client`/`_client_target`, and no
-        # target listener fires, because nothing was selected. The host compares literally:
-        # a pin on 127.0.0.1 does not match a client advertising this machine's LAN address.
+        # target listener fires, because nothing was selected. The host matches when it is
+        # the pinned one or both are this machine's (_same_host): VRChat's address record is
+        # the LAN address, while a two-clients-one-PC pin is 127.0.0.1.
         if self._pinned_target is not None:
             if self._service_rank(name, getattr(info, 'server', None)) != _RANK_VRCHAT:
                 return
             host = _addr_to_ip(info.addresses[0]) if info.addresses else "127.0.0.1"
-            if host != self._pinned_target[0]:
+            if not self._same_host(host, self._pinned_target[0]):
                 return
             try:
                 osc_port = int(self._host_info(host, info.port)["OSC_PORT"])
