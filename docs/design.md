@@ -109,6 +109,24 @@ Two claims about that reference are wrong in the *other* direction and should no
 
 **`time.time()` to microseconds is the row key, and the key — not row order — is the contract.** Both loggers of a two-client run share one machine clock, so cross-log joins need no clock reconciliation. The stamp is taken on the datagram's own thread before the write lock, so under load rows can land out of timestamp order — analysis sorts on the time column. Spacing fidelity is measured only at low rate (§The camera facts: pulse spacing tracked to half a millisecond on a pulse stream); the hundreds-of-rows-per-second regime a measurement avatar produces has not been timed end to end on this logger, so treat sub-millisecond claims there as unpinned until a run measures them. A standalone raw-socket recorder of the same row shape held about 3500 rows/s from the emulator with no dropped frame, so the regime is within a Python socket loop's reach; what this logger's change filter and handler chain add at that rate is the unmeasured part.
 
+## The log file: the rulings, not the mechanism
+
+`logfile` gives the `vrbridge` CLI one file per run holding what the console shows. Only the decisions live here: the name, the bounds and the handler are the module's, and README.md §Logs is the user's account of it.
+
+**The file is the console written down, and it is not a traffic recorder.** One logger level feeds both, set in `cli.main` before the first record, so no line is in one and missing from the other. Do not add a buffer of recent DEBUG records written out on a warning or on request — a ring, a dump op on the external socket. OSC traffic is almost entirely noise, since physbones and contacts write every frame, and the DEBUG sites cover sends and *ignored* receives, never a receive a mapping acted on, so such a buffer would hold a few seconds of the wrong half. What would earn one is an incident the INFO file could not explain, which is also what would say what it has to hold. Recording traffic is §The parameter logger's, by whitelist.
+
+**On by default from the CLI, and attached by nothing else.** The incident comes before the decision to record it, so a file the user must ask for is absent when it is wanted. `VRBridge` takes no log-file argument: the logger is process-wide by name, so a handler owned by one bridge instance would have no lifetime to end with. An embedder calls `attach_log_file`.
+
+**Named by start time and pid, never by OSC port.** Under discovery the target is not known when the first line is written. The pid is what keeps two bridges on one PC apart, as it does for `paramlog.default_path`.
+
+**Flags, not settings, and the bounds stay in source.** Where a run logs is runtime wiring like `--no-steamvr` (§Target selection), and the file has to open before `vrbridge.toml` is read, because an invalid one is what it most needs to record. Retention and the size cap are not feel; `--log-file` is the way out for whoever wants neither. The cap is not a guarantee: Windows refuses the rollover while another process holds the file, and the file then grows until that reader lets go. Do not add a second sink for that case.
+
+**A failure to open the file never stops the bridge, and a failure of the bridge always reaches the file.** `cli.main` logs an unhandled exception before exiting, and installs a `threading.excepthook` that goes through the logger. What still reaches the console alone is everything before the file opens: a router plugin's load warning and argparse's own errors, because the parser's `--router` choices depend on discovery.
+
+**A dropped send warns once per outage.** `OSCManager.send`'s return value is the contract with a caller; its WARNING marks where an outage began, and is re-armed when a target is set rather than on a successful send, so a target that comes and goes unused still counts. A caller's own warning about what a drop cost it — `osc_leash`'s unsent zero, a pulse's trailing zero — is that caller's and stays per event; the size cap is what bounds those.
+
+**The file keeps identifiers the console only showed.** README.md §Logs lists what a log names. An INFO line that newly carries a person's name or id, or an address, belongs in that list in the same change.
+
 ## The warrant criterion
 
 The repo holds a few hundred externally-sourced facts, none derivable from first principles: the OSC addresses come from those products' documentation, the SteamVR action-manifest and binding JSON is a hardware contract discovered against SteamVR's binding UI, and the tuned constants are feel-tuned against real hardware under `runtime.md`'s 90% rule. Do not count them by hand: `tests/test_addresses.py` is the census and pins every address verbatim, and `tests/test_settings.py` pins every tuned default.

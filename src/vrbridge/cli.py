@@ -6,6 +6,7 @@ Starts the bridge, selects a mapping or router, and runs the event loop.
 Usage:
     vrbridge [--log-level INFO] [--log-callbacks] [--router {name}] [--no-steamvr]
              [--osc-port PORT [--osc-host HOST]] [--osc-bind-port PORT] [--no-advertise]
+             [--log-file PATH | --no-log-file]
 
 The three OSC flags take their host/port/bind-port shape from the standalone OSC probe
 this repo is developed alongside, deliberately: both do the same job -- name the ports
@@ -19,11 +20,18 @@ Puppet and UserCamera mappings and keeping MuteProxy always-on.
 from __future__ import annotations
 
 import argparse
+import logging
+import sys
+import threading
 from importlib.metadata import entry_points
+from pathlib import Path
 from typing import Dict, Type
 
+import vrbridge
+from vrbridge.logfile import attach_log_file, default_log_path, prune_logs
 from vrbridge.routers import CameraPrefabRouter, DefaultRouter, MappingRouter
 from vrbridge import VRBridge
+from vrbridge.settings import get_config_path
 from vrbridge.utils import setup_logging
 
 #: Installed packages advertise routers under this entry-point group.
@@ -115,7 +123,8 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging verbosity for VRBridge and mappings. Default: INFO",
+        help=("Logging verbosity for VRBridge and mappings, on the console and in the "
+              "log file alike. Default: INFO"),
     )
 
     parser.add_argument(
@@ -186,7 +195,56 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
         ),
     )
 
+    log_dest = parser.add_mutually_exclusive_group()
+
+    log_dest.add_argument(
+        "--log-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Append this run's log to PATH. Default: a new file per run in logs/ under "
+            "the bridge's base directory (the checkout root in a source install), "
+            "deleted after 14 days."
+        ),
+    )
+
+    log_dest.add_argument(
+        "--no-log-file",
+        action="store_true",
+        help="Log to the console only.",
+    )
+
     return parser
+
+
+def log_file_path(args) -> Path | None:
+    """Where this run logs: the file named, a new per-run file, or None for the console only."""
+    if args.no_log_file:
+        return None
+    if args.log_file is not None:
+        return Path(args.log_file).expanduser()
+    return default_log_path()
+
+
+def _thread_excepthook(previous):
+    """A `threading.excepthook` that goes through the logger, so an exception that kills a
+    worker thread reaches the log file and not only a console nobody may be watching.
+
+    `previous` is the hook this one replaces, and it still runs afterwards if someone
+    installed it. The interpreter's own is not called again: it prints the traceback to
+    stderr, where the logger's console handler has just put it.
+    """
+    def hook(args) -> None:
+        if args.exc_type is not SystemExit:
+            name = args.thread.name if args.thread is not None else "?"
+            # getLogger, not setup_logging: that one sets the level, and would take a
+            # DEBUG run back to INFO the first time a thread died.
+            logging.getLogger("vrbridge").error(
+                "Unhandled exception in thread %s", name,
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        if previous is not threading.__excepthook__:
+            previous(args)
+    return hook
 
 
 def osc_target(args, parser: argparse.ArgumentParser) -> tuple[str, int] | None:
@@ -219,20 +277,54 @@ def main(argv: list[str] | None = None) -> None:
     available = discover_routers()
     parser = build_parser(available)
     args = parser.parse_args(argv)
+    # Resolved before the log file opens, so a refused flag leaves no empty file behind.
+    target = osc_target(args, parser)
 
-    bridge = VRBridge(
-        log_level=args.log_level,
-        enable_steamvr=not args.no_steamvr,
-        log_callbacks=args.log_callbacks,
-        advertise=not args.no_advertise,
-        target=osc_target(args, parser),
-        bind_port=args.osc_bind_port,
-    )
+    # The level holds from the first record, not from VRBridge's constructor: the file
+    # follows --log-level, and a line written before that would be the one exception.
+    log = setup_logging(level=getattr(logging, args.log_level))
+    path = log_file_path(args)
+    if path is not None:
+        try:
+            if args.log_file is None:
+                # Only our own directory: a path the user named is theirs to keep tidy.
+                prune_logs(path.parent)
+            attach_log_file(path)
+        except OSError as exc:
+            # Not fatal. The file is how a run is read afterwards; refusing to start over
+            # it would trade a missing log for a missing bridge.
+            log.warning("Cannot write the log file %s (%s); this run logs to the console "
+                        "only.", path, exc)
+            path = None
+    # What ran, for whoever reads the file later: none of it is in any other line.
+    config = get_config_path()
+    log.info("vrbridge %s | code: %s | settings: %s%s | log file: %s",
+             " ".join(sys.argv[1:] if argv is None else argv) or "(no arguments)",
+             Path(vrbridge.__file__).resolve().parent, config,
+             "" if config.is_file() else " (absent, so defaults)",
+             path if path is not None else "none")
+    threading.excepthook = _thread_excepthook(threading.excepthook)
 
-    # Instantiate via registry
-    router_cls = available[args.router]
-    router = router_cls(bridge)
-    router.run_forever(update_hz=45)
+    try:
+        bridge = VRBridge(
+            log_level=args.log_level,
+            enable_steamvr=not args.no_steamvr,
+            log_callbacks=args.log_callbacks,
+            advertise=not args.no_advertise,
+            target=target,
+            bind_port=args.osc_bind_port,
+        )
+
+        # Instantiate via registry
+        router_cls = available[args.router]
+        router = router_cls(bridge)
+        router.run_forever(update_hz=45)
+    except Exception:
+        # An invalid settings file or an occupied bind port ends the run here, and on a
+        # launch with no console to read, the log file is the only place that can say so.
+        # Exit rather than re-raise: the traceback has already gone to both.
+        log.exception("vrbridge stopped on an unhandled error")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ vrbridge --router camera  # camera-prefab router
 vrbridge --help           # all options
 ```
 
-Options include `--router {name}`, `--log-level`, `--log-callbacks`, and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/` in a source checkout, or under your per-user data directory for an installed package. Set `VRBRIDGE_FILES_DIR` to put them somewhere else.
+Options include `--router {name}`, `--log-level`, `--log-callbacks`, `--log-file PATH` / `--no-log-file` ([Logs](#logs)), and `--no-steamvr` (desktop mode without controller support). On first launch the SteamVR action manifest and default bindings are generated under `steamvr_files/` in a source checkout, or under your per-user data directory for an installed package. Set `VRBRIDGE_FILES_DIR` to put them somewhere else.
 
 By default the bridge discovers VRChat over OSCQuery and sends to the port it advertises. To drive something that announces nothing — Lyuma's Av3Emulator in Unity play mode, for instance — name its ports instead. `--osc-port 9000` sends there and stops discovery from ever taking the target back; `--osc-bind-port 9001` listens on the port such a peer already sends to, since it has no way to learn the free port the bridge would otherwise pick. `--osc-host` sets the host for `--osc-port` and defaults to loopback; it aims sends only, since the bridge always listens on loopback, so a peer named on another machine can be sent to but cannot answer. Use both port flags together: a peer that cannot discover you needs to be told where to send as much as it needs to be sent to. A pinned run still reads OSCQuery from the VRChat client whose advertised OSC port is the pinned one, and still advertises itself, so a running VRChat can still find the bridge and push avatar parameters into it. `--no-advertise` stops that, for two VRChat clients on one PC: launch each with `--osc=inPort:ip:outPort` and give each its own bridge, pinned to that client's ports with `--osc-port`/`--osc-bind-port` and run with `--no-advertise`, so the other client's discovery does not also land here. `--no-advertise` is refused without `--osc-port`, since an unadvertised, unpinned bridge can neither find a client nor be found.
 
@@ -43,6 +43,16 @@ Settings come from `$VRBRIDGE_CONFIG` if it is set, else `vrbridge.toml` at the 
 ```
 python -c "from vrbridge.settings import load_settings, get_config_path; print(get_config_path(), load_settings())"
 ```
+
+## Logs
+
+`vrbridge` writes what it prints to the console into a file as well, so something odd you notice mid-session can be read afterwards instead of reproduced — which matters most when another program launches the bridge and there is no console to scroll back in. Each run gets its own file, `logs/vrbridge_<date>_<time>_<pid>.log`, under the bridge's base directory: the checkout root in a source install, your per-user data directory for an installed package. Its first line names the arguments, the code and settings file in use, and the log file itself; a run that stops on an error, such as an invalid settings file, leaves the traceback there. Files older than 14 days are deleted at the next start.
+
+`--log-file PATH` appends to a file you name instead, and prunes nothing beside it. `--no-log-file` keeps the console only. `vrbridge-paramlog` writes no log file, and neither does a `VRBridge` you build yourself: call `vrbridge.logfile.attach_log_file(path)` if you want one.
+
+The file follows `--log-level`. At the default, INFO, a session is a few kilobytes: discovery, avatar changes, what persistence restored or why not, warnings and errors. It is not a record of OSC traffic. `--log-level DEBUG` adds every message the bridge sends and every one it ignores, which is most of what an avatar emits, so a run's file rolls over at 5 MiB and keeps one older copy (`.log.1`): at DEBUG you get the most recent traffic, not the session. The cap does not hold while another program has the log open: Windows will not let the bridge move a file something else is holding, so it keeps writing to the same file and rolls over once that program lets go. `--log-level WARNING` or higher leaves out the first line too.
+
+**Read a log before you share it.** It names the avatar ids you wore, the world and instance you were in, addresses on your network and the OSCQuery services advertised there, the address of anything that connected to the [external socket](#external-ai-socket), and paths on your PC. Now and then it also quotes a line of VRChat's own log that the roster could not parse, which can carry another player's name.
 
 ## Routers and mappings
 

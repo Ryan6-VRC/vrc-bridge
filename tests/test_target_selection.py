@@ -121,6 +121,36 @@ def test_a_removed_target_is_replaced_rather_than_held():
         assert mgr._client_target == ("127.0.0.1", second.osc_port)
 
 
+def test_a_dropped_send_warns_once_per_outage(caplog):
+    """Intended: with no target, the first dropped send says so at WARNING and the rest are
+    DEBUG, because a pad touched before a client is found drops them at controller rate.
+    Every drop still returns False -- that, not the line, is what a caller mirrors on
+    (`ParamState`). A target that is set and then lost is a new outage and warns again,
+    whether or not anything was sent in between.
+    """
+    import logging
+    log = logging.getLogger("drop-test")
+
+    def lines(level):
+        return [r for r in caplog.records
+                if r.levelno == level and "drop send" in r.getMessage()]
+
+    with FakeVRChat() as vrc, caplog.at_level(logging.DEBUG, logger="drop-test"):
+        mgr = OSCManager(advertise=False, logger=log)
+        assert mgr.send("/avatar/parameters/A", 1) is False
+        assert mgr.send("/avatar/parameters/A", 2) is False
+        assert mgr.send("/avatar/parameters/A", 3) is False
+        assert len(lines(logging.WARNING)) == 1
+        assert len(lines(logging.DEBUG)) == 2
+
+        mgr._consider_service(VRCHAT, service(VRCHAT, vrc.http_port))
+        OSCManager._BrowserListener(mgr).remove_service(None, "_oscjson._tcp.local.", VRCHAT)
+        assert mgr.send("/avatar/parameters/A", 4) is False
+        assert mgr.send("/avatar/parameters/A", 5) is False
+        assert len(lines(logging.WARNING)) == 2
+        assert len(lines(logging.DEBUG)) == 3
+
+
 def test_our_own_advertisement_is_never_targeted():
     """Intended: we browse the same service type we advertise on, so the browser
     hands us our own record; sending our own /input/* to ourselves is never right."""

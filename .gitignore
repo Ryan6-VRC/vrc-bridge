@@ -31,8 +31,9 @@ env/
 .env
 .env.*
 
-# Logs
+# Logs. logs/ is the bridge's own per-run files, whose rollover (.log.1) the glob misses
 *.log
+logs/
 
 # Testing / coverage
 .pytest_cache/
