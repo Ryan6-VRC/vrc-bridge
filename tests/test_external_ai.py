@@ -7,7 +7,8 @@ Intent before test, per `docs/design.md`. The intents the suite holds:
   change is another, and an address outside the subscription never arrives.
 * **Types ride the JSON type, and writes are avatar parameters and the worn avatar only.**
   Anything else is an `error` echoing the request's `id`, and nothing is sent.
-* **Initial state is read by name**, off the worker thread, answering `found` per address.
+* **Initial state is read by name**, off the worker thread, answering `found` per address; the
+  worn avatar's id is read the same way and written only by `change`.
 * **The last will fires in order, once,** on any close and on the bridge stopping.
 * **A malformed request never closes the connection, and a slow client loses its oldest
   events, not its newest,** and is told how many.
@@ -34,6 +35,8 @@ from vrbridge.settings import ExternalAISettings, Settings, set_settings
 from .fake_vrchat import FakeVRChat
 
 P = "/avatar/parameters/"
+AVATAR_CHANGE = "/avatar/change"
+WORN = "avtr_00000000-0000-0000-0000-000000000000"
 STEP = 0.05
 ALICE = "usr_00000000-0000-4000-8000-000000000001"
 BOB = "usr_00000000-0000-4000-8000-000000000002"
@@ -293,6 +296,68 @@ def test_a_get_against_a_pinned_target_names_why(rig):
     c.send({"op": "get", "addresses": ["X"]})
     v = c.until(lambda e: e["ev"] == "value")[-1]
     assert v["found"] is False and v["error"] == "no-peer"
+
+
+def test_get_reads_the_worn_avatar_by_name(rig, vrc):
+    """Intended: a client that connects after the avatar loaded learns the worn id without
+    waiting for a swap, by naming `/avatar/change` in a `get`. The node's id is the `value`; a
+    node that reads null is found with a null `value`, which is no id right now and not a
+    failure; a peer serving no such node is found false with no error. The fake serves the
+    null as `VALUE: [null]`."""
+    r = rig(discovered=True)
+    c, _ = r.client()
+    r.discover()
+    c.until(lambda e: e["ev"] == "target")
+
+    def worn(rid):
+        c.send({"op": "get", "id": rid, "addresses": [AVATAR_CHANGE]})
+        return c.until(lambda e: e["ev"] == "value")[-1]
+
+    vrc.set_node(AVATAR_CHANGE, WORN)
+    v = worn(1)
+    assert (v["address"], v["found"], v["value"], v["id"]) == (AVATAR_CHANGE, True, WORN, 1)
+
+    vrc.set_node(AVATAR_CHANGE, None)
+    v = worn(2)
+    assert v["found"] is True and v["value"] is None and "error" not in v
+
+    vrc.clear_node(AVATAR_CHANGE)
+    v = worn(3)
+    assert v["found"] is False and "value" not in v and "error" not in v
+    assert vrc.messages == [], "a read wrote to the client"
+
+
+@pytest.mark.parametrize("discovered", [False, True])
+def test_a_get_of_the_worn_avatar_names_why_it_could_not_ask(rig, discovered):
+    """Intended: with no VRChat found, and with a pinned target no discovered client backs,
+    there is no node to read; that is an `error` with a `detail`, never a null id."""
+    r = rig(discovered=discovered)
+    c, w = r.client()
+    assert w["pinned"] is not discovered
+    c.send({"op": "get", "id": "g", "addresses": [AVATAR_CHANGE]})
+    v = c.until(lambda e: e["ev"] == "value")[-1]
+    assert v["address"] == AVATAR_CHANGE and v["id"] == "g"
+    assert v["found"] is False and v["error"] == "no-peer" and v["detail"]
+    assert "value" not in v
+
+
+def test_the_worn_avatar_is_read_by_get_and_written_only_by_change(rig, vrc):
+    """Intended: reading `/avatar/change` widens nothing a client can write. `set` and `will`
+    still refuse it, the old will stands, and a wildcard is refused in a `get` too."""
+    r = rig()
+    c, _ = r.client()
+    c.send({"op": "will", "set": [{"address": "A", "value": 1}]})
+    c.send({"op": "set", "id": "s", "address": AVATAR_CHANGE, "value": 1})
+    c.send({"op": "will", "id": "w", "set": [{"address": AVATAR_CHANGE, "value": 1}]})
+    c.send({"op": "get", "id": "g", "addresses": ["/avatar/chang?", "/avatar/*"]})
+    seen = c.sync()
+    assert [(e["op"], e["id"]) for e in errors(seen)] == [
+        ("set", "s"), ("will", "w"), ("get", "g"), ("get", "g")]
+    assert [e for e in seen if e["ev"] == "value"] == []
+    c.close()
+    assert vrc.wait_for_count(1)
+    time.sleep(STEP)
+    assert vrc.messages == [(P + "A", 1)]
 
 
 def test_the_will_fires_in_order_once_on_close_and_on_bridge_stop(rig, vrc):

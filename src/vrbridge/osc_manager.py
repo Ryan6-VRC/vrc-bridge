@@ -846,7 +846,9 @@ class OSCManager:
         the address and wants the value the *worn avatar* currently holds. VRChat serves
         unsynced parameters here at full local precision, and 404s an address no worn
         avatar declares, so a 404 is a legitimate answer about the avatar rather than a
-        failure. Every outcome is named; see the FETCH_* constants.
+        failure. Every outcome is named; see the FETCH_* constants. A VALUE of null is an
+        answer too -- FETCH_OK with a None value -- where a node carrying no VALUE attribute
+        at all is FETCH_MALFORMED.
 
         Blocking, and the caller owns the thread choice. docs/design.md: the OSC datagram
         path tolerates a block, the controller path does not -- and a target-listener

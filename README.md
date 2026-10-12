@@ -251,7 +251,7 @@ Requests:
 ```json
 {"op":"subscribe","params":["Ears/*","/avatar/parameters/Mood"],"controller":["touchpad.short_press"],"avatar":true,"roster":true}
 {"op":"set","id":1,"address":"Mood","value":2}
-{"op":"get","id":2,"addresses":["Mood","Ears/Wiggle"]}
+{"op":"get","id":2,"addresses":["Mood","Ears/Wiggle","/avatar/change"]}
 {"op":"change","id":3,"avatar":"avtr_00000000-0000-0000-0000-000000000000"}
 {"op":"will","set":[{"address":"Mood","value":0},{"address":"Talking","value":false}]}
 {"op":"ping","id":4}
@@ -259,7 +259,7 @@ Requests:
 
 - `subscribe` replaces whatever the connection subscribed to before; a missing key means nothing of that kind. In `params` a bare name is an avatar parameter (`Mood` is `/avatar/parameters/Mood`) and `*`, `?` and `[...]` are wildcards (`*` also crosses `/`). `controller` names event types from `vrbridge.ControllerEventType`; `touchpad.scroll_raw` streams at the controller's poll rate, so ask for it only if you need it. An unknown type name is an error naming it, and the rest of the subscription still applies. `"roster": true` is answered at once with the current roster.
 - `set` writes one avatar parameter. It is answered only if it fails.
-- `get` reads each parameter's current value from VRChat, by name. Use it at startup: the stream only reports *changes*, so a value that has not changed since you connected is never streamed.
+- `get` reads each parameter's current value from VRChat, by name. Use it at startup: the stream only reports *changes*, so a value that has not changed since you connected is never streamed. It reads one address that is not a parameter, `/avatar/change`: the id of the avatar you are wearing, which an `avatar` event tells you only at the next change.
 - `change` asks VRChat to wear an avatar. VRChat only accepts avatars in your favorites, recents, uploads or purchases, and never reports whether a change worked.
 - `will` sets the connection's **last will**: writes the bridge sends, in order, when your connection closes for any reason — you disconnect, your program crashes, the bridge stops. Each will fires once. A new `will` replaces the old one; an empty list clears it.
 - `ping` is answered with `pong`. Requests on one connection are handled in order, so a `pong` means everything you sent before it has been handled.
@@ -279,7 +279,7 @@ Events:
 {"ev":"pong","seq":14,"t":1790000001.0,"id":4}
 ```
 
-- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand that no VRChat client advertising its OSC port backs, which leaves no values to read.
+- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand that no VRChat client advertising its OSC port backs, which leaves no values to read. For `/avatar/change`, `value` is the worn avatar's id; `found` true with a `null` `value` means VRChat has no id to report right now, as while an avatar is loading, so ask again; and an `error` means the same as for a parameter, the bridge could not ask.
 - `target` goes to every connection when the bridge finds VRChat, or finds it again after a restart.
 - `roster` is the whole roster: sent when you subscribe, and again whenever the room changes (you join or leave a world). Between those, `join` and `leave` name one player each.
 - `error` with `"dropped": n` means your program read too slowly and the bridge discarded the `n` oldest events waiting for it, keeping the newest. Read faster, or re-`get` what you care about.
@@ -290,7 +290,7 @@ The JSON type decides the OSC type: `true`/`false` is a Bool, a whole number wri
 
 ### What is refused
 
-Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
+Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. `get` reads the same parameter addresses and `/avatar/change`, and refuses the rest the same way; `set` and `will` refuse `/avatar/change`, which only `change` writes. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
 
 ### Order and repeats
 
