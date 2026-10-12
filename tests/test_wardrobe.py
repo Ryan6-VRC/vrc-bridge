@@ -187,9 +187,9 @@ def test_fetch_reports_a_malformed_node():
 
 
 def test_fetch_carries_a_null_value_as_an_answer():
-    """Intended: a node whose VALUE is null was read, and read null -- the peer has nothing to
-    report at that address just now. That is `ok` with a None value, apart from a node carrying
-    no VALUE at all, which stays malformed. Both spellings of the null are covered."""
+    """Intended: a node whose VALUE is null was read, and read null. That is `ok` with a None
+    value, apart from a node carrying no VALUE at all, which stays malformed. Both spellings of
+    the null are covered."""
     with FakeVRChat() as vrc:
         mgr = OSCManager(advertise=False)
         peer(mgr, vrc)
