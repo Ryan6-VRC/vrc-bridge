@@ -251,7 +251,7 @@ Requests:
 ```json
 {"op":"subscribe","params":["Ears/*","/avatar/parameters/Mood"],"controller":["touchpad.short_press"],"avatar":true,"roster":true}
 {"op":"set","id":1,"address":"Mood","value":2}
-{"op":"get","id":2,"addresses":["Mood","Ears/Wiggle"]}
+{"op":"get","id":2,"addresses":["Mood","Ears/Wiggle","/avatar/change"]}
 {"op":"change","id":3,"avatar":"avtr_00000000-0000-0000-0000-000000000000"}
 {"op":"will","set":[{"address":"Mood","value":0},{"address":"Talking","value":false}]}
 {"op":"ping","id":4}
@@ -259,7 +259,7 @@ Requests:
 
 - `subscribe` replaces whatever the connection subscribed to before; a missing key means nothing of that kind. In `params` a bare name is an avatar parameter (`Mood` is `/avatar/parameters/Mood`) and `*`, `?` and `[...]` are wildcards (`*` also crosses `/`). `controller` names event types from `vrbridge.ControllerEventType`; `touchpad.scroll_raw` streams at the controller's poll rate, so ask for it only if you need it. An unknown type name is an error naming it, and the rest of the subscription still applies. `"roster": true` is answered at once with the current roster.
 - `set` writes one avatar parameter. It is answered only if it fails.
-- `get` reads each parameter's current value from VRChat, by name. Use it at startup: the stream only reports *changes*, so a value that has not changed since you connected is never streamed.
+- `get` reads each parameter's current value from VRChat, by name. Use it at startup: the stream only reports *changes*, so a value that has not changed since you connected is never streamed. It reads one address that is not a parameter, `/avatar/change`: the avatar id VRChat last announced or was last asked to wear, which an `avatar` event tells you only at the next announcement. Once a swap has settled that is the avatar you are wearing. From a `change` request until the swap applies it is already the requested id, ahead of the avatar actually worn, so it is not proof that a swap worked.
 - `change` asks VRChat to wear an avatar. VRChat only accepts avatars in your favorites, recents, uploads or purchases, and never reports whether a change worked.
 - `will` sets the connection's **last will**: writes the bridge sends, in order, when your connection closes for any reason — you disconnect, your program crashes, the bridge stops. Each will fires once. A new `will` replaces the old one; an empty list clears it.
 - `ping` is answered with `pong`. Requests on one connection are handled in order, so a `pong` means everything you sent before it has been handled.
@@ -279,7 +279,8 @@ Events:
 {"ev":"pong","seq":14,"t":1790000001.0,"id":4}
 ```
 
-- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the bridge could not ask — no VRChat found yet, or a target set by hand that no VRChat client advertising its OSC port backs, which leaves no values to read.
+- `value` answers `get`: `found` is false with no `error` when the worn avatar has no such parameter, and false with an `error` (and a `detail`) when the read got no usable answer. The `error` names why: `no-peer` and `peer-gone` mean there was nobody to ask — no VRChat found yet, a target set by hand that no VRChat client advertising its OSC port backs, or a VRChat that has since gone — `transport` means the request failed or timed out, and `malformed` means the peer answered with something that is not a value. For `/avatar/change`, `found` false with no `error` means VRChat is serving no id right now, which it does for a second or two while an avatar loads, so ask again; a peer that is not a VRChat client answers the same way.
+- `avatar` forwards each `/avatar/change` VRChat announces, and its `id` is the id announced, not proof of what is worn. VRChat echoes a `change` request's id back at once, whether or not the swap will work, and announces a swap that lands a second time when the avatar is applied, so a swap you request arrives as two `avatar` events with one id.
 - `target` goes to every connection when the bridge finds VRChat, or finds it again after a restart.
 - `roster` is the whole roster: sent when you subscribe, and again whenever the room changes (you join or leave a world). Between those, `join` and `leave` name one player each.
 - `error` with `"dropped": n` means your program read too slowly and the bridge discarded the `n` oldest events waiting for it, keeping the newest. Read faster, or re-`get` what you care about.
@@ -290,7 +291,7 @@ The JSON type decides the OSC type: `true`/`false` is a Bool, a whole number wri
 
 ### What is refused
 
-Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
+Writes reach avatar parameters (`/avatar/parameters/...`) and the worn avatar (`change`), nothing else: `/input/*`, `/chatbox/*`, `/tracking/*` and other addresses are errors, and so is a wildcard in a write address. `get` reads the same parameter addresses and `/avatar/change`, and refuses the rest the same way; `set` and `will` refuse `/avatar/change`, which only `change` writes. A line that is not a JSON object, or an unknown `op`, is an error too, and the connection stays open. A request line over 1 MiB is the one thing that closes the connection, after an error naming the limit.
 
 ### Order and repeats
 

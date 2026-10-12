@@ -23,7 +23,8 @@ Client -> bridge:
   `touchpad.scroll_raw` streams at the controller poll rate and, like every type, arrives only
   when named.
 * `set` -- `address` (bare name or `/avatar/parameters/...`), `value`. Answered only on failure.
-* `get` -- `addresses` (list, the `set` address rule). One `value` event per address.
+* `get` -- `addresses` (list; each the `set` address rule, or `/avatar/change` for the avatar id
+  the client last announced or was asked for). One `value` event per address.
 * `change` -- `avatar` (an `avtr_` id), sent to `/avatar/change`. Answered only on failure.
 * `will` -- `set` (list of `{address, value}`, each validated as `set`; one bad entry refuses the
   whole list and leaves the old will standing). Replaces the connection's last will.
@@ -31,10 +32,15 @@ Client -> bridge:
 
 Bridge -> client: `welcome` (`version`, `target: {host, port} | null`, `pinned`), `param`
 (`address`, `name` -- the part after `/avatar/parameters/`, else null -- and `value`), `value`
-(`address`, `found`, and `value` when found or `error` and `detail` when the read failed other
-than by a 404), `controller` (`type`, `hand`, `steps`, `dx`, `dy`, `ax`, `ay`, `when`, null where
-the event carries none), `avatar` (`id`), `target` (`host`, `port`, to every connection), `roster`
-(the `roster.Roster.snapshot()` fields: `self`, `world`, `joined`, `players`), `join` / `leave`
+(`address`, `found`, and `value` when found; when not, nothing more for a 404, else `error` --
+the `fetch` reason: `no-peer` or `peer-gone` for nobody to ask, `transport` for a request that
+failed, `malformed` for a peer that answered with an unusable node -- and `detail`. On
+`/avatar/change` a 404 is the client serving no such node, as it does while an avatar loads, or
+a peer that is not a VRChat client), `controller` (`type`, `hand`, `steps`, `dx`, `dy`, `ax`,
+`ay`, `when`, null where the event carries none), `avatar` (`id`: each `/avatar/change`
+announcement forwarded, a request's echo included, so a requested swap that lands is two events
+with one id), `target` (`host`, `port`, to every connection), `roster` (the
+`roster.Roster.snapshot()` fields: `self`, `world`, `joined`, `players`), `join` / `leave`
 (`player: {id, name}`), `error` (`op`, `message`, `id` when the request carried one, `dropped`
 for a queue overflow), `pong`.
 
@@ -55,6 +61,10 @@ for a queue overflow), `pong`.
   writes meant; the last will is the one generic hook, fired in order when the connection closes
   for any reason and from `on_stop` while OSC can still send, at most once.
 * **Initial state is read by name** (`get`, one OSCQuery node per address), never a subtree.
+  `get` also reads `/avatar/change`'s node, since the `avatar` event reports only an
+  announcement. Node and event both carry the id the client last announced or was asked for,
+  which leads the worn avatar from a request until the apply and is no proof a swap applied.
+  `set` and `will` still refuse that address.
 * **One wildcard watch, filtered per connection.** `VRBridge` callbacks cannot be removed, so a
   registration per subscription would accumulate across reconnects. A named shape of traffic is
   not enumeration, so the parameter-discovery descope holds.
@@ -130,7 +140,7 @@ class _Refused(Exception):
 
 
 def write_address(spec: Any) -> str:
-    """A `set`/`get`/`will` address: a bare name or `/avatar/parameters/<name>`, no wildcard."""
+    """A `set`/`will` address: a bare name or `/avatar/parameters/<name>`, no wildcard."""
     if not isinstance(spec, str) or not spec:
         raise _Refused(f"address must be a non-empty string, got {spec!r}")
     if any(ch in spec for ch in _GLOB_CHARS):
@@ -140,6 +150,11 @@ def write_address(spec: Any) -> str:
         raise _Refused(f"address {spec!r} is not an avatar parameter; only "
                        f"{PARAMS_PREFIX}<name> and the worn avatar can be written")
     return address
+
+
+def read_address(spec: Any) -> str:
+    """A `get` address: what `write_address` takes, or `/avatar/change` itself."""
+    return spec if spec == AVATAR_CHANGE_ADDR else write_address(spec)
 
 
 def osc_value(value: Any):
@@ -568,7 +583,7 @@ class ExternalAIMapping(Mapping):
             raise _Refused("addresses must be a list")
         for spec in specs:
             try:
-                address = write_address(spec)
+                address = read_address(spec)
             except _Refused as e:
                 conn.error("get", str(e), rid, has_id)
                 continue

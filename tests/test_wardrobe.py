@@ -186,6 +186,21 @@ def test_fetch_reports_a_malformed_node():
         assert mgr.fetch(MARKER_ADDR).reason == FETCH_MALFORMED
 
 
+def test_fetch_carries_a_null_value_as_an_answer():
+    """Intended: a node whose VALUE is null was read, and read null. That is `ok` with a None
+    value, apart from a node carrying no VALUE at all, which stays malformed. Both spellings of
+    the null are covered."""
+    with FakeVRChat() as vrc:
+        mgr = OSCManager(advertise=False)
+        peer(mgr, vrc)
+        vrc.set_node(MARKER_ADDR, None)          # served as "VALUE": [null]
+        r = mgr.fetch(MARKER_ADDR)
+        assert r.ok and r.value is None
+        vrc.node_garbage = '{"FULL_PATH": "/x", "VALUE": null}'
+        r = mgr.fetch(MARKER_ADDR)
+        assert r.ok and r.value is None
+
+
 def test_fetch_percent_encodes_the_address():
     """Intended: the address is data, not URL syntax.
 
