@@ -105,14 +105,15 @@ class ClientLogFile:
 
     def switch(self, kind, worn, before=None, instance="1"):
         """One local avatar load as the log shows it. `kind`: calibration, reset, join (into
-        `instance`), swap (from `before`), or none (no signature at all)."""
+        `instance`), swap (from `before`), reswap (a swap to an avatar this session has loaded
+        before, whose id the client does not write again), or none (no signature at all)."""
         if kind == "join":
             self.write("[Behaviour] OnLeftRoom")
             self.room(instance)
         self.write(f"[Behaviour] Switching {ME} to avatar Some Avatar")
         if kind == "calibration":
             self.write(f"Saving Avatar Data:{worn}")
-        elif kind == "swap":
+        elif kind in ("swap", "reswap"):
             self.write(f"Saving Avatar Data:{before}")
         self.write("[Behaviour] Initialize Limb Avatar VRCPlayer[Local] 2 True 1",
                    "Measure Human Avatar Avatar isRemeasure:True")   # the placeholder's
@@ -1558,3 +1559,418 @@ def test_a_pinned_bridge_binds_its_client_log_when_its_peer_is_found(rig):
     assert wait_for(lambda: r.m._tailer.rule == "service"), \
         "persistence's log stayed bound by newest after the pinned client was found"
     assert r.bridge.osc.current_target == pinned
+
+
+# --------------------------------------------------------------------------
+# Reserved words the stream did not deliver
+# --------------------------------------------------------------------------
+
+ROOT = NAMESPACE_ROOT.rstrip("/")
+# Past the bind window, so one load's switch in the log is never the next change's.
+UNBOUND = max(REPEAT_GAP, osc_persist.LOG_BIND_SECS + 0.3)
+
+
+# Past the shortened ADOPT_AFTER_SECS and several reconcile reads.
+ADOPTED = 1.0
+
+
+@pytest.fixture
+def fast_adopt(monkeypatch, fast_reconcile):
+    monkeypatch.setattr(osc_persist, "ADOPT_AFTER_SECS", 0.3)
+
+
+def lost_boot_load(r, avatar_id, ns="GripSync", *, log="swap", before=None, announce=5,
+                   scope=None, tree_announce=5, **tree):
+    """A load whose Boot the client never sent: the announcement and the log's switch as usual,
+    the Announce row unless `announce` is None, and the tree holding what the avatar wrote --
+    the Boot it drew, its Announce, and `tree` as its payload."""
+    r.change(avatar_id, log, **({"before": before} if before else {}))
+    if announce is not None:
+        r.vrc.emit(addr(ns, "Announce"), announce)
+    if scope is not None:
+        r.vrc.emit(addr(ns, "Scope"), scope)
+    r.boots[ns] = random.uniform(0.001, 1.0)
+    r.holds(ns, Announce=tree_announce, **tree)
+    time.sleep(STEP)
+
+
+def probed(r):
+    """The root read for the last change is done."""
+    return wait_for(lambda: r.m._probed_at == r.m._change_at)
+
+
+def found(r, service=SERVICE):
+    """A pinned bridge finds the client holding its port, as discovery does."""
+    name = f"{service}._oscjson._tcp.local."
+    r.bridge.osc._consider_service(name, ServiceInfo(
+        "_oscjson._tcp.local.", name, addresses=[bytes([127, 0, 0, 1])],
+        port=r.vrc.http_port, properties={}, server="h.local."))
+    assert wait_for(lambda: r.m._client_log.rule == "service")
+
+
+def test_a_first_load_whose_boot_never_arrived_is_adopted_from_the_tree(rig, fast_adopt):
+    """Intended: under inbound load the client drops single rows around an avatar load and never
+    re-sends a value that stands, while its tree keeps it. Measured live, a namespace's first
+    load delivered no Boot and the next swap restored nothing. The bridge handled that load's
+    announcement and the client's log shows the announced id loading, so the Boot in the tree is
+    that load's: the next swap has to restore, from the tree's values."""
+    r = rig(tree=True)
+    watch_log(r)
+    lost_boot_load(r, A, log="join", Word0=137.0, Detached=True)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0, "Detached": True}
+
+
+def test_the_swap_after_a_lost_boot_restores_that_loads_state_not_the_one_before(rig, fast_adopt):
+    """Intended: on a namespace already booted, a load whose Boot is lost keeps the load before
+    it in the bookkeeping: the next swap read as two changes and forgot, and from Scope 1 it
+    restored the state of two loads back. Adopted, the next swap restores the lost load's own
+    state, which only its tree holds."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.set("GripSync", "Word0", 137.0)
+    r.holds("GripSync", Word0=137.0, Detached=True)
+    time.sleep(UNBOUND)
+    lost_boot_load(r, A2, before=A, Word0=5.0, Detached=False)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.vrc.messages.clear()
+    r.load(A, "GripSync", log="swap", before=A2)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 5.0, "Detached": False}
+
+
+def test_a_lost_boot_on_an_avatar_already_loaded_this_session_is_adopted(rig, fast_adopt):
+    """Intended: measured live, the client's log names the incoming avatar's id only on that
+    avatar's first load of a session; every later load writes the outgoing avatar's save and
+    nothing of the incoming one. Most swaps are to an avatar already loaded, so an adoption that
+    waited for the log to name the announced id would refuse nearly all of them."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.holds("GripSync", Word0=137.0)
+    time.sleep(UNBOUND)
+    lost_boot_load(r, A2, log="reswap", before=A, Word0=5.0)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.vrc.messages.clear()
+    r.load(A, "GripSync", log="reswap", before=A2)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 5.0}
+
+
+def test_only_the_namespace_that_lost_its_boot_is_adopted_even_one_never_heard(rig, fast_adopt):
+    """Intended: two namespaces on one avatar boot independently, and a namespace whose every
+    row was lost has no name on the wire at all. One read of the root after the change finds it;
+    the neighbour whose Boot arrived is left to its own exchange."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.change(A, "join")
+    r.boot("GripSync")
+    r.holds("GripSync", Word0=1.0)
+    r.boots["Other"] = 0.4242
+    r.holds("Other", Announce=5, Word0=2.0)             # Other: nothing reached the stream
+    assert decided(r, "BridgePersist/Other: no Boot arrived for this load")
+    assert not said(r, "BridgePersist/GripSync: no Boot arrived")
+    time.sleep(UNBOUND)
+    r.load(A2, "GripSync", "Other", log="swap", before=A)
+    assert wait_for(lambda: r.restores("GripSync") == [1] and r.restores("Other") == [1])
+    assert r.placed_from("Other") == {"Word0": 2.0}
+    assert r.placed_from("GripSync") == {"Word0": 1.0}
+
+
+def test_an_adopted_namespace_takes_the_trees_announce_not_the_outgoing_avatars(rig, fast_adopt):
+    """Intended: only the incoming avatar's own Announce speaks for it. A load that lost its
+    Announce with its Boot must be adopted under the identity its tree holds; left standing, the
+    outgoing avatar's would match the next avatar's and put one prefab's state on another."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.set("GripSync", "Word0", 137.0)
+    r.holds("GripSync", Word0=137.0)
+    time.sleep(UNBOUND)
+    lost_boot_load(r, B, before=A, announce=None, tree_announce=7, Word0=3.0)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.load(A2, "GripSync", log="swap", before=B)
+    assert decided(r, "Announce changed from 7 to 5")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+
+
+def test_reset_avatar_after_an_adoption_still_forgets(rig, fast_adopt):
+    """Intended: adoption records the announced id as worn, as a Boot on the wire does, so a
+    reload of that id is still a reload. Recorded wrong, Reset Avatar reads as one swap and
+    restores, which the lifetime rule forbids."""
+    r = rig(tree=True)
+    watch_log(r)
+    lost_boot_load(r, A, log="join", Word0=137.0)
+    assert decided(r, "adopted the one the client's tree holds")
+    time.sleep(UNBOUND)
+    r.load(A, "GripSync", log="reset")
+    assert decided(r, "a reload of the worn avatar")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+
+
+def test_an_adoption_records_no_room_so_a_later_join_is_never_a_rejoin(rig, fast_adopt):
+    """Intended: adoption runs seconds after its load, by when the client's log can already
+    name the next instance. Recorded as the namespace's room, that instance's own join would read
+    as a rejoin of the same one and restore across an instance change. So adoption records no
+    room, and the next decision runs Scope 0's rule."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=1, Word0=137.0)
+    r.holds("GripSync", Word0=137.0)
+    lost_boot_load(r, A2, before=A, scope=1, Word0=137.0)
+    r.client_log.write("[Behaviour] OnLeftRoom")
+    r.client_log.room("2")                              # leaving, before the adoption
+    assert decided(r, "adopted the one the client's tree holds")
+    time.sleep(UNBOUND)
+    r.load(A2, "GripSync", scope=1, log="join", instance="2")
+    assert decided(r, "falling back to Scope 0's rule")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
+
+
+def test_a_boot_the_log_cannot_attribute_is_not_adopted(rig, fast_adopt):
+    """Intended: a Boot found only in the tree is some load's, and only the client's log says
+    whether it is the load this bridge last heard announced. With no load in the log at that
+    change -- a bridge started after the avatar loaded is the same case -- the namespace stays
+    unbooted and the next swap restores nothing, and the refusal is logged so a dropped row never
+    reads as none dropped."""
+    r = rig(tree=True)
+    watch_log(r)
+    lost_boot_load(r, A, log=None, Word0=137.0)
+    assert decided(r, "shows no avatar load at the last /avatar/change")
+    assert not r.m._ns["GripSync"].baselined
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert decided(r, "has not seen the namespace boot before")
+    assert r.restores("GripSync") == []
+
+
+def test_an_echo_inside_a_real_loads_bind_window_is_not_recorded_as_worn(rig, fast_adopt):
+    """Intended: a load in the log within the bind window of the last change does not prove that
+    change was the load. An echo of a rejected request lands the same way, and adopted under it
+    the rejected id would be recorded as worn, so Reset Avatar would read as one swap. The log's
+    log cannot name the avatar that loaded, so two ids announced beside one load adopt nothing."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.holds("GripSync", Word0=137.0)
+    time.sleep(UNBOUND)
+    booted = r.m._ns["GripSync"].last_boot
+    lost_boot_load(r, A2, before=A, Word0=5.0)
+    r.change(UNWEARABLE)                                # an echo; nothing loads
+    assert decided(r, "2 avatar ids were announced within")
+    assert r.m._ns["GripSync"].last_boot == booted
+
+
+def test_a_log_not_chosen_by_service_name_adopts_nothing(rig, fast_adopt):
+    """Intended: a reload is classified only by a log proven to be this client's, and an adoption
+    stands on the same proof."""
+    r = rig(tree=True)
+    watch_log(r)
+    with r.m._lock:
+        r.m._client_log.rule = "newest"
+    lost_boot_load(r, A, log="join", Word0=137.0)
+    assert decided(r, "was not chosen by this client's OSCQuery service name")
+    assert not r.m._ns["GripSync"].baselined
+
+
+def test_a_tree_boot_with_no_change_since_the_last_boot_is_not_adopted(rig, fast_adopt):
+    """Intended: a namespace that has booted since the last change owes that change nothing
+    more. A different Boot in the tree is then a load this bridge heard no announcement for, and
+    its values cannot be attributed."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.boots["GripSync"] = 0.4242
+    r.holds("GripSync", Word0=9.0)                      # the tree: some other load's Boot
+    r.load(A, "GripSync", log="join")
+    booted = r.boots["GripSync"]
+    assert decided(r, "no /avatar/change arrived since the namespace's last Boot")
+    assert osc_persist._same_f32(r.m._ns["GripSync"].last_boot, booted)
+
+
+def test_a_namespace_whose_tree_holds_no_boot_is_never_created(rig, fast_adopt):
+    """Intended: the declared 0.0 is not a boot in the tree either, and a namespace the worn
+    avatar declares with persistence off must leave nothing behind."""
+    r = rig(tree=True)
+    r.vrc.set_node(addr("Other", "Boot"), 0.0)
+    r.vrc.set_node(addr("Other", "Word0"), 2.0)
+    r.change(A, "join")
+    assert probed(r)
+    assert "Other" not in r.m._ns
+
+
+def test_the_root_is_read_once_per_avatar_change(rig, fast_adopt):
+    """Intended: the read exists to find a Boot one load lost, so it costs one GET per avatar
+    change and nothing between changes. An avatar with no namespace has no Boot under the root,
+    as a 404 or as an emptied container, and either is an answer. A body that is not the tree is
+    not, and is asked for again."""
+    r = rig(tree=True)
+    r.change(B)
+    time.sleep(0.15)
+    assert r.vrc.node_gets.count(ROOT) == 0, "read before the change was old enough"
+    assert probed(r)
+    time.sleep(RECONCILED)
+    assert r.vrc.node_gets.count(ROOT) == 1
+
+    r.vrc.node_garbage = "not a tree"
+    r.change(A)
+    assert wait_for(lambda: r.vrc.node_gets.count(ROOT) >= 3), "a malformed read was not retried"
+    assert r.m._probed_at != r.m._change_at
+    r.vrc.node_garbage = None
+    assert probed(r)
+
+
+def test_the_wire_boot_arriving_after_its_adoption_is_a_repeat(rig, fast_adopt):
+    """Intended: an adopted Boot is the tree's rendering of the float the avatar drew, and the
+    wire's copy of it, arriving late, is the same boot. Compared exactly the two differ, the late
+    copy reads as a second load, and its decision forgets what the adoption kept."""
+    r = rig(tree=True)
+    watch_log(r)
+    lost_boot_load(r, A, log="join", Word0=137.0)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.m.log.reset_mock()
+    r.vrc.emit(addr("GripSync", "Boot"), r.boots["GripSync"])
+    time.sleep(DECIDED)
+    assert not said(r, "booted")
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync")
+
+
+def test_adoption_on_a_pinned_bridge_whose_client_was_found(rig, fast_adopt):
+    """Intended: a pin fixes where the bridge sends, not what it can read. Once the client on
+    the pinned port is found there is a tree and a log chosen by its service name, and a lost
+    Boot is adopted as under discovery."""
+    r = rig()
+    found(r)
+    watch_log(r)
+    lost_boot_load(r, A, log="join", Word0=137.0)
+    assert decided(r, "adopted the one the client's tree holds")
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+
+
+def boot_without_announce(r, avatar_id, ns="GripSync", *, before, tree_announce=5,
+                          tree_boot=None, **tree):
+    """A load whose Announce the client never sent: its Boot arrives, and the tree holds both."""
+    r.change(avatar_id, "swap", before=before)
+    r.boots[ns] = random.uniform(0.001, 1.0)
+    r.holds(ns, boot=tree_boot, Announce=tree_announce, **tree)
+    r.vrc.emit(addr(ns, "Boot"), r.boots[ns])
+    time.sleep(STEP)
+
+
+@pytest.mark.parametrize("tree_announce, tree_boot, why", [
+    (5, None, None),
+    (7, None, "Announce changed from 5 to 7"),
+    (5, 0.4242, "no Announce arrived from the incoming avatar"),
+], ids=["same-prefab", "another-prefab", "another-loads-tree"])
+def test_an_announce_the_stream_lost_is_read_from_the_tree(rig, tree_announce, tree_boot, why):
+    """Intended: measured live, a load delivered its Boot and not its Announce, and the swap
+    forgot. The tree under that same Boot holds the incoming avatar's own Announce, written in
+    the state that wrote the Boot, so the load restores when it matches. A different identity
+    still forgets, and a tree under any other Boot is not this load's and says nothing."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.set("GripSync", "Word0", 137.0)
+    time.sleep(UNBOUND)
+    r.m.log.reset_mock()
+    boot_without_announce(r, A2, before=A, tree_announce=tree_announce, tree_boot=tree_boot)
+    if why is None:
+        assert r.completed("GripSync")
+        assert r.placed_from("GripSync") == {"Word0": 137.0}
+        assert said(r, "read Announce 5 from the client's tree")
+    else:
+        assert decided(r, why)
+        time.sleep(QUIET)
+        assert r.restores("GripSync") == []
+
+
+def test_an_announce_lost_on_a_first_boot_is_read_for_the_next_swap(rig):
+    """Intended: a namespace's first boot restores nothing whatever it announces, but its
+    Announce is what the next swap's is matched against. Lost and never read, the next swap
+    forgets as a change of prefab from None."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.change(A, "join")
+    r.boots["GripSync"] = random.uniform(0.001, 1.0)
+    r.holds("GripSync", Announce=5)
+    r.vrc.emit(addr("GripSync", "Boot"), r.boots["GripSync"])     # its Announce never arrives
+    assert decided(r, "has not seen the namespace boot before")
+    r.set("GripSync", "Word0", 137.0)
+    time.sleep(UNBOUND)
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+
+
+def test_a_new_target_forgets_the_old_clients_announcements(rig, fast_adopt):
+    """Intended: an adoption attributes a Boot in the tree to the last /avatar/change, and after
+    a newly selected target that change was another client's. A load of the new client's that
+    lost its own announcement and its Boot, landing beside the old one, must not be adopted
+    under the old client's id."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.change(B)                                         # the old client's last announcement
+    r.bridge._on_target_selected(("127.0.0.1", r.vrc.osc_port))
+    assert wait_for(lambda: r.m._client_log.rule == "service")
+    r.client_log.switch("join", A)                      # the new client loads; nothing arrives
+    r.boots["GripSync"] = 0.4242
+    r.holds("GripSync", Announce=5, Word0=137.0)
+    time.sleep(ADOPTED)
+    assert not said(r, "adopted the one the client's tree holds")
+    assert "GripSync" not in r.m._ns
+
+
+def test_a_scope_lost_with_its_announce_is_read_in_the_same_tree_read(rig):
+    """Intended: Scope is written in the Boot state too, so the read that fetches a lost
+    Announce carries it. A Scope-1 chain whose last load lost both restores, as its avatar
+    declared."""
+    r = rig(tree=True)
+    watch_log(r)
+    worn_in_vr(r, scope=1, Word0=137.0)
+    r.change(B, log="swap", before=A)
+    time.sleep(UNBOUND)
+    boot_without_announce(r, A2, before=B, Scope=1)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+    assert said(r, "read Announce 5 and Scope 1 from the client's tree")
+
+
+def test_an_avatar_change_during_the_announce_read_writes_nothing(rig, monkeypatch):
+    """Intended: the read for a lost Announce runs off the lock, and the avatar can change under
+    it. The decision is still the exchange in flight then, so the change abandons it, and the
+    read's answer, about an avatar already gone, writes nothing."""
+    monkeypatch.setattr(osc_persist, "RECONCILE_SECS", 30.0)    # only the decision reads
+    r = rig(tree=True)
+    watch_log(r)
+    r.load(A, "GripSync", log="join")
+    r.set("GripSync", "Word0", 137.0)
+    time.sleep(UNBOUND)
+    gate = r.vrc.hold_next_node_get()
+    boot_without_announce(r, A2, before=A)
+    assert gate.wait_until_parked(), "the decision never read the tree"
+    r.change(B)
+    gate.release()
+    time.sleep(DECIDED)
+    assert said(r, "an avatar change during the exchange; abandoning it")
+    assert r.restores("GripSync") == [] and r.written("GripSync", "Word0") == []
+
+
+def test_a_boot_with_no_avatar_change_says_the_announcement_is_missing(rig):
+    """Intended: measured live, a reload reached the bridge as a Boot with no /avatar/change
+    before it and was forgotten under a reason about Announce. Nothing was checkpointed for it,
+    so it still forgets, and says why."""
+    r = rig()
+    watch_log(r)
+    worn_a_with(r, Word0=137.0)
+    time.sleep(REPEAT_GAP)
+    r.boot("GripSync")
+    assert decided(r, "with no /avatar/change since its last one")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == []
