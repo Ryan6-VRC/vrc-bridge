@@ -1570,6 +1570,10 @@ ROOT = NAMESPACE_ROOT.rstrip("/")
 UNBOUND = max(REPEAT_GAP, osc_persist.LOG_BIND_SECS + 0.3)
 
 
+# Past the shortened ADOPT_AFTER_SECS and several reconcile reads.
+ADOPTED = 1.0
+
+
 @pytest.fixture
 def fast_adopt(monkeypatch, fast_reconcile):
     monkeypatch.setattr(osc_persist, "ADOPT_AFTER_SECS", 0.3)
@@ -1885,6 +1889,42 @@ def test_an_announce_the_stream_lost_is_read_from_the_tree(rig, tree_announce, t
         assert decided(r, why)
         time.sleep(QUIET)
         assert r.restores("GripSync") == []
+
+
+def test_an_announce_lost_on_a_first_boot_is_read_for_the_next_swap(rig):
+    """Intended: a namespace's first boot restores nothing whatever it announces, but its
+    Announce is what the next swap's is matched against. Lost and never read, the next swap
+    forgets as a change of prefab from None."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.change(A, "join")
+    r.boots["GripSync"] = random.uniform(0.001, 1.0)
+    r.holds("GripSync", Announce=5)
+    r.vrc.emit(addr("GripSync", "Boot"), r.boots["GripSync"])     # its Announce never arrives
+    assert decided(r, "has not seen the namespace boot before")
+    r.set("GripSync", "Word0", 137.0)
+    time.sleep(UNBOUND)
+    r.load(A2, "GripSync", log="swap", before=A)
+    assert r.completed("GripSync"), r.restores("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 137.0}
+
+
+def test_a_new_target_forgets_the_old_clients_announcements(rig, fast_adopt):
+    """Intended: an adoption attributes a Boot in the tree to the last /avatar/change, and after
+    a newly selected target that change was another client's. A load of the new client's that
+    lost its own announcement and its Boot, landing beside the old one, must not be adopted
+    under the old client's id."""
+    r = rig(tree=True)
+    watch_log(r)
+    r.change(B)                                         # the old client's last announcement
+    r.bridge._on_target_selected(("127.0.0.1", r.vrc.osc_port))
+    assert wait_for(lambda: r.m._client_log.rule == "service")
+    r.client_log.switch("join", A)                      # the new client loads; nothing arrives
+    r.boots["GripSync"] = 0.4242
+    r.holds("GripSync", Announce=5, Word0=137.0)
+    time.sleep(ADOPTED)
+    assert not said(r, "adopted the one the client's tree holds")
+    assert "GripSync" not in r.m._ns
 
 
 def test_a_scope_lost_with_its_announce_is_read_in_the_same_tree_read(rig):

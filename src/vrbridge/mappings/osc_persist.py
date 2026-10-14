@@ -74,12 +74,13 @@ since the namespace last booted; and the client's room at its last decision.
   `/avatar/change` equal to the checkpoint's, and that value a non-zero int. The arrival mark is
   what stops an avatar that sends no `Announce` from being matched against the outgoing avatar's
   value, which is still standing. The client drops single rows around a load when inbound
-  traffic is heavy and never re-sends a value that stands, so a decision that would forget
-  only because no `Announce` arrived first reads the namespace from the client's tree, once and
-  off the lock with its token still set, and takes the `Announce` there, and a `Scope` of 1 or
-  2 with it, when the tree's `Boot` is the one being decided. The avatar writes all three in
-  one state, so under that `Boot` they are the incoming avatar's own. A `Scope` row lost alone
-  is not read for, and counts as 0.
+  traffic is heavy and never re-sends a value that stands, so a decision about to forget with
+  no `Announce` arrived first reads the namespace from the client's tree, once and off the lock
+  with its token still set, and takes the `Announce` there, and a `Scope` of 1 or 2 with it,
+  when the tree's `Boot` is the one being decided. The avatar writes all three in one state, so
+  under that `Boot` they are the incoming avatar's own. A first boot reads it too, though it
+  restores nothing: the next swap is matched against it. A `Scope` row lost alone is not read
+  for, and counts as 0.
 * A `Boot` with no `/avatar/change` since the namespace's last one forgets, whatever it
   announces: nothing was checkpointed for it, so the values kept cannot be told from the
   incoming avatar's.
@@ -651,9 +652,13 @@ class BridgePersistMapping(Mapping):
                 self.log.info("OSC target selected (%s:%d): a join, so every BridgePersist "
                               "namespace is cleared.", target[0], target[1])
             self._ns.clear()
-            # The previous client's headset and log say nothing about this one's.
+            # The previous client's headset and log say nothing about this one's, and nor do
+            # its announcements: a load of this client's must never bind to one of them.
             self.bridge.osc.forget(VRMODE_ADDR)
             self._client_log.reset(None, None, None)
+            self._changes.clear()
+            self._change_at = self._probed_at = float("-inf")
+            self._late_watch = False
         self._tailer.retarget(log_service_name(self.bridge.osc.current_service_name))
 
     def _on_peer(self, name: str) -> None:
@@ -875,8 +880,10 @@ class BridgePersistMapping(Mapping):
             if verdict is _PENDING:
                 self._arm_locked(ns, LOG_POLL_SECS, self._decide, at_boot)
                 return False
-            if (verdict[0] is None and at_boot.baselined and at_boot.checkpoint is not None
-                    and not ns.announce_arrived and not at_boot.tree_read):
+            # Not for a Boot with no change before it, which forgets whatever it announces. A
+            # first boot forgets too, but the next swap is matched against its Announce.
+            if (verdict[0] is None and not ns.announce_arrived and not at_boot.tree_read
+                    and (at_boot.checkpoint is not None or not at_boot.baselined)):
                 return True
             ns.token, ns.timer = 0, None
             how, why = verdict
@@ -887,17 +894,17 @@ class BridgePersistMapping(Mapping):
             if how is None:
                 self.log.info("BridgePersist/%s booted (%s); nothing to restore: %s.", name,
                               scope, why)
-                return
+                return False
             if not self.enabled:
                 self.log.info("BridgePersist/%s booted (%s) with a valid snapshot, but the "
                               "mapping is disabled; not restoring.", name, scope)
-                return
+                return False
             elapsed = time.monotonic() - at_boot.arrived
             if elapsed > LATE_LIMIT_SECS:
                 self.log.warning("BridgePersist/%s: the decision ran %.3f s after Boot, past the "
                                  "%.3f s limit; dropping the snapshot unwritten, so the avatar "
                                  "boots from defaults.", name, elapsed, LATE_LIMIT_SECS)
-                return
+                return False
             snapshot = at_boot.checkpoint
             ok = True
             for addr, v in snapshot.items():
@@ -905,7 +912,7 @@ class BridgePersistMapping(Mapping):
             if not ok:
                 self.log.warning("BridgePersist/%s: a payload write was dropped; withholding "
                                  "Restore=1, so the avatar boots from defaults.", name)
-                return
+                return False
             self.log.info("BridgePersist/%s booted (%s); restoring %d value(s): %s.", name, scope,
                           len(snapshot), why)
             calibration = how is CALIBRATION
@@ -913,6 +920,7 @@ class BridgePersistMapping(Mapping):
                 ns.reload = sw
             ns.token = token
             self._arm_locked(ns, WRITE_SETTLE_SECS, self._write_restored, calibration)
+            return False
 
     def _note_log_locked(self, ns: _Namespace, at: _AtBoot, sw: Optional[_Switch]) -> None:
         """What the log showed for a reload: its timing always, and once per replay a VR reload
