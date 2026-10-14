@@ -2,8 +2,9 @@
 
 An avatar publishes state under `/avatar/parameters/BridgePersist/<Name>/`, one namespace per
 composition, and this mapping writes it back into the next avatar when that avatar carries the
-same namespace with the same identity. It holds no manifest and enumerates nothing: the
-namespace is the whole contract, and only names that arrive on the wire are ever known.
+same namespace with the same identity. It holds no manifest: the namespace is the whole
+contract, and the only names ever known are those that arrive on the wire or that the client's
+tree serves under the namespace root.
 
 Five direct children of a namespace are reserved (`RESERVED`); every other address under it, at
 any depth, is **payload**:
@@ -27,7 +28,7 @@ instance of the same world included, forget. 2 (`instance-keep-reset`): as 1, an
 restores too, so leaving the instance is the namespace's only escape from a bad state. A newly
 selected send target forgets at every scope. The value is delivered fresh per load: every
 `/avatar/change` drops the stored one and forgets its cache entry, so only a value arriving since
-that change counts. A Scope-0 avatar never sends it (a 0 set onto a declared 0 is no change on
+that change counts, or the tree's when it is read for a lost `Announce` (below). A Scope-0 avatar never sends it (a 0 set onto a declared 0 is no change on
 the wire), and a stale 2 would otherwise opt it in. Anything but a true int 0, 1 or 2 is 0,
 logged. Every decision logs the scope it applied, so an avatar running on a bridge that predates
 `Scope` -- where `Scope` is payload and the lifetime is 0's -- shows in a newer bridge's log.
@@ -72,7 +73,16 @@ since the namespace last booted; and the client's room at its last decision.
 * Every snapshot needs the namespace baselined, an `Announce` arrived since the last
   `/avatar/change` equal to the checkpoint's, and that value a non-zero int. The arrival mark is
   what stops an avatar that sends no `Announce` from being matched against the outgoing avatar's
-  value, which is still standing.
+  value, which is still standing. The client drops single rows around a load when inbound
+  traffic is heavy and never re-sends a value that stands, so a decision that would forget
+  only because no `Announce` arrived first reads the namespace from the client's tree, once and
+  off the lock with its token still set, and takes the `Announce` there, and a `Scope` of 1 or
+  2 with it, when the tree's `Boot` is the one being decided. The avatar writes all three in
+  one state, so under that `Boot` they are the incoming avatar's own. A `Scope` row lost alone
+  is not read for, and counts as 0.
+* A `Boot` with no `/avatar/change` since the namespace's last one forgets, whatever it
+  announces: nothing was checkpointed for it, so the values kept cannot be told from the
+  incoming avatar's.
 * **Scope 0** then needs exactly one id announced (a swap) whose switch, if the log binds one,
   met no room transition, or none and a calibration's switch in the log (below). An empty list
   is otherwise a reload of the worn avatar -- a world join, a rejoin and Reset Avatar are one
@@ -90,9 +100,11 @@ since the namespace last booted; and the client's room at its last decision.
   every namespace. Under a pin the target never moves, so a pinned target's peer found again
   under a new name (a restarted client) is the join instead; the first find is not. Merely emptying the lists would not do: a restarted client back on a different
   avatar announces an id that is not the one worn at boot, which would read as one swap.
-* **Baselined** means this bridge has seen the namespace boot. A bridge started after the avatar
-  loaded restores nothing until the next boot; the reconcile below corrects a baselined
-  namespace and never baselines one.
+* **Baselined** means this bridge has seen the namespace boot, on the wire or adopted from the
+  client's tree (below). A bridge started after the avatar loaded restores nothing until the
+  next boot: it handled no announcement for the worn avatar, so nothing says which load a
+  `Boot` in the tree belongs to. The reconcile below corrects a baselined namespace and never
+  baselines one.
 
 **The client log.** Entering FBT calibration reloads the worn avatar, on the wire the same event
 as Reset Avatar and a join, but the client then holds the avatar until the user accepts: its
@@ -155,6 +167,28 @@ python-osc render one float32 differently. A value the stream missed is therefor
 one period of coming to rest. Under a pinned target that no VRChat client advertises (the
 Av3Emulator) there is no tree to read and the stream is all there is.
 
+**A Boot the stream never delivered.** `Boot` is written once, and the client can drop it like
+any other row: then the namespace never boots here, the next swap forgets, and what is kept is
+the load before's, which scope 1 and 2 would go on to restore. So once per `/avatar/change`,
+`ADOPT_AFTER_SECS` after it, the mapping reads the namespace root from the client's tree, which
+is also the only place a namespace whose every row was lost has a name. A namespace whose tree
+`Boot` is a boot and not its last one is **adopted** when the client log, chosen by service
+name, holds a switch bound to that change, no other avatar id was announced within
+`LOG_BIND_SECS` of that switch settling, and the namespace has not booted since that change.
+The log is what makes the announcement the load, and it cannot name the avatar: it writes the
+incoming id only on that avatar's first load of a session. So the echo of a rejected request
+inside the bind window of a real load is refused by the second condition instead; recorded as
+worn, its id would turn Reset Avatar into one swap. One case passes it: a load whose own
+announcement was dropped, with such an echo alone in its window.
+Adoption is the `Boot` bookkeeping with no decision: the tree's `Boot` becomes the last one,
+the tree's `Announce`, or none, replaces the one standing, the payload of the same read is
+folded in, and no room is recorded, because the log's room that late can already be the next
+instance's, so the next decision runs scope 0's rule. Nothing is written to the avatar: its
+window closed before the read, and the load whose `Boot` was lost boots from defaults. A
+refusal is logged with its reason, so a dropped row never reads as none dropped. The wait keeps
+an adoption from consuming the checkpoint ahead of a `Boot` still in flight, and the wire copy
+of an adopted `Boot` arriving later is a repeat, compared as float32 like every tree float.
+
 **The change filter.** `_update_cache_and_fire` suppresses a value equal to the last one seen, and
 its cache outlives every avatar. So every announcement, and a target selection, `forget()`s the
 namespace's payload addresses, its `Announce` and its `Scope`: otherwise an incoming payload value
@@ -165,8 +199,9 @@ the log. `/avatar/change` is never forgotten: it is `REFIRE_ON_REPEAT`, and forg
 the fold of its twin copies.
 
 **Which thread waits.** No handler blocks. Every wait buys ordering or bounds the wait for the
-log or an accept, none consumes a result, and the mapping runs them under a router, which ticks,
-and beside `bridge.start()` on the library path, where nothing does, so they run on
+log or an accept, and the one read that consumes a result, the tree's for a lost `Announce`, is
+made by the decision's own timer, off the lock. The mapping runs them under a router, which
+ticks, and beside `bridge.start()` on the library path, where nothing does, so they run on
 `threading.Timer` threads, identical in both homes.
 
 **Order across addresses.** Dispatch is thread-per-datagram, so nothing orders one address's
@@ -197,12 +232,14 @@ import struct
 import threading
 import time
 import weakref
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from vrbridge import VRBridge
 from vrbridge.mappings.mapping_base import Mapping
+from vrbridge.osc_manager import FETCH_NOT_FOUND
 from vrbridge.roster import (
     AvatarDataLoaded, AvatarDataSaved, AvatarInitialized, AvatarRemeasured, AvatarSwitch,
     EnteringRoom, JoiningWorld, LeftRoom, LogTailer, Roster, SelfIdentity, log_service_name)
@@ -267,6 +304,12 @@ ACCEPT_QUIET_SECS = 20.0
 #: How often each baselined namespace is read back from the client's tree. A value the stream
 #: missed is in the next snapshot once a read lands after it came to rest.
 RECONCILE_SECS = 1.0
+
+#: How old an avatar change must be before the namespace root is read for a `Boot` the stream
+#: never delivered. Twice the avatar's window: a restore into this load is impossible by then,
+#: and a wire `Boot` that is merely late has had its chance. Read sooner, an adoption would
+#: consume the checkpoint ahead of a `Boot` still in flight and forget a load about to restore.
+ADOPT_AFTER_SECS = 2.0
 
 
 def _default_log_dir() -> Path:
@@ -418,6 +461,8 @@ class _AtBoot:
     checkpoint: Optional[Dict[str, Any]]
     checkpoint_announce: Any
     arrived: float
+    # Whether this decision has already read the tree for an Announce the stream did not deliver.
+    tree_read: bool = False
 
 
 def _split(address: str) -> Optional[tuple[str, str]]:
@@ -435,6 +480,11 @@ def _same_f32(a, b) -> bool:
     if not isinstance(a, float) or not isinstance(b, float):
         return False
     return struct.pack("<f", a) == struct.pack("<f", b)
+
+
+def _is_boot(value) -> bool:
+    """A driver `random` in (0, 1]. Anything else, the declared 0.0 included, is not a boot."""
+    return not isinstance(value, bool) and isinstance(value, float) and 0.0 < value <= 1.0
 
 
 def _is_int(value) -> bool:
@@ -479,6 +529,12 @@ class BridgePersistMapping(Mapping):
         self._peer_seen = False
         # When the last /avatar/change was handled.
         self._change_at = float("-inf")
+        # The _change_at of the change the namespace root was last read for: a change newer
+        # than this has not been probed for a Boot the stream never delivered.
+        self._probed_at = float("-inf")
+        # When each of the last few /avatar/change arrived and the id it named: what an adoption
+        # checks the client log's load against.
+        self._changes: deque = deque(maxlen=8)
         # Set when a decision went without the switch it waited for, so the switch's late
         # settling is logged; cleared by the next change.
         self._late_watch = False
@@ -521,6 +577,7 @@ class BridgePersistMapping(Mapping):
             self._last_announced = value
             self._epoch += 1
             self._change_at = time.monotonic()
+            self._changes.append((self._change_at, value))
             self._late_watch = False
             for ns in self._ns.values():
                 self._abandon_locked(ns, "an avatar change")
@@ -647,13 +704,16 @@ class BridgePersistMapping(Mapping):
                 ns.live[address] = value
                 ns.since_announce[address] = value
 
-    def _on_boot_locked(self, ns: _Namespace, value) -> None:
-        if isinstance(value, bool) or not isinstance(value, float) or not 0.0 < value <= 1.0:
+    def _on_boot_locked(self, ns: _Namespace, value, *, decide: bool = True) -> None:
+        """A Boot for `ns`: the bookkeeping, then the decision. `decide` False is an adoption,
+        a Boot read from the client's tree long after it was written, which restores nothing."""
+        if not _is_boot(value):
             # Not a boot. Nothing is recorded, not even as the last Boot, so the real draw
             # that follows is never taken for a repeat.
             return
-        if value == ns.last_boot:
-            # The same draw again is a repeated delivery of one boot, not a second load.
+        if _same_f32(value, ns.last_boot):
+            # The same draw again is a repeated delivery of one boot, not a second load. As
+            # float32: the last Boot may be the tree's rendering, when it was adopted.
             return
         ns.last_boot = value
         self._epoch += 1
@@ -669,6 +729,8 @@ class BridgePersistMapping(Mapping):
         ns.ids = []
         ns.worn_at_boot = self._last_announced
         ns.baselined = True
+        if not decide:
+            return
 
         self._tokens += 1
         ns.token = self._tokens
@@ -714,6 +776,10 @@ class BridgePersistMapping(Mapping):
         if not at.baselined:
             return None, ("this bridge has not seen the namespace boot before, so it cannot tell "
                           "what its values belong to (started after the avatar loaded?)")
+        if at.checkpoint is None:
+            return None, ("its Boot arrived with no /avatar/change since its last one, so the "
+                          "announcement was lost or never sent and the values kept cannot be "
+                          "told from the incoming avatar's")
         bad_announce = self._announce_invalid(ns, at)
         if bad_announce is not None:
             return None, bad_announce
@@ -721,9 +787,7 @@ class BridgePersistMapping(Mapping):
         fallback = ""
         if scope != SCOPE_SWAP:
             room = log.room if sw is not None else None
-            if at.checkpoint is None:
-                why = "no avatar change since its last boot"
-            elif log.rule != "service":
+            if log.rule != "service":
                 why = (f"the client log was not chosen by this client's OSCQuery service name "
                        f"(chosen by {log.rule or 'nothing yet'})")
             elif sw is None:
@@ -751,9 +815,7 @@ class BridgePersistMapping(Mapping):
             fallback = f"; falling back to Scope 0's rule, since {why}"
 
         if reload:
-            if at.checkpoint is None:
-                why = "no avatar change since its last boot"
-            elif not in_vr:
+            if not in_vr:
                 why = f"VRMode is {vr!r}, not 1"
             elif log.rule != "service":
                 why = (f"the client log was not chosen by this client's OSCQuery service name "
@@ -773,15 +835,49 @@ class BridgePersistMapping(Mapping):
         return SWAP, f"one swap{fallback}"
 
     def _decide(self, name: str, token: int, at_boot: _AtBoot) -> None:
+        if self._decide_once(name, token, at_boot):
+            self._announce_from_tree(name, token)
+            self._decide_once(name, token, replace(at_boot, tree_read=True))
+
+    def _announce_from_tree(self, name: str, token: int) -> None:
+        """Take the Announce the stream did not deliver from the client's tree, off the lock.
+
+        The token stays set across the read, so whatever abandons an exchange abandons this
+        one. The tree's Boot being this decision's is what makes its Announce the incoming
+        avatar's own: the avatar writes the two in one state."""
+        res = self.bridge.osc.fetch_tree(f"{NAMESPACE_ROOT}{name}", timeout=LATE_LIMIT_SECS)
+        with self._lock:
+            ns = self._ns.get(name)
+            if ns is None or ns.token != token or ns.announce_arrived or not res.ok:
+                return
+            tree = res.value
+            announce = tree.get(ns.addr(ANNOUNCE))
+            if announce is None or not _same_f32(tree.get(ns.addr(BOOT)), ns.last_boot):
+                return
+            ns.announce, ns.announce_arrived = announce, True
+            took = f"Announce {announce!r}"
+            scope = tree.get(ns.addr(SCOPE))
+            if ns.scope is None and _is_int(scope) and scope in (SCOPE_INSTANCE, SCOPE_KEEP_RESET):
+                ns.scope = scope
+                took += f" and Scope {scope!r}"
+            self.log.info("BridgePersist/%s: no Announce arrived on the stream; read %s from the "
+                          "client's tree, under this load's Boot.", name, took)
+
+    def _decide_once(self, name: str, token: int, at_boot: _AtBoot) -> bool:
+        """Decide, or re-arm. True when the decision first wants the tree read for an Announce
+        the stream did not deliver: the token is still set then, and nothing was written."""
         with self._lock:
             ns = self._ns.get(name)
             if ns is None or ns.token != token:
-                return
+                return False
             final = time.monotonic() - at_boot.arrived + LOG_POLL_SECS > LOG_DEADLINE_SECS
             verdict = self._judge_locked(ns, at_boot, final)
             if verdict is _PENDING:
                 self._arm_locked(ns, LOG_POLL_SECS, self._decide, at_boot)
-                return
+                return False
+            if (verdict[0] is None and at_boot.baselined and at_boot.checkpoint is not None
+                    and not ns.announce_arrived and not at_boot.tree_read):
+                return True
             ns.token, ns.timer = 0, None
             how, why = verdict
             scope = SCOPE_NAMES[_applied_scope(ns.scope)]
@@ -849,6 +945,7 @@ class BridgePersistMapping(Mapping):
     # ---- reconcile -------------------------------------------------------
 
     def _reconcile(self) -> None:
+        self._probe()
         osc = self.bridge.osc
         with self._lock:
             epoch = self._epoch
@@ -869,24 +966,109 @@ class BridgePersistMapping(Mapping):
                 if (ns is None or self._epoch != epoch or ns.token or ns.last_boot != boot
                         or not _same_f32(tree.get(ns.addr(BOOT)), boot)):
                     continue
-                changed = []
-                for address, value in tree.items():
-                    parsed = _split(address)
-                    if parsed is None or parsed[0] != name or parsed[1] in RESERVED:
-                        continue
-                    if osc.get_cached(address, _MISSING) is not cached.get(address, _MISSING):
-                        continue
-                    old = ns.live.get(address, _MISSING)
-                    if old is not _MISSING and type(old) is type(value) and (
-                            _same_f32(old, value) if isinstance(value, float) else old == value):
-                        continue
-                    osc.prime(address, value)
-                    ns.live[address] = value
-                    ns.since_announce[address] = value
-                    changed.append(address)
+                changed = self._fold_locked(ns, tree, cached)
                 if changed:
                     self.log.debug("BridgePersist/%s: reconciled %d value(s) from the client's "
                                    "tree: %s", name, len(changed), ", ".join(changed[:8]))
+
+    def _fold_locked(self, ns: _Namespace, tree: Dict[str, Any],
+                     cached: Dict[str, Any]) -> List[str]:
+        """Fold a read of the client's tree into `ns`: every payload value that differs from
+        `live`, primed so the change filter agrees. `cached` is the manager's cached object per
+        address from before the GET; an address whose object changed since keeps the stream's
+        value. Returns the addresses taken."""
+        osc = self.bridge.osc
+        changed = []
+        for address, value in tree.items():
+            parsed = _split(address)
+            if parsed is None or parsed[0] != ns.name or parsed[1] in RESERVED:
+                continue
+            if osc.get_cached(address, _MISSING) is not cached.get(address, _MISSING):
+                continue
+            old = ns.live.get(address, _MISSING)
+            if old is not _MISSING and type(old) is type(value) and (
+                    _same_f32(old, value) if isinstance(value, float) else old == value):
+                continue
+            osc.prime(address, value)
+            ns.live[address] = value
+            ns.since_announce[address] = value
+            changed.append(address)
+        return changed
+
+    def _probe(self) -> None:
+        """Once per avatar change, read the namespace root for a Boot the stream never
+        delivered, and adopt each one the client's log lets this bridge attribute."""
+        osc = self.bridge.osc
+        with self._lock:
+            change_at = self._change_at
+            if (self._probed_at == change_at
+                    or time.monotonic() - change_at < ADOPT_AFTER_SECS):
+                return
+            epoch = self._epoch
+            cached = {a: osc.get_cached(a, _MISSING)
+                      for ns in self._ns.values() for a in (*ns.live, *ns.since_announce)}
+        res = osc.fetch_tree(NAMESPACE_ROOT.rstrip("/"))
+        if not res.ok and res.reason != FETCH_NOT_FOUND:
+            self.log.debug("BridgePersist: no read of the namespace root (%s: %s).",
+                           res.reason, res.detail)
+            return
+        with self._lock:
+            if self._epoch != epoch:
+                return
+            self._probed_at = change_at
+            if not res.ok:
+                return
+            trees: Dict[str, Dict[str, Any]] = {}
+            for address, value in res.value.items():
+                parsed = _split(address)
+                if parsed is not None:
+                    trees.setdefault(parsed[0], {})[address] = value
+            for name, tree in trees.items():
+                ns = self._ns.get(name)
+                boot = tree.get(f"{NAMESPACE_ROOT}{name}/{BOOT}")
+                if not _is_boot(boot) or (ns is not None and _same_f32(boot, ns.last_boot)):
+                    continue
+                refused = self._adoption_refused_locked(ns)
+                if refused is not None:
+                    self.log.info("BridgePersist/%s: the client's tree holds a Boot this bridge "
+                                  "never received, and it is not adopted: %s.", name, refused)
+                    continue
+                if ns is None:
+                    ns = self._ns[name] = _Namespace(name)
+                self._on_boot_locked(ns, boot, decide=False)
+                # The tree's Announce or none: the outgoing avatar's must not stand for a
+                # load that announced nothing here. No room: the log's room now can already
+                # be the next instance's, so the next decision runs Scope 0's rule.
+                ns.announce = tree.get(ns.addr(ANNOUNCE))
+                ns.room = None
+                taken = self._fold_locked(ns, tree, cached)
+                self.log.info("BridgePersist/%s: no Boot arrived for this load; adopted the one "
+                              "the client's tree holds, with %d value(s) from the same read. "
+                              "Nothing is restored into this load, and the next restores from "
+                              "it.", name, len(taken))
+
+    def _adoption_refused_locked(self, ns: Optional[_Namespace]) -> Optional[str]:
+        """Why a Boot found only in the tree cannot be attributed to the last /avatar/change,
+        or None when it can. A bridge that handled no change for the worn avatar never can."""
+        log = self._client_log
+        if ns is not None and ns.last_boot is not None and ns.checkpoint is None:
+            return "no /avatar/change arrived since the namespace's last Boot"
+        if log.rule != "service":
+            return (f"the client log was not chosen by this client's OSCQuery service name "
+                    f"(chosen by {log.rule or 'nothing yet'})")
+        sw = self._bound_switch_locked()
+        if sw is None:
+            return "the client log shows no avatar load at the last /avatar/change"
+        # A bound switch alone is not proof that the last change is the load: the echo of a
+        # rejected request inside the bind window of a real load is bound to it too, and its id
+        # recorded as worn would make Reset Avatar read as one swap. The log cannot settle it,
+        # since it names the incoming id only on that avatar's first load of a session.
+        beside = {i for at, i in self._changes if abs(sw.settled_at - at) <= LOG_BIND_SECS}
+        if len(beside) > 1:
+            return (f"{len(beside)} avatar ids were announced within {LOG_BIND_SECS:.1f} s of the "
+                    f"client log's load ({', '.join(sorted(map(str, beside)))}), so which of "
+                    f"them loaded is not known")
+        return None
 
     # ---- timers ----------------------------------------------------------
 
