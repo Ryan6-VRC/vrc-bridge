@@ -55,16 +55,22 @@ what makes a snapshot complete without holding unchanged values.
 parsed, so it replays with its wire type (an int sent to a declared float writes garbage, and a
 bool must stay a bool); the last `Announce` and whether one arrived since the last
 `/avatar/change`; the `Scope` that arrived since then; a checkpoint; the avatar ids announced
-since the namespace last booted; and the client's room at its last decision.
+since the namespace last booted; the client's room at its last decision; and, per payload
+address, when it was last handled and the value it replaced.
 
 * Every `/avatar/change`, echo or not, re-takes the checkpoint from the live values and the last
   `Announce`, then marks `Announce` not arrived while leaving its value standing for the next
   checkpoint, and drops `Scope`. The id is appended unless it repeats the list's last entry (an
   OSC swap's echo and its announcement at apply are one change) or the list is empty and it names
   the avatar worn at boot (an echo that reloads nothing). The list is a sequence: away and back
-  to the same avatar is two changes. Nothing from an incoming avatar arrives before its
-  announcement at apply, so the last checkpoint before a `Boot` is the outgoing avatar's final
-  state.
+  to the same avatar is two changes. The client sends the incoming avatar's saved parameters in
+  the frame that announces it at apply, a fraction of a millisecond **ahead** of the
+  announcement, while the outgoing avatar has been silent for about a second. So a payload
+  address whose run of writes began within `CHANGE_LEAD_SECS` before the change is the incoming
+  avatar's: the checkpoint takes the value the run replaced, or omits the address when it
+  replaced none, and the value counts as arrived since the announcement. A run that began
+  earlier is the outgoing avatar's still writing, and the checkpoint keeps its latest value. The
+  last checkpoint before a `Boot` is then the outgoing avatar's final state.
 * `Boot` captures the checkpoint, the list and the baselined flag. Then, valid or not, the live
   values become only what arrived since the last announcement -- the incoming avatar's own
   traffic -- the checkpoint and list empty, the last announced id is recorded as worn at boot, and
@@ -208,11 +214,17 @@ ticks, and beside `bridge.start()` on the library path, where nothing does, so t
 **Order across addresses.** Dispatch is thread-per-datagram, so nothing orders one address's
 handler against another's. `Announce` and `Scope` against `Boot` are ordered by the settle wait.
 The checkpoint at `/avatar/change` against the outgoing avatar's last payload and the incoming
-avatar's first still rests on the wire's own spacing: the outgoing avatar falls silent about a
-second before the announcement at apply, and the incoming one first writes payload a fifth of a
-second after it. The Av3Emulator is the narrow case: its re-send of declared defaults follows its
-announcement inside a few milliseconds. The log's lines reach the tailer's thread unordered
-against the wire; `LOG_BIND_SECS` is the slack for that.
+avatar's first rests on time, because the wire's own order puts the incoming avatar first: its
+saved parameters lead the announcement by a fraction of a millisecond, the rest of its payload
+follows a quarter of a second after, and the outgoing avatar falls silent about a second before.
+`CHANGE_LEAD_SECS` splits that gap by handling time, and a saved row whose handler runs after
+the change's lands as the incoming avatar's either way. Handling time stands for arrival only
+while no listener registered ahead of this one on `/avatar/change` blocks; none in a shipped
+router does. A saved value equal to the outgoing avatar's last is eaten by the change filter,
+which the announcement has not yet reset, so the checkpoint keeps the equal value and only the
+reconcile puts it in the incoming avatar's live values. The Av3Emulator re-sends declared
+defaults inside a few milliseconds after its announcement. The log's lines reach the tailer's
+thread unordered against the wire; `LOG_BIND_SECS` is the slack for that.
 
 **Reordering within one address.** A payload handler stores the value the manager's cache
 holds rather than the one it was handed: two datagrams for one address can reach this mapping in
@@ -273,6 +285,13 @@ SCOPE_NAMES = {SCOPE_SWAP: "Scope 0: swap", SCOPE_INSTANCE: "Scope 1: instance",
 #: `Boot`, which the avatar writes in the same state.
 ANNOUNCE_SETTLE_SECS = 0.2
 
+#: How long before an `/avatar/change` a payload row may have been handled and still be the
+#: incoming avatar's: the client sends its saved parameters in the frame that announces it, a
+#: fraction of a millisecond ahead of the announcement, and the outgoing avatar falls silent about
+#: a second before it (desktop, OSC swaps, 2026-10-14). Above the few milliseconds between their
+#: handlers, and below the boot steps' frame spacing the tests reproduce.
+CHANGE_LEAD_SECS = 0.025
+
 #: From the last payload write to `Restore` 1, so the 1 lands in a later client frame.
 WRITE_SETTLE_SECS = 0.05
 
@@ -324,6 +343,13 @@ class _Namespace:
     live: Dict[str, Any] = field(default_factory=dict)
     # The payload values that arrived since the last announcement: what `live` becomes at Boot.
     since_announce: Dict[str, Any] = field(default_factory=dict)
+    # Per payload address, when it was last handled, when its current run of writes began (a
+    # write more than CHANGE_LEAD_SECS after the one before starts a run), and what `live` held
+    # before that run (_MISSING when nothing): what a checkpoint takes for an address whose whole
+    # run fell just ahead of an announcement, the incoming avatar's.
+    written_at: Dict[str, float] = field(default_factory=dict)
+    run_from: Dict[str, float] = field(default_factory=dict)
+    prior: Dict[str, Any] = field(default_factory=dict)
     announce: Any = None
     # Whether `announce` arrived since the last /avatar/change. Its value outlives the change.
     announce_arrived: bool = False
@@ -580,13 +606,25 @@ class BridgePersistMapping(Mapping):
             self._change_at = time.monotonic()
             self._changes.append((self._change_at, value))
             self._late_watch = False
+            lead = self._change_at - CHANGE_LEAD_SECS
             for ns in self._ns.values():
                 self._abandon_locked(ns, "an avatar change")
                 ns.checkpoint = dict(ns.live)
+                ns.since_announce = {}
+                # Rows handled just ahead of this change are the incoming avatar's saved values,
+                # sent in the frame that announces it (module docstring).
+                for address, began in ns.run_from.items():
+                    if began < lead or address not in ns.live:
+                        continue
+                    ns.since_announce[address] = ns.live[address]
+                    before = ns.prior.get(address, _MISSING)
+                    if before is _MISSING:
+                        del ns.checkpoint[address]
+                    else:
+                        ns.checkpoint[address] = before
                 ns.checkpoint_announce = ns.announce
                 ns.announce_arrived = False
                 ns.scope = None
-                ns.since_announce = {}
                 self._forget_locked(ns)
                 if ns.ids:
                     if ns.ids[-1] != value:
@@ -706,6 +744,11 @@ class BridgePersistMapping(Mapping):
                 # arrival even when this listener fires after a newer one for the same address
                 # or waits here while one lands (module docstring).
                 value = ctx.get(address, value)
+                now = time.monotonic()
+                if now - ns.written_at.get(address, float("-inf")) > CHANGE_LEAD_SECS:
+                    ns.prior[address] = ns.live.get(address, _MISSING)
+                    ns.run_from[address] = now
+                ns.written_at[address] = now
                 ns.live[address] = value
                 ns.since_announce[address] = value
 
