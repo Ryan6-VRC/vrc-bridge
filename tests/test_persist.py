@@ -653,6 +653,47 @@ def test_values_from_before_the_announcement_are_not_the_incoming_avatars(rig):
     assert r.placed_from("GripSync") == {"Word0": 2.0}
 
 
+def saved_burst_then_change(r, avatar_id, ns, change_first=False, **saved):
+    """The client's frame at apply: the incoming avatar's saved values, then the announcement,
+    handled in wire order or with the announcement's handler first."""
+    osc = r.bridge.osc
+    rows = [lambda leaf=leaf, v=v: osc._update_cache_and_fire(addr(ns, leaf), v)
+            for leaf, v in saved.items()]
+    change = lambda: osc._update_cache_and_fire(AVATAR_CHANGE_ADDR, avatar_id)
+    for step in ([change, *rows] if change_first else [*rows, change]):
+        step()
+    time.sleep(STEP)
+
+
+@pytest.mark.parametrize("change_first", [False, True], ids=["wire-order", "change-handled-first"])
+def test_saved_values_sent_ahead_of_the_announcement_are_the_incoming_avatars(rig, change_first):
+    """Intended: the client sends the incoming avatar's saved parameters in the frame that
+    announces it, just ahead of the announcement. They are the incoming avatar's, so the
+    snapshot holds the outgoing avatar's values for them, and omits one the outgoing avatar never
+    sent, in whichever order the handlers run."""
+    r = rig()
+    worn_a_with(r, Word0=1.0, LookAt=3)
+    time.sleep(QUIET)
+    saved_burst_then_change(r, A2, "GripSync", change_first, LookAt=2, Mirror=True)
+    r.boot("GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 1.0, "LookAt": 3}
+
+
+def test_saved_values_sent_ahead_of_the_announcement_are_kept_for_the_next_swap(rig):
+    """Intended: a saved value is sent once, ahead of the announcement, and never again while it
+    stands, so it belongs to the incoming avatar's live values at its Boot. Dropped there, the
+    next swap restores that name to its default."""
+    r = rig()
+    saved_burst_then_change(r, A, "GripSync", LookAt=2)   # the join
+    r.boot("GripSync")
+    time.sleep(QUIET)
+    assert r.restores("GripSync") == [], "a join must not restore"
+    r.load(A2, "GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"LookAt": 2}
+
+
 def test_a_payload_listener_fired_out_of_order_keeps_the_newer_value(rig):
     """Intended: two datagrams for one address can reach the mapping in reverse arrival order
     (the listener fires after the cache lock is released). The snapshot must hold the value the
@@ -703,6 +744,7 @@ def test_a_payload_listener_overtaken_while_waiting_for_the_lock_keeps_the_newer
     listener.join(3.0)
     r.m._lock = real_lock
     assert r.m._ns["GripSync"].live[word] == osc.get_cached(word) == 2.0
+    time.sleep(STEP)            # a frame or more, or the value is the incoming avatar's saved one
     r.load(A2, "GripSync")
     assert r.completed("GripSync")
     assert r.placed_from("GripSync") == {"Word0": 2.0}
