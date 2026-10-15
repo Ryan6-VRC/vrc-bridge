@@ -65,11 +65,12 @@ address, when it was last handled and the value it replaced.
   the avatar worn at boot (an echo that reloads nothing). The list is a sequence: away and back
   to the same avatar is two changes. The client sends the incoming avatar's saved parameters in
   the frame that announces it at apply, a fraction of a millisecond **ahead** of the
-  announcement, while the outgoing avatar has been silent for about a second. So a payload row
-  handled within `CHANGE_LEAD_SECS` before the change is the incoming avatar's: the checkpoint
-  takes the value it replaced, or omits the address when it replaced none, and the row counts
-  as arrived since the announcement. The last checkpoint before a `Boot` is then the outgoing
-  avatar's final state.
+  announcement, while the outgoing avatar has been silent for about a second. So a payload
+  address whose run of writes began within `CHANGE_LEAD_SECS` before the change is the incoming
+  avatar's: the checkpoint takes the value the run replaced, or omits the address when it
+  replaced none, and the value counts as arrived since the announcement. A run that began
+  earlier is the outgoing avatar's still writing, and the checkpoint keeps its latest value. The
+  last checkpoint before a `Boot` is then the outgoing avatar's final state.
 * `Boot` captures the checkpoint, the list and the baselined flag. Then, valid or not, the live
   values become only what arrived since the last announcement -- the incoming avatar's own
   traffic -- the checkpoint and list empty, the last announced id is recorded as worn at boot, and
@@ -342,10 +343,12 @@ class _Namespace:
     live: Dict[str, Any] = field(default_factory=dict)
     # The payload values that arrived since the last announcement: what `live` becomes at Boot.
     since_announce: Dict[str, Any] = field(default_factory=dict)
-    # Per payload address, when it was last handled and what `live` held before the writes inside
-    # the CHANGE_LEAD_SECS that ended then (_MISSING when nothing): what a checkpoint takes for an
-    # address the incoming avatar wrote just ahead of its announcement.
+    # Per payload address, when it was last handled, when its current run of writes began (a
+    # write more than CHANGE_LEAD_SECS after the one before starts a run), and what `live` held
+    # before that run (_MISSING when nothing): what a checkpoint takes for an address whose whole
+    # run fell just ahead of an announcement, the incoming avatar's.
     written_at: Dict[str, float] = field(default_factory=dict)
+    run_from: Dict[str, float] = field(default_factory=dict)
     prior: Dict[str, Any] = field(default_factory=dict)
     announce: Any = None
     # Whether `announce` arrived since the last /avatar/change. Its value outlives the change.
@@ -610,8 +613,8 @@ class BridgePersistMapping(Mapping):
                 ns.since_announce = {}
                 # Rows handled just ahead of this change are the incoming avatar's saved values,
                 # sent in the frame that announces it (module docstring).
-                for address, at in ns.written_at.items():
-                    if at < lead or address not in ns.live:
+                for address, began in ns.run_from.items():
+                    if began < lead or address not in ns.live:
                         continue
                     ns.since_announce[address] = ns.live[address]
                     before = ns.prior.get(address, _MISSING)
@@ -744,6 +747,7 @@ class BridgePersistMapping(Mapping):
                 now = time.monotonic()
                 if now - ns.written_at.get(address, float("-inf")) > CHANGE_LEAD_SECS:
                     ns.prior[address] = ns.live.get(address, _MISSING)
+                    ns.run_from[address] = now
                 ns.written_at[address] = now
                 ns.live[address] = value
                 ns.since_announce[address] = value

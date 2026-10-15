@@ -680,6 +680,24 @@ def test_saved_values_sent_ahead_of_the_announcement_are_the_incoming_avatars(ri
     assert r.placed_from("GripSync") == {"Word0": 1.0, "LookAt": 3}
 
 
+def test_a_value_the_outgoing_avatar_writes_every_frame_up_to_the_announcement_is_its_own(rig):
+    """Intended: only a run of writes that began inside the lead window is the incoming
+    avatar's. A value the outgoing avatar drives every frame into the announcement began long
+    before it, so the snapshot holds its latest value, not the one from before the run."""
+    r = rig()
+    worn_a_with(r, Word0=1.0)
+    time.sleep(QUIET)
+    word = addr("GripSync", "Word0")
+    for i in range(20):                      # 10 ms frames, the last inside the window
+        r.bridge.osc._update_cache_and_fire(word, 2.0 + i)
+        time.sleep(0.01)
+    r.bridge.osc._update_cache_and_fire(AVATAR_CHANGE_ADDR, A2)
+    time.sleep(STEP)
+    r.boot("GripSync")
+    assert r.completed("GripSync")
+    assert r.placed_from("GripSync") == {"Word0": 21.0}
+
+
 def test_saved_values_sent_ahead_of_the_announcement_are_kept_for_the_next_swap(rig):
     """Intended: a saved value is sent once, ahead of the announcement, and never again while it
     stands, so it belongs to the incoming avatar's live values at its Boot. Dropped there, the
