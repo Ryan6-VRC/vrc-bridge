@@ -13,6 +13,11 @@ here or is the prototype avatar's declared geometry.
   `ratio * (span * reading - (span / 2 + sender_radius))`; the avatar declares the geometry and the
   settings must match it. A reading of exactly 0.0 is the sender outside the boxes, never a
   position, so two nonzero readings are also the sender's presence.
+* `<prefix>/Up` -- optional, decoded exactly like the other two, positive up: the sender's height
+  above the wearer's root. It is a third reading, but not a third presence test: it adds a
+  vertical part to the distance and takes no part in the gate. An Up that is exactly 0.0 (outside
+  its box), never sent, or not a finite number is 0 m, so an avatar that does not publish it pulls
+  as it always did, by the horizontal distance alone.
 * `<prefix>/Planted`, `<prefix>/Held` -- latching bools the avatar's own machine drives.
 * `<prefix>/Slack` -- an unsynced float the avatar declares with a default, driven by an
   expression-menu radial: a fraction 0..1, mapped linearly onto `LeashSettings.slack_min` ..
@@ -23,8 +28,8 @@ here or is the prototype avatar's declared geometry.
   (`Planted` true and `Held` false) it is the pull's `slack` once the avatar has sent a usable one.
   Until then it falls back to `Slack`, then to `LeashSettings.slack`. Held ignores it.
 
-The mapping is active while it is enabled, `Held` or `Planted` is true, and both readings are
-nonzero. Otherwise it writes zeros and holds.
+The mapping is active while it is enabled, `Held` or `Planted` is true, and both horizontal
+readings are nonzero. Otherwise it writes zeros and holds.
 
 **Slack's first read.** The client sends a parameter over OSC only when its value changes, so a
 bridge started against a wearer already in the avatar never hears Slack. The first step that finds
@@ -42,7 +47,8 @@ reads `slack` afresh each step: a larger one ends the pull by the usual rule (`d
 and a smaller one begins a pull by the usual two-step rule. A `peak` left at or inside the new
 `slack` is dropped, since it would give a negative strength and reverse the pull.
 
-**The pull, a ratchet.** `d = hypot(forward, right)`. Its strength is
+**The pull, a ratchet.** `d = sqrt(forward^2 + right^2 + up^2)`, so the slack is a sphere about the
+wearer; with no Up it is the circle of the horizontal distance. Its strength is
 `u = min(u_max, (peak - slack) / ramp)`, where `peak` is the furthest distance this pull has held
 for two consecutive steps, `max(peak, min(d, d_prev))`, so the strength never falls while the pull
 lasts: a deeper overshoot pulls faster rather than longer. A pull begins the step that `peak` first
@@ -56,8 +62,13 @@ while a reading is fresh would cost less, but needs a window sized to a burst sp
 emulator's has been measured, and a starvation bound past which a torn read still lands. The
 pairing guards the peak only: a torn step still steers for its tick, and one reading inside `slack`
 ends the pull. The history is forgotten at every activation, avatar change and target selection.
-The direction is recomputed every tick from the current offset, and an axis whose share of it
-(`|component| / d`) is under `axis_min` is left at zero so the wearer keeps that axis. Each nonzero
+The direction is horizontal and recomputed every tick from the current offset: a share is
+`|component| / h` with `h = hypot(forward, right)`, so a raised stake pulls at the strength of its
+3D distance along the heading of its ground position. An axis whose share is under `axis_min` is
+left at zero so the wearer keeps that axis. While a pull is active and `h` is under
+`LeashSettings.horizontal_min`, the wearer is under the stake and walking cannot shorten the
+vertical part: both axes are written zero for that step and the ratchet is kept, still rising with
+the 3D distance as any pull's does, so a wearer who walks out is pulled back at that strength. Each nonzero
 component is lifted over the client's deadzone: `sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward
 to `/input/Vertical`, right to `/input/Horizontal`. `/input/Run` is never raised; it is written 0
 with every set of zeros.
@@ -112,7 +123,7 @@ VERTICAL_ADDR = "/input/Vertical"
 HORIZONTAL_ADDR = "/input/Horizontal"
 RUN_ADDR = "/input/Run"
 
-RIGHT, FORWARD = "Right", "Forward"
+RIGHT, FORWARD, UP = "Right", "Forward", "Up"
 PLANTED, HELD = "Planted", "Held"
 SLACK = "Slack"
 SLACK_PLANTED = "SlackPlanted"
@@ -157,7 +168,7 @@ class LeashMapping(Mapping):
         super().__init__(bridge)
         self._tune = tuning if tuning is not None else settings().leash
         self._addr = {leaf: f"{PARAM_ROOT}{self._tune.prefix}/{leaf}"
-                      for leaf in READINGS + FLAGS + (SLACK, SLACK_PLANTED)}
+                      for leaf in READINGS + (UP,) + FLAGS + (SLACK, SLACK_PLANTED)}
         # One lock over the stored inputs, the pull and what was last written. Held across UDP
         # sends (sendto, never a fetch) and across a cache read, which nests _lock ->
         # _cache_lock; nothing takes them the other way.
@@ -229,6 +240,9 @@ class LeashMapping(Mapping):
             self._d_prev = None
             self._gen += 1
             self._asked.clear()
+            # Up is optional, so a new target's avatar may never overwrite the last one's height
+            self._in.pop(self._addr[UP], None)
+            self.bridge.osc.forget(self._addr[UP])
             for address in self._sent:
                 self._sent[address] = None
 
@@ -256,6 +270,14 @@ class LeashMapping(Mapping):
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v == 0.0:
             return None
         return float(v)
+
+    def _up(self) -> float:
+        """The sender's height in metres: 0 while Up is unsent, exactly 0.0 or unusable."""
+        v = self._reading(UP)
+        if v is None:
+            return 0.0
+        t = self._tune
+        return decode(v, ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
 
     def _flag(self, leaf: str) -> bool:
         return bool(self._in.get(self._addr[leaf]))
@@ -330,7 +352,8 @@ class LeashMapping(Mapping):
         m = {leaf: decode(v, ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
              for leaf, v in raw.items()}
         forward, right = m[FORWARD], m[RIGHT]
-        d = self._d_prev = math.hypot(forward, right)
+        h = math.hypot(forward, right)
+        d = self._d_prev = math.sqrt(h * h + self._up() ** 2)
         if d <= slack:
             self._rest_locked()
             return
@@ -346,11 +369,15 @@ class LeashMapping(Mapping):
             self._rest_locked()
             return
         u = min(t.u_max, (self._peak - slack) / t.ramp)
+        if h < t.horizontal_min:
+            # under the stake: no heading, and walking cannot shorten the vertical part
+            self._write_locked({VERTICAL_ADDR: 0.0, HORIZONTAL_ADDR: 0.0})
+            return
         out = {}
         for address, component in ((VERTICAL_ADDR, forward), (HORIZONTAL_ADDR, right)):
             # a component under a millimetre is zero: float32 rounding leaves a reported zero a
             # hair off it, and a lifted hair is a deadzone push in a random sign
-            share = component / d if abs(component) >= AXIS_EPSILON else 0.0
+            share = component / h if abs(component) >= AXIS_EPSILON else 0.0
             out[address] = lift(u, share) if share != 0.0 and abs(share) >= t.axis_min else 0.0
         self._write_locked(out)
 

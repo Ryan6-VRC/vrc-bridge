@@ -484,7 +484,7 @@ def test_the_prefix_names_every_input():
     m = LeashMapping(bridge, tuning=LeashSettings(prefix="Pet/Leash"))
     assert sorted(m._addr.values()) == sorted(
         f"/avatar/parameters/Pet/Leash/{leaf}"
-        for leaf in ("Right", "Forward", "Planted", "Held", "Slack", "SlackPlanted"))
+        for leaf in ("Right", "Forward", "Up", "Planted", "Held", "Slack", "SlackPlanted"))
 
 
 @pytest.mark.parametrize("kw, must_name", [
@@ -499,6 +499,9 @@ def test_the_prefix_names_every_input():
     (dict(slack_min=2.0, slack_max=1.0), "slack_min"),
     (dict(slack_min=float("nan")), "slack_min"),
     (dict(slack_max=float("inf")), "slack_max"),
+    (dict(horizontal_min=-0.1), "horizontal_min"),
+    (dict(horizontal_min=float("nan")), "horizontal_min"),
+    (dict(horizontal_min=float("inf")), "horizontal_min"),
 ])
 def test_bad_leash_settings_name_the_key(kw, must_name):
     with pytest.raises(ConfigError, match=must_name):
@@ -1041,3 +1044,76 @@ def test_a_peak_inside_a_larger_planted_slack_ends_that_pull(rig):
     assert r.last(VERTICAL_ADDR) == 0.0, "the stale peak kept pulling"
     r.tick()
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.3 - metres(0.2)) / T.ramp), abs=TOL)
+
+
+# --------------------------------------------------------------------------
+# Up: the slack is a sphere
+# --------------------------------------------------------------------------
+
+def test_the_slack_edge_is_3d(rig):
+    """Intended: d is sqrt(forward^2 + right^2 + up^2). A stake raised so its ground distance is
+    inside slack but its 3D distance is past it pulls, along the ground heading, at the 3D
+    strength; one inside on both writes nothing."""
+    r = rig()
+    r.emit(Up=reading(0.3))
+    r.held_at(forward=0.6, right=0.3)          # ground 0.671, 3D 0.735: inside both
+    r.step()
+    assert r.written() == []
+
+    r.emit(Up=reading(0.9))                    # ground 0.671 inside slack, 3D 1.12 past it
+    r.step()
+    h, d = math.hypot(0.6, 0.3), math.sqrt(0.6 ** 2 + 0.3 ** 2 + 0.9 ** 2)
+    assert h < T.slack < d
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((d - T.slack) / T.ramp, 0.6 / h), abs=TOL)
+    assert r.last(HORIZONTAL_ADDR) == pytest.approx(pulled((d - T.slack) / T.ramp, 0.3 / h), abs=TOL)
+
+
+def test_a_stake_overhead_writes_zeros(rig):
+    """Intended: past slack in 3D with the ground distance under horizontal_min, the pull is
+    active and writes zeros once; stepping out pulls at the kept ratchet's strength, not one
+    restarted from the nearer distance."""
+    r = rig()
+    r.emit(Up=reading(0.9))
+    r.held_at(forward=0.4, right=0.3)          # d = 1.030, unsaturated, both axes pulled
+    r.step()
+    peak = r.m._peak
+    assert peak == pytest.approx(math.sqrt(0.25 + 0.81), abs=TOL)
+    assert (peak - T.slack) / T.ramp < T.u_max
+    assert r.last(VERTICAL_ADDR) != 0.0 and r.last(HORIZONTAL_ADDR) != 0.0
+
+    r.held_at(forward=0.05, right=0.05)        # under the stake, still past slack in 3D
+    assert math.hypot(0.05, 0.05) < T.horizontal_min
+    r.step()
+    assert r.last(VERTICAL_ADDR) == 0.0 and r.last(HORIZONTAL_ADDR) == 0.0
+    sent = len(r.written())
+    r.step()
+    assert len(r.written()) == sent, "the zeros were re-sent every tick"
+    assert r.m._peak == pytest.approx(peak, abs=TOL), "the ratchet moved under the stake"
+
+    r.held_at(forward=0.3, right=0.2)          # out, nearer than the peak: d = 0.970
+    r.step()
+    h = math.hypot(0.3, 0.2)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((peak - T.slack) / T.ramp, 0.3 / h), abs=TOL)
+
+
+def test_a_new_target_forgets_the_last_avatars_height(rig):
+    """Intended: Up is optional, so a target selection drops the stored Up; an avatar on the new
+    target that never sends one pulls by its ground distance, not the last avatar's 3D one."""
+    r = rig()
+    r.emit(Up=reading(2.0))
+    r.m._on_target(None, ("127.0.0.1", r.vrc.osc_port))
+    r.held_at(forward=0.5)                      # inside slack on the ground
+    r.step()
+    assert r.last(VERTICAL_ADDR) == 0.0
+
+
+def test_no_up_is_the_old_cylinder(rig):
+    """Intended: an avatar that never sends Up, and one that sends exactly 0.0 (outside its box),
+    pull by the horizontal distance alone; the leash is not read as nothing sensed."""
+    for up in (None, 0.0):
+        r = rig()
+        if up is not None:
+            r.emit(Up=up)
+        r.held_at(forward=1.1)
+        r.step()
+        assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(0.5), abs=TOL), f"Up={up!r}"
