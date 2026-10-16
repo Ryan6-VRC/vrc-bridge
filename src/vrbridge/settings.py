@@ -294,13 +294,17 @@ class LeashSettings:
     declares its own: a mismatch mis-decodes every reading rather than merely feeling
     wrong. `slack`, `ramp` and `u_max` were run live against a desktop wearer and are unfelt in
     a headset; `axis_min` is the share of a pull under which an axis is left to the wearer.
-    `slack` is the fallback: an avatar that sends `<prefix>/Slack` sets its own."""
+    `slack` is the fallback in metres. An avatar's `<prefix>/Slack`, and `<prefix>/SlackPlanted`
+    while the leash is planted, are fractions in 0..1 (an expression-menu radial) mapped linearly
+    onto `slack_min`..`slack_max` metres."""
     enabled: bool = False                # registered by every shipped router when true
     prefix: str = "Leash"                # parameters are /avatar/parameters/<prefix>/<Name>
     ratio: float = 10.0                  # sender placed a tenth of the way to the far end
     span: float = 6.0                    # box receiver span, metres
     sender_radius: float = 0.05          # metres
     slack: float = 0.8                   # metres of free travel, while the avatar sends no Slack
+    slack_min: float = 0.5               # metres a Slack of 0.0 means
+    slack_max: float = 4.0               # metres a Slack of 1.0 means
     ramp: float = 0.6                    # metres past slack to full strength
     u_max: float = 1.0                   # strength cap, a fraction of the world's speed
     axis_min: float = 0.25               # an axis under this share of the pull stays the wearer's
@@ -316,6 +320,11 @@ class LeashSettings:
         _positive(self.span, f"{at}.span")
         _non_negative(self.sender_radius, f"{at}.sender_radius")
         _non_negative(self.slack, f"{at}.slack")
+        _non_negative(self.slack_min, f"{at}.slack_min")
+        _non_negative(self.slack_max, f"{at}.slack_max")
+        if self.slack_min > self.slack_max:
+            raise ConfigError(f"{at}.slack_min is {self.slack_min!r}, over {at}.slack_max "
+                              f"{self.slack_max!r}; expected slack_min <= slack_max")
         _positive(self.ramp, f"{at}.ramp")
         if not 0.0 < self.u_max <= 1.0:
             raise ConfigError(f"{at}.u_max is {self.u_max!r}; expected a value in (0, 1]")

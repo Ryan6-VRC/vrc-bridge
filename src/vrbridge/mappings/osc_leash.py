@@ -14,9 +14,14 @@ here or is the prototype avatar's declared geometry.
   settings must match it. A reading of exactly 0.0 is the sender outside the boxes, never a
   position, so two nonzero readings are also the sender's presence.
 * `<prefix>/Planted`, `<prefix>/Held` -- latching bools the avatar's own machine drives.
-* `<prefix>/Slack` -- an unsynced float the avatar declares with a default and no menu, in metres
-  and used as-is. While the worn avatar has sent one it is the pull's `slack`. Until then, and for
-  a NaN, infinite or negative value, `LeashSettings.slack` is the fallback.
+* `<prefix>/Slack` -- an unsynced float the avatar declares with a default, driven by an
+  expression-menu radial: a fraction 0..1, mapped linearly onto `LeashSettings.slack_min` ..
+  `slack_max` metres. A value outside 0..1 is clamped. While the worn avatar has sent one it is
+  the pull's `slack`. Until then, and for a NaN or infinite value, `LeashSettings.slack` (metres)
+  is the fallback.
+* `<prefix>/SlackPlanted` -- optional, same type and meaning as `Slack`. While the leash is Planted
+  (`Planted` true and `Held` false) it is the pull's `slack` once the avatar has sent a usable one.
+  Until then it falls back to `Slack`, then to `LeashSettings.slack`. Held ignores it.
 
 The mapping is active while it is enabled, `Held` or `Planted` is true, and both readings are
 nonzero. Otherwise it writes zeros and holds.
@@ -24,11 +29,18 @@ nonzero. Otherwise it writes zeros and holds.
 **Slack's first read.** The client sends a parameter over OSC only when its value changes, so a
 bridge started against a wearer already in the avatar never hears Slack. The first step that finds
 the gate open with no Slack stored therefore reads it off the client's OSCQuery node, on a thread of
-its own because the read blocks. The read happens on use rather than on the avatar change because a
+its own because the read blocks. SlackPlanted is read the same way, one thread and one floor per
+leaf, by the first step that finds the leash Planted with none stored; an avatar that does not
+declare it 404s, which costs one read per floor and leaves Slack as the planted slack. The read happens on use rather than on the avatar change because a
 cold load answers with a 404 or the outgoing avatar's tree for up to a minute (docs/design.md,
 the quant-channel directory's read-on-use ruling); an open gate means the new avatar is loaded and sending. A failed read leaves the
 fallback in place and is retried at most every `SLACK_REREAD_SECS`. A value that arrives over OSC
 wins over a read in flight, and an avatar change or a target selection discards one.
+
+**Slack changes mid-pull** when Held becomes Planted with a different SlackPlanted. The ratchet
+reads `slack` afresh each step: a larger one ends the pull by the usual rule (`d` back inside it),
+and a smaller one begins a pull by the usual two-step rule. A `peak` left at or inside the new
+`slack` is dropped, since it would give a negative strength and reverse the pull.
 
 **The pull, a ratchet.** `d = hypot(forward, right)`. Its strength is
 `u = min(u_max, (peak - slack) / ramp)`, where `peak` is the furthest distance this pull has held
@@ -70,9 +82,9 @@ with every set of zeros.
 mapping's lock so a reordered older datagram never overwrites a newer one. The step runs on the
 router's tick (`update()`), at most `LeashSettings.rate` times a second and never faster than the
 router ticks; nothing runs on the datagram thread but the store, and the avatar change's zeros.
-Slack's first read runs on its own thread and stores under the same lock.
+Each first read runs on its own thread and stores under the same lock.
 
-**Avatar change.** The inputs, Slack among them, are cleared and forgotten in the manager's cache,
+**Avatar change.** The inputs, Slack and SlackPlanted among them, are cleared and forgotten in the manager's cache,
 so the incoming avatar's first values count as changes. An OSC change naming the worn avatar clears them too,
 which fails safe: the wearer keeps control until the avatar's values next change.
 
@@ -103,6 +115,7 @@ RUN_ADDR = "/input/Run"
 RIGHT, FORWARD = "Right", "Forward"
 PLANTED, HELD = "Planted", "Held"
 SLACK = "Slack"
+SLACK_PLANTED = "SlackPlanted"
 READINGS = (RIGHT, FORWARD)
 FLAGS = (PLANTED, HELD)
 
@@ -113,7 +126,7 @@ STOP_RETRIES = 3
 # A decoded component smaller than this, in metres, carries nothing and is never lifted.
 AXIS_EPSILON = 1e-3
 STOP_RETRY_WAIT = 0.02
-# Slack's first read: a loopback GET, and the floor between attempts that fail or find no node.
+# Slack's and SlackPlanted's first read: a loopback GET, and the floor between attempts that fail or find no node.
 SLACK_FETCH_TIMEOUT = 1.0
 SLACK_REREAD_SECS = 2.0
 
@@ -144,7 +157,7 @@ class LeashMapping(Mapping):
         super().__init__(bridge)
         self._tune = tuning if tuning is not None else settings().leash
         self._addr = {leaf: f"{PARAM_ROOT}{self._tune.prefix}/{leaf}"
-                      for leaf in READINGS + FLAGS + (SLACK,)}
+                      for leaf in READINGS + FLAGS + (SLACK, SLACK_PLANTED)}
         # One lock over the stored inputs, the pull and what was last written. Held across UDP
         # sends (sendto, never a fetch) and across a cache read, which nests _lock ->
         # _cache_lock; nothing takes them the other way.
@@ -163,11 +176,12 @@ class LeashMapping(Mapping):
         self._sent: Dict[str, Optional[float]] = {VERTICAL_ADDR: None, HORIZONTAL_ADDR: None,
                                                   RUN_ADDR: None}
         self._last_step: Optional[float] = None
-        # Slack's first read (module docstring). A read carries the generation it started in and
-        # stores only if no avatar change or target selection has bumped it since.
+        # The first read of Slack and SlackPlanted (module docstring), per leaf. A read carries the
+        # generation it started in and stores only if no avatar change or target selection has
+        # bumped it since.
         self._gen = 0
-        self._slack_asked: Optional[float] = None
-        self._slack_reader: Optional[threading.Thread] = None
+        self._asked: Dict[str, float] = {}
+        self._readers: Dict[str, threading.Thread] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -206,7 +220,7 @@ class LeashMapping(Mapping):
                 self.bridge.osc.forget(a)
             self._d_prev = None
             self._gen += 1
-            self._slack_asked = None
+            self._asked.clear()
             self._rest_locked("the avatar changed")
 
     def _on_target(self, ctx, target) -> None:
@@ -214,7 +228,7 @@ class LeashMapping(Mapping):
         with self._lock:
             self._d_prev = None
             self._gen += 1
-            self._slack_asked = None
+            self._asked.clear()
             for address in self._sent:
                 self._sent[address] = None
 
@@ -246,33 +260,50 @@ class LeashMapping(Mapping):
     def _flag(self, leaf: str) -> bool:
         return bool(self._in.get(self._addr[leaf]))
 
+    def _usable(self, leaf: str) -> Optional[float]:
+        """The avatar's stored `leaf` as metres, or None when it has sent none usable."""
+        v = self._in.get(self._addr[leaf])
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return None
+        t = self._tune
+        return t.slack_min + min(max(float(v), 0.0), 1.0) * (t.slack_max - t.slack_min)
+
+    def _planted(self) -> bool:
+        """The leash is Planted, not Held; where both read true, Held's slack stands."""
+        return self._flag(PLANTED) and not self._flag(HELD)
+
     def _slack(self) -> float:
-        """The worn avatar's Slack in metres, or the config's when it has sent none usable."""
-        v = self._in.get(self._addr[SLACK])
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
-            return self._tune.slack
-        return float(v)
+        """The pull's slack in metres: while Planted the avatar's SlackPlanted, then its Slack,
+        then the config's."""
+        if self._planted():
+            v = self._usable(SLACK_PLANTED)
+            if v is not None:
+                return v
+        v = self._usable(SLACK)
+        return self._tune.slack if v is None else v
 
-    def _ask_slack_locked(self, now: float) -> None:
-        """Start Slack's first read unless one is stored, running, or asked inside the floor."""
-        if self._addr[SLACK] in self._in:
+    def _ask_locked(self, leaf: str, now: float) -> None:
+        """Start `leaf`'s first read unless one is stored, running, or asked inside the floor."""
+        if self._addr[leaf] in self._in:
             return
-        if self._slack_reader is not None and self._slack_reader.is_alive():
+        reader = self._readers.get(leaf)
+        if reader is not None and reader.is_alive():
             return
-        if self._slack_asked is not None and now - self._slack_asked < SLACK_REREAD_SECS:
+        asked = self._asked.get(leaf)
+        if asked is not None and now - asked < SLACK_REREAD_SECS:
             return
-        self._slack_asked = now
-        self._slack_reader = threading.Thread(target=self._read_slack, args=(self._gen,),
-                                              name="LeashSlackRead", daemon=True)
-        self._slack_reader.start()
+        self._asked[leaf] = now
+        reader = self._readers[leaf] = threading.Thread(
+            target=self._read, args=(leaf, self._gen), name=f"Leash{leaf}Read", daemon=True)
+        reader.start()
 
-    def _read_slack(self, gen: int) -> None:
-        address = self._addr[SLACK]
+    def _read(self, leaf: str, gen: int) -> None:
+        address = self._addr[leaf]
         # The blocking read, on this thread only, with no lock held.
         result = self.bridge.osc.fetch(address, timeout=SLACK_FETCH_TIMEOUT)
         if not result.ok:
-            self.bridge.log.debug("Leash: %s unread (%s); slack stays %.2f m from the config.",
-                                  address, result.reason, self._tune.slack)
+            self.bridge.log.debug("Leash: %s unread (%s); the slack falls back.", address,
+                                  result.reason)
             return
         with self._lock:
             if gen == self._gen and address not in self._in:
@@ -291,7 +322,9 @@ class LeashMapping(Mapping):
         if any(v is None for v in raw.values()):
             self._rest_locked()
             return
-        self._ask_slack_locked(now)
+        self._ask_locked(SLACK, now)
+        if self._planted():
+            self._ask_locked(SLACK_PLANTED, now)
         t = self._tune
         slack = self._slack()
         m = {leaf: decode(v, ratio=t.ratio, span=t.span, sender_radius=t.sender_radius)
@@ -301,6 +334,9 @@ class LeashMapping(Mapping):
         if d <= slack:
             self._rest_locked()
             return
+        if self._peak is not None and self._peak <= slack:
+            # slack rose past a pull in progress (Held to Planted): that pull is over
+            self._peak = None
         # A distance seen on one step alone may be a torn frame (module docstring, the ratchet).
         held = min(d, d_prev) if d_prev is not None else slack
         if held > slack:
