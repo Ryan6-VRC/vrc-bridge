@@ -412,8 +412,15 @@ class OSCManager:
         VRChat -- its only consumer -- does not read it to decide what to send us,
         so nothing turns on the difference. docs/design.md §OSCQuery interop gaps
         holds the measurement and the ruling that closing it buys nothing.
+
+        Idempotent per address: python-osc runs every handler mapped to an address, so a
+        second mapping would put one datagram through the change filter twice -- and a
+        listener that `forget()`s its own address in between would hear it twice.
         """
-        self._watched.add(address)
+        with self._cache_lock:
+            if address in self._watched:
+                return
+            self._watched.add(address)
         def _handler(addr, *args):
             val = args[0] if args else None
             self._update_cache_and_fire(addr, val)

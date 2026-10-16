@@ -258,6 +258,45 @@ def test_the_twin_copy_of_one_avatar_change_is_folded(monkeypatch):
     assert seen == [("/avatar/change", "avtr_same")]
 
 
+def _deliver(mgr, address, value):
+    """One datagram through the real dispatcher, as the server thread hands it over."""
+    from pythonosc.osc_message_builder import OscMessageBuilder
+    b = OscMessageBuilder(address=address)
+    b.add_arg(value)
+    mgr._disp.call_handlers_for_packet(b.build().dgram, ("127.0.0.1", 0))
+
+
+def test_one_datagram_is_one_pass_however_often_its_address_is_watched(monkeypatch):
+    """Every on_osc registration watches its address, and three mappings on /avatar/change
+    must not turn one datagram into three -- with no fold window to hide the repeats."""
+    monkeypatch.setattr(om, "REFIRE_FOLD_WINDOW_SECS", 0.0)
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = _collect(mgr)
+    for _ in range(3):
+        mgr.watch("/avatar/change")
+
+    _deliver(mgr, "/avatar/change", "avtr_x")
+
+    assert seen == [("/avatar/change", "avtr_x")]
+
+
+def test_a_listener_forgetting_its_own_address_hears_one_datagram_once():
+    """forget() inside the listener reopens the change filter, so a second mapping for the
+    address would deliver the same press again -- osc_wardrobe's slot forgets this way."""
+    mgr = om.OSCManager(advertise=False, discover=False)
+    seen = []
+    def listener(addr, val):
+        seen.append((addr, val))
+        mgr.forget(addr)
+    mgr.set_listener(listener)
+    mgr.watch("/avatar/parameters/Slot")
+    mgr.watch("/avatar/parameters/Slot")
+
+    _deliver(mgr, "/avatar/parameters/Slot", 3)
+
+    assert seen == [("/avatar/parameters/Slot", 3)]
+
+
 def test_a_changed_avatar_id_inside_the_window_still_fires(monkeypatch):
     """The window folds repeats, never changes: two swaps in quick succession are two
     events, or the second avatar's arrival is the one that goes missing."""
