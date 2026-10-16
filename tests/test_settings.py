@@ -81,6 +81,7 @@ def test_defaults_are_the_shipped_values():
     assert (le.enabled, le.prefix) == (False, "Leash")
     assert (le.ratio, le.span, le.sender_radius) == (10.0, 6.0, 0.05)
     assert (le.slack, le.ramp, le.u_max, le.axis_min, le.rate) == (0.8, 0.6, 1.0, 0.25, 60.0)
+    assert le.horizontal_min == 0.1
 
     # external_ai.py -- new with the mapping, so pinned against its docstring: off by default
     # because it opens a socket, loopback by default because the socket has no authentication,

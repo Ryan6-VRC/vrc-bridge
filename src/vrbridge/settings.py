@@ -296,7 +296,8 @@ class LeashSettings:
     a headset; `axis_min` is the share of a pull under which an axis is left to the wearer.
     `slack` is the fallback in metres. An avatar's `<prefix>/Slack`, and `<prefix>/SlackPlanted`
     while the leash is planted, are fractions in 0..1 (an expression-menu radial) mapped linearly
-    onto `slack_min`..`slack_max` metres."""
+    onto `slack_min`..`slack_max` metres. `horizontal_min` is the ground distance under which a
+    pull writes zeros, the wearer being under a raised stake."""
     enabled: bool = False                # registered by every shipped router when true
     prefix: str = "Leash"                # parameters are /avatar/parameters/<prefix>/<Name>
     ratio: float = 10.0                  # sender placed a tenth of the way to the far end
@@ -308,6 +309,7 @@ class LeashSettings:
     ramp: float = 0.6                    # metres past slack to full strength
     u_max: float = 1.0                   # strength cap, a fraction of the world's speed
     axis_min: float = 0.25               # an axis under this share of the pull stays the wearer's
+    horizontal_min: float = 0.1          # metres of ground distance under which a pull writes zeros
     # Steps per second, at most. The step runs on the router's tick, so a router ticking slower
     # (the CLI's run_forever ticks at 45 Hz) steps at its own rate.
     rate: float = 60.0
@@ -333,6 +335,9 @@ class LeashSettings:
             raise ConfigError(f"{at}.u_max is {self.u_max!r}; expected a value in (0, 1]")
         if not 0.0 <= self.axis_min < 1.0:
             raise ConfigError(f"{at}.axis_min is {self.axis_min!r}; expected a value in [0, 1)")
+        if not math.isfinite(self.horizontal_min):
+            raise ConfigError(f"{at}.horizontal_min is {self.horizontal_min!r}; expected a finite value")
+        _non_negative(self.horizontal_min, f"{at}.horizontal_min")
         _positive(self.rate, f"{at}.rate")
 
 
