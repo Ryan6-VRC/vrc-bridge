@@ -497,6 +497,8 @@ def test_the_prefix_names_every_input():
     (dict(span=0.0), "span"),
     (dict(slack_min=-0.1), "slack_min"),
     (dict(slack_min=2.0, slack_max=1.0), "slack_min"),
+    (dict(slack_min=float("nan")), "slack_min"),
+    (dict(slack_max=float("inf")), "slack_max"),
 ])
 def test_bad_leash_settings_name_the_key(kw, must_name):
     with pytest.raises(ConfigError, match=must_name):
@@ -1023,13 +1025,19 @@ def test_held_to_planted_with_a_smaller_slack_pulls_by_the_usual_rule(rig):
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((0.8 - metres(0.0)) / T.ramp), abs=TOL)
 
 
-def test_a_peak_inside_a_larger_planted_slack_never_reverses_the_pull(rig):
-    """Intended: when slack rises past the pull's peak but the distance is past it for one step
-    only, the old peak is dropped rather than giving a negative strength."""
+def test_a_peak_inside_a_larger_planted_slack_ends_that_pull(rig):
+    """Intended: when slack rises past the pull's peak while the distance is past it for one step
+    only, the old peak is dropped: that tick releases, and the next agreeing distance starts a pull
+    sized from the new slack. A kept peak would pull at |peak - slack| / ramp instead (lift() takes
+    the strength's magnitude, so it never shows as a reversal)."""
     r = slack_rig(rig, FakeTree({}))
     r.emit(Slack=0.0, SlackPlanted=0.2)         # 0.5 m, then 1.2 m
     r.held_at(forward=1.0)
     r.step()
+    assert r.m._peak == pytest.approx(1.0, abs=TOL)
     r.at(forward=1.3, Planted=True, Held=False)
     r.tick()
-    assert all(v >= 0.0 for v in r.values(VERTICAL_ADDR)), "the pull reversed"
+    assert r.m._peak is None
+    assert r.last(VERTICAL_ADDR) == 0.0, "the stale peak kept pulling"
+    r.tick()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.3 - metres(0.2)) / T.ramp), abs=TOL)

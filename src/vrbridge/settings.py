@@ -320,8 +320,11 @@ class LeashSettings:
         _positive(self.span, f"{at}.span")
         _non_negative(self.sender_radius, f"{at}.sender_radius")
         _non_negative(self.slack, f"{at}.slack")
-        _non_negative(self.slack_min, f"{at}.slack_min")
-        _non_negative(self.slack_max, f"{at}.slack_max")
+        for key in ("slack_min", "slack_max"):
+            v = getattr(self, key)
+            if not math.isfinite(v):
+                raise ConfigError(f"{at}.{key} is {v!r}; expected a finite value")
+            _non_negative(v, f"{at}.{key}")
         if self.slack_min > self.slack_max:
             raise ConfigError(f"{at}.slack_min is {self.slack_min!r}, over {at}.slack_max "
                               f"{self.slack_max!r}; expected slack_min <= slack_max")
