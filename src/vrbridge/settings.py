@@ -309,7 +309,7 @@ class LeashSettings:
     ramp: float = 0.6                    # metres past slack to full strength
     u_max: float = 1.0                   # strength cap, a fraction of the world's speed
     axis_min: float = 0.25               # an axis under this share of the pull stays the wearer's
-    horizontal_min: float = 0.1          # metres of ground distance under which a pull writes zeros
+    horizontal_min: float = 0.2          # metres of ground distance under which a pull writes zeros
     # Steps per second, at most. The step runs on the router's tick, so a router ticking slower
     # (the CLI's run_forever ticks at 45 Hz) steps at its own rate.
     rate: float = 60.0

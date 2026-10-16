@@ -67,8 +67,8 @@ The direction is horizontal and recomputed every tick from the current offset: a
 3D distance along the heading of its ground position. An axis whose share is under `axis_min` is
 left at zero so the wearer keeps that axis. While a pull is active and `h` is under
 `LeashSettings.horizontal_min`, the wearer is under the stake and walking cannot shorten the
-vertical part: both axes are written zero for that step and the ratchet is left as it is, so a
-wearer who walks out is pulled back at the strength the pull had. Each nonzero
+vertical part: both axes are written zero for that step and the ratchet is kept, still rising with
+the 3D distance as any pull's does, so a wearer who walks out is pulled back at that strength. Each nonzero
 component is lifted over the client's deadzone: `sign * (0.1 + 0.9 * min(|u * share|, 1))`, forward
 to `/input/Vertical`, right to `/input/Horizontal`. `/input/Run` is never raised; it is written 0
 with every set of zeros.
@@ -240,6 +240,9 @@ class LeashMapping(Mapping):
             self._d_prev = None
             self._gen += 1
             self._asked.clear()
+            # Up is optional, so a new target's avatar may never overwrite the last one's height
+            self._in.pop(self._addr[UP], None)
+            self.bridge.osc.forget(self._addr[UP])
             for address in self._sent:
                 self._sent[address] = None
 
