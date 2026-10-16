@@ -9,6 +9,8 @@ wearer feels is read off the fake: the writes that reached it on `/input/`. The 
   of 0.0 is the sender gone, never a position.
 * **The avatar's Slack is the pull's slack** while it has sent a usable one, read over OSCQuery
   on first use; otherwise the config's.
+* **SlackPlanted, optional, is the slack while Planted;** otherwise Slack, then the config's.
+  Held never uses it.
 * **The pull is a ratchet:** it begins past `slack`, its strength follows the furthest distance
   this pull held for two consecutive steps and never falls while the pull lasts, so a torn frame
   never sets it; its direction follows the offset every tick, and it ends, zeroed, the tick the
@@ -477,12 +479,12 @@ def test_both_axes_go_out_as_floats(rig):
 # --------------------------------------------------------------------------
 
 def test_the_prefix_names_every_input():
-    """Intended: all five inputs live under one configurable prefix."""
+    """Intended: all six inputs live under one configurable prefix."""
     bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
     m = LeashMapping(bridge, tuning=LeashSettings(prefix="Pet/Leash"))
     assert sorted(m._addr.values()) == sorted(
         f"/avatar/parameters/Pet/Leash/{leaf}"
-        for leaf in ("Right", "Forward", "Planted", "Held", "Slack"))
+        for leaf in ("Right", "Forward", "Planted", "Held", "Slack", "SlackPlanted"))
 
 
 @pytest.mark.parametrize("kw, must_name", [
@@ -493,6 +495,10 @@ def test_the_prefix_names_every_input():
     (dict(axis_min=1.0), "axis_min"),
     (dict(rate=0.0), "rate"),
     (dict(span=0.0), "span"),
+    (dict(slack_min=-0.1), "slack_min"),
+    (dict(slack_min=2.0, slack_max=1.0), "slack_min"),
+    (dict(slack_min=float("nan")), "slack_min"),
+    (dict(slack_max=float("inf")), "slack_max"),
 ])
 def test_bad_leash_settings_name_the_key(kw, must_name):
     with pytest.raises(ConfigError, match=must_name):
@@ -707,29 +713,34 @@ def slack_rig(rig, fetch: FakeFetch):
     return r
 
 
+def metres(f: float) -> float:
+    """What a Slack fraction means: linear onto the config's slack_min..slack_max."""
+    return T.slack_min + f * (T.slack_max - T.slack_min)
+
+
 def settled(r):
     """Wait for Slack's read thread, if one ran, to finish storing."""
-    reader = r.m._slack_reader
-    if reader is not None:
+    for reader in list(r.m._readers.values()):
         reader.join(5.0)
-        assert not reader.is_alive(), "Slack's read never finished"
+        assert not reader.is_alive(), "a first read never finished"
 
 
 def test_the_avatars_slack_overrides_the_config(rig):
-    """Intended: while the avatar has sent a Slack, it is the pull's slack in metres, as-is. At
-    1.1 m a config slack of 0.8 would pull at u = 0.5; a sent 0.5 pulls at u = 1."""
+    """Intended: while the avatar has sent a Slack, it is the pull's slack: a fraction mapped onto
+    slack_min..slack_max. At 1.1 m a config slack of 0.8 would pull at u = 0.5; a sent 0.0 is
+    slack_min, 0.5 m, and pulls at u = 1."""
     r = slack_rig(rig, found(0.2))
-    r.emit(Slack=0.5)
+    r.emit(Slack=0.0)
     r.held_at(forward=1.1)
     r.step()
-    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - 0.5) / T.ramp), abs=TOL)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - metres(0.0)) / T.ramp), abs=TOL)
     assert r.bridge.osc.fetch.reads == [], "a sent Slack was read again over OSCQuery"
 
 
 def test_the_avatars_slack_moves_the_edge_both_ways(rig):
     """Intended: a Slack past the offset holds the wearer free where the config would pull."""
     r = slack_rig(rig, found(0.2))
-    r.emit(Slack=1.5)
+    r.emit(Slack=0.5)                          # 2.25 m
     r.held_at(forward=1.4)
     r.step()
     assert r.written() == []
@@ -745,19 +756,27 @@ def test_the_config_is_the_fallback_when_no_slack_is_known(rig):
     assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - T.slack) / T.ramp), abs=TOL)
 
 
-def test_a_zero_slack_is_a_length(rig):
-    """Intended: 0.0 is a valid Slack, used as-is, so any offset past the sender pulls. At 0.3 m
-    the config's 0.8 would pull nothing; a sent 0.0 pulls at u = 0.5."""
+def test_a_zero_slack_is_slack_min(rig):
+    """Intended: 0.0 is a valid Slack and means slack_min. At 0.7 m the config's 0.8 would pull
+    nothing; a sent 0.0 (0.5 m) pulls."""
     r = slack_rig(rig, found(0.2))
     r.emit(Slack=0.0)
-    r.held_at(forward=0.3)
+    r.held_at(forward=0.7)
     r.step()
-    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(0.3 / T.ramp), abs=TOL)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(0.2 / T.ramp), abs=TOL)
 
 
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5, True])
+@pytest.mark.parametrize("sent, want", [(-0.5, 0.0), (7.0, 1.0)])
+def test_a_slack_outside_the_range_is_clamped(rig, sent, want):
+    """Intended: a Slack fraction outside 0..1 is clamped to the nearest end, not refused."""
+    r = slack_rig(rig, found(0.2))
+    r.emit(Slack=sent)
+    assert r.m._slack() == pytest.approx(metres(want))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True])
 def test_an_unusable_slack_falls_back_to_the_config(rig, bad):
-    """Intended: a NaN, infinite or negative Slack is never a length, so the config's slack
+    """Intended: a NaN or infinite Slack is never a length, so the config's slack
     stands in for it rather than a pull that never ends or always begins."""
     r = slack_rig(rig, found(0.2))
     r.vrc.emit(r.m._addr["Slack"], bad)
@@ -776,14 +795,14 @@ def test_an_avatar_change_forgets_the_slack(rig):
     assert wait_for(lambda: r.m._in == {}), "the change never reached the mapping"
     assert r.m._slack() == T.slack
     r.emit(Slack=0.5)
-    assert r.m._slack() == 0.5
+    assert r.m._slack() == metres(0.5)
 
 
 def test_the_first_open_gate_reads_slack_over_oscquery(rig):
     """Intended: a bridge started against a wearer already in the avatar hears no Slack, since
     the client sends only changes. The first step with the gate open reads the node once, and
     the read value sets the pull's slack from then on."""
-    r = slack_rig(rig, found(0.5))
+    r = slack_rig(rig, found(0.0))
     r.held_at(forward=0.3)                     # gate open, inside either slack
     r.tick()
     settled(r)
@@ -829,7 +848,7 @@ def test_a_value_sent_during_a_read_wins(rig):
     r.emit(Slack=0.5)
     fetch.release.set()
     settled(r)
-    assert r.m._slack() == 0.5
+    assert r.m._slack() == metres(0.5)
 
 
 @pytest.mark.parametrize("boundary", ["avatar", "target"])
@@ -851,3 +870,174 @@ def test_a_read_across_a_boundary_is_dropped(rig, boundary):
     settled(r)
     assert r.m._addr["Slack"] not in r.m._in
     assert r.m._slack() == T.slack
+
+
+# --------------------------------------------------------------------------
+# The avatar's SlackPlanted
+# --------------------------------------------------------------------------
+
+class FakeTree(FakeFetch):
+    """A `FakeFetch` that answers per leaf: `{"Slack": 0.5}`; any leaf not named 404s."""
+
+    def __init__(self, values: dict):
+        super().__init__(FetchResult(FETCH_NOT_FOUND))
+        self.values = values
+
+    def __call__(self, address, timeout=2.0):
+        super().__call__(address, timeout)
+        leaf = address.rsplit("/", 1)[1]
+        if leaf in self.values:
+            return FetchResult(FETCH_OK, value=self.values[leaf])
+        return self.result
+
+
+def planted_at(r, forward=0.0, right=0.0):
+    r.at(forward, right, Planted=True, Held=False)
+
+
+def test_planted_uses_slack_planted_and_held_uses_slack(rig):
+    """Intended: with both sent, the leash Planted pulls from SlackPlanted and Held from Slack.
+    At 1.1 m, Slack 0.0 (0.5 m) pulls at u = 1; SlackPlanted 0.1 (0.85 m) at u = 0.42."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.0, SlackPlanted=0.1)
+    planted_at(r, forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - metres(0.1)) / T.ramp), abs=TOL)
+    r.at(forward=1.1, Planted=False, Held=True)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - metres(0.0)) / T.ramp), abs=TOL)
+
+
+def test_planted_without_slack_planted_uses_slack_then_the_config(rig):
+    """Intended: an avatar with no SlackPlanted (the node 404s) plants on its Slack, and one with
+    neither on the config's."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.0)
+    planted_at(r, forward=1.1)
+    r.step()
+    settled(r)
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - metres(0.0)) / T.ramp), abs=TOL)
+    r2 = slack_rig(rig, FakeTree({}))
+    planted_at(r2, forward=1.1)
+    r2.step()
+    settled(r2)
+    assert r2.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - T.slack) / T.ramp), abs=TOL)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True])
+def test_an_unusable_slack_planted_falls_back_to_slack(rig, bad):
+    """Intended: a NaN or infinite SlackPlanted is never a length, so the avatar's
+    Slack stands in for it while Planted."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.0)
+    r.vrc.emit(r.m._addr["SlackPlanted"], bad)
+    assert wait_for(lambda: r.m._addr["SlackPlanted"] in r.m._in)
+    planted_at(r, forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.1 - metres(0.0)) / T.ramp), abs=TOL)
+
+
+def test_a_zero_slack_planted_is_a_length(rig):
+    """Intended: 0.0 is a valid SlackPlanted (slack_min), not a fall-through to Slack."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.5, SlackPlanted=0.0)
+    planted_at(r, forward=0.7)
+    r.step()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled(0.2 / T.ramp), abs=TOL)
+
+
+def test_an_avatar_change_forgets_the_slack_planted(rig):
+    """Intended: SlackPlanted belongs to the avatar that sent it. After a change, Planted falls
+    back to Slack until the incoming avatar's arrives."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.5, SlackPlanted=0.9, Planted=True, Held=False)
+    assert r.m._slack() == pytest.approx(metres(0.9))
+    r.vrc.emit(AVATAR_CHANGE_ADDR, "avtr_00000000-0000-0000-0000-000000000001")
+    assert wait_for(lambda: r.m._in == {}), "the change never reached the mapping"
+    r.emit(Planted=True, Held=False, Slack=0.5)
+    assert r.m._slack() == metres(0.5)
+    r.emit(SlackPlanted=0.9)
+    assert r.m._slack() == pytest.approx(metres(0.9))
+
+
+def test_the_first_open_planted_gate_reads_slack_planted_once(rig):
+    """Intended: Planted with no SlackPlanted stored reads its node once and uses the answer. A
+    stored one is not read again. Held never reads it."""
+    r = slack_rig(rig, FakeTree({"Slack": 0.5, "SlackPlanted": 0.9}))
+    r.held_at(forward=0.3)
+    r.tick()
+    settled(r)
+    assert r.bridge.osc.fetch.reads == [r.m._addr["Slack"]], "Held read SlackPlanted"
+    planted_at(r, forward=0.3)
+    r.tick()
+    settled(r)
+    assert r.bridge.osc.fetch.reads.count(r.m._addr["SlackPlanted"]) == 1
+    assert r.m._slack() == pytest.approx(metres(0.9))
+    r.tick()
+    settled(r)
+    assert len(r.bridge.osc.fetch.reads) == 2, "a stored value was read again"
+
+
+def test_a_missing_slack_planted_costs_one_read_per_floor(rig):
+    """Intended: an avatar that declares no SlackPlanted 404s; it is asked again only past
+    SLACK_REREAD_SECS, and Slack, read in the same step, stays the planted slack."""
+    r = slack_rig(rig, FakeTree({"Slack": 0.5}))
+    planted_at(r, forward=0.3)
+    sp = r.m._addr["SlackPlanted"]
+    r.m.update(r.now)
+    settled(r)
+    assert r.m._slack() == metres(0.5)
+    assert r.bridge.osc.fetch.reads.count(sp) == 1
+    r.m.update(r.now + osc_leash.SLACK_REREAD_SECS / 2)
+    settled(r)
+    assert r.bridge.osc.fetch.reads.count(sp) == 1, "re-read inside the floor"
+    r.m.update(r.now + osc_leash.SLACK_REREAD_SECS + 0.1)
+    settled(r)
+    assert r.bridge.osc.fetch.reads.count(sp) == 2
+    assert r.m._slack() == metres(0.5)
+
+
+def test_held_to_planted_with_a_larger_slack_ends_the_pull(rig):
+    """Intended: slack changing mid-pull is read afresh. A pull held at 1.1 m on Slack 0.0 (0.5 m), then
+    Planted with SlackPlanted 0.5 (2.25 m), is inside the new slack: the pull ends, zeroed."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.0, SlackPlanted=0.5)         # 0.5 m, then 2.25 m
+    r.held_at(forward=1.1)
+    r.step()
+    assert r.last(VERTICAL_ADDR) > 0.1
+    r.at(forward=1.1, Planted=True, Held=False)
+    r.tick()
+    assert_at_rest(r)
+    assert r.m._peak is None
+
+
+def test_held_to_planted_with_a_smaller_slack_pulls_by_the_usual_rule(rig):
+    """Intended: a smaller planted slack starts a pull as any pull starts, on a distance two steps
+    agree on. The Held steps already agreed on 0.8 m, which was inside the Held slack, so the
+    first Planted step pulls."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.5, SlackPlanted=0.0)         # 2.25 m, then 0.5 m
+    r.held_at(forward=0.8)
+    r.step()
+    assert r.written() == []
+    r.at(forward=0.8, Planted=True, Held=False)
+    r.tick()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((0.8 - metres(0.0)) / T.ramp), abs=TOL)
+
+
+def test_a_peak_inside_a_larger_planted_slack_ends_that_pull(rig):
+    """Intended: when slack rises past the pull's peak while the distance is past it for one step
+    only, the old peak is dropped: that tick releases, and the next agreeing distance starts a pull
+    sized from the new slack. A kept peak would pull at |peak - slack| / ramp instead (lift() takes
+    the strength's magnitude, so it never shows as a reversal)."""
+    r = slack_rig(rig, FakeTree({}))
+    r.emit(Slack=0.0, SlackPlanted=0.2)         # 0.5 m, then 1.2 m
+    r.held_at(forward=1.0)
+    r.step()
+    assert r.m._peak == pytest.approx(1.0, abs=TOL)
+    r.at(forward=1.3, Planted=True, Held=False)
+    r.tick()
+    assert r.m._peak is None
+    assert r.last(VERTICAL_ADDR) == 0.0, "the stale peak kept pulling"
+    r.tick()
+    assert r.last(VERTICAL_ADDR) == pytest.approx(pulled((1.3 - metres(0.2)) / T.ramp), abs=TOL)

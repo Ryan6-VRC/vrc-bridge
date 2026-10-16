@@ -169,7 +169,7 @@ def test_bridge_persist_contract():
 
 
 def test_leash_addresses():
-    """The client's three `/input/` addresses and its per-axis deadzone, measured; the five
+    """The client's three `/input/` addresses and its per-axis deadzone, measured; the six
     parameter leaves are a contract with the leash's vrc-patterns entry, under a prefix the
     settings name. Renamed here alone, the leash never activates, with nothing logged."""
     from vrbridge.mappings import osc_leash as le
@@ -180,6 +180,7 @@ def test_leash_addresses():
     assert le.READINGS == ("Right", "Forward")
     assert le.FLAGS == ("Planted", "Held")
     assert le.SLACK == "Slack"
+    assert le.SLACK_PLANTED == "SlackPlanted"
     assert le.CLIENT_DEADZONE == 0.1
 
 
