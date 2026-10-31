@@ -152,7 +152,7 @@ class MappingRouter(ABC):
                         m.update(now)
                     except Exception:
                         # One mapping must not take down the loop -- but it must
-                        # not vanish either (CLAUDE.md rule 7).
+                        # not vanish either.
                         self._report_update_failure(m.name, now)
 
                 time.sleep(tick)
