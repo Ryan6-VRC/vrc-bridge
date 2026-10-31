@@ -69,7 +69,7 @@ _OSCQUERY_TYPES: Dict[Optional[str], Callable[[Any], Any]] = {
 #: is a normal state and not an error; a transport failure means we learned nothing and
 #: should ask again; malformed means the peer answered something we cannot use, which is
 #: worth reporting once rather than retrying. _host_info swallows all three into None,
-#: and a caller inheriting that cannot keep CLAUDE.md rule 7's named-offender promise.
+#: and a caller inheriting that cannot keep the named-offender promise.
 FETCH_OK = "ok"
 FETCH_NO_PEER = "no-peer"        # nothing resolved (pinned: no client advertises the pinned port)
 FETCH_PEER_GONE = "peer-gone"    # a peer was resolved, then withdrew its service
