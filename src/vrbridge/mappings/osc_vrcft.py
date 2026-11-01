@@ -61,13 +61,29 @@ class VRCFTMapping(Mapping):
     toggles at whatever VRCFT's state was at the last swap, so a VRCFT started after the
     avatar loaded read 0/0 until the next swap. `update()` therefore also looks at the
     service every `service_poll_secs` and sends only when the answer differs from the last
-    one this mapping acted on. It polls because `OSCManager` offers no event for an
-    arbitrary service coming or going: `add_target_listener` and `add_peer_listener` fire
-    for the VRChat client, never for VRCFT, and a new service-listener hook would be a
-    manager API for one caller where `is_service_running` is already a cheap read. The
-    first look only records the state, so a mapping starting under a running VRCFT sends
-    nothing until an avatar change or a transition; an armed avatar-change deadline owns
-    the next send, so polling pauses while one is pending.
+    one this mapping sent. It polls because no `OSCManager` hook reports an arbitrary
+    service arriving or leaving: target listeners report send-target selections, peer
+    listeners a pinned peer resolving, and a new service-listener hook would be manager
+    API for one caller where `is_service_running` is already a cheap read. An armed
+    avatar-change deadline owns the next send, so polling pauses while one is pending.
+
+    *The first look records and sends nothing.* Sending on it would zero the toggles at
+    every startup, because discovery fills `_discovered_services` only after
+    `get_service_info` (2 s timeout) returns, so the first look usually reads False even
+    with VRCFT running. In production an already-running VRCFT therefore shows up as a
+    transition a few seconds in and is sent then. The test fake has no discovery latency,
+    so there the first look reads the true state and a running VRCFT sends nothing until a
+    swap or a transition; that difference is the fake's, not a second behaviour.
+
+    *A send that did not land is not recorded.* `_last_running` and the checkpoint move
+    only when every `send` returned True, and a failed one sets `_resend` so the next poll
+    sends again whether or not the state changed. Two cases need it: no target yet, and
+    VRCFT holding an empty target slot (design.md, Target selection) so the set went to
+    VRCFT's port while a VRChat that was already loaded sends no `/avatar/change` to
+    repair it. A target selection (`on_target_selected`) sets `_resend` too, bumps `_gen`
+    so an apply in flight for the old target cannot record, and rewinds the poll clock so
+    the next tick sends to the new target. The send that went to VRCFT's own port is
+    recorded as landed, which is why the selection, not the send, is the repair.
 
     *The cost of that choice, stated because it is not obvious at the call site:* this
     mapping now needs its `update()` driven. Under any shipped router it is; a host that
@@ -88,6 +104,9 @@ class VRCFTMapping(Mapping):
         # What the last send (or the first poll) saw, so a poll sends only on a transition.
         # None until either has run. Under _lock.
         self._last_running: bool | None = None
+        # The next poll sends whether or not the state changed: the last send failed or the
+        # send target moved. Under _lock.
+        self._resend: bool = False
         # Wall-clock time of the next service poll, same clock as _due. Under _lock.
         self._next_poll: float = 0.0
         # Armed on a datagram thread, read and cleared on the router loop thread.
@@ -96,6 +115,17 @@ class VRCFTMapping(Mapping):
     def _attach(self) -> None:
         """Register a callback for avatar changes."""
         self.bridge.on_osc("/avatar/change", self._gate(self._on_avatar_change))
+        self.bridge.on_target_selected(self._gate(self._on_target_selected))
+
+    def _on_target_selected(self, ctx, target) -> None:
+        """A send target was chosen or re-resolved: what we last sent may have gone elsewhere.
+
+        Runs on zeroconf's dispatch thread, so it only flips fields; the poll does the send.
+        """
+        with self._lock:
+            self._gen += 1
+            self._resend = True
+            self._next_poll = 0.0
 
     def _on_avatar_change(self, ctx, address: str, avatar_id: str):
         """Arm the deferred check. Returns immediately; `update()` does the work.
@@ -158,14 +188,21 @@ class VRCFTMapping(Mapping):
         with self._lock:
             if gen != self._gen or not self.enabled:
                 return
-            previous = self._last_running
-            self._last_running = is_vrcft_running
-            if on_change_only and (previous is None or previous == is_vrcft_running):
-                return
-            self._send(params_to_set, is_vrcft_running)
+            if on_change_only and not self._resend:
+                previous = self._last_running
+                if previous is None:
+                    self._last_running = is_vrcft_running
+                    return
+                if previous == is_vrcft_running:
+                    return
+            if self._send(params_to_set, is_vrcft_running):
+                self._last_running = is_vrcft_running
+                self._resend = False
+            else:
+                self._resend = True
 
-    def _send(self, params_to_set: dict[str, bool], is_vrcft_running: bool) -> None:
-        """Log and send. Called with `_lock` held."""
+    def _send(self, params_to_set: dict[str, bool], is_vrcft_running: bool) -> bool:
+        """Log and send; True only if every send landed. Called with `_lock` held."""
         if is_vrcft_running:
             self.bridge.log.info("VRCFT detected. Activating face tracking parameters.")
         else:
@@ -174,5 +211,5 @@ class VRCFTMapping(Mapping):
         # osc.send directly rather than through a stashed CallbackContext: ctx.send is a
         # passthrough to it, and index_puppet's update() already sends this way. Holding a
         # ctx from the arming callback would outlive the event it came from for no gain.
-        for addr, val in params_to_set.items():
-            self.bridge.osc.send(addr, val)
+        results = [self.bridge.osc.send(addr, val) for addr, val in params_to_set.items()]
+        return all(results)

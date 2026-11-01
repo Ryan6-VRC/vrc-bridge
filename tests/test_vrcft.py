@@ -24,11 +24,15 @@ class _Osc:
     def __init__(self, vrcft_running: bool = False):
         self.vrcft_running = vrcft_running
         self.sent: list[tuple[str, object]] = []
+        # What OSCManager.send returns: False when no target is set.
+        self.has_target = True
 
     def is_service_running(self, name: str) -> bool:
         return self.vrcft_running
 
     def send(self, address: str, value) -> bool:
+        if not self.has_target:
+            return False
         self.sent.append((address, value))
         return True
 
@@ -46,9 +50,13 @@ class _Bridge:
         self.log = self._Log()
         self.osc = _Osc(vrcft_running)
         self.handlers: list = []
+        self.target_handlers: list = []
 
     def on_osc(self, address, callback, *, watch=None):
         self.handlers.append((address, callback))
+
+    def on_target_selected(self, callback):
+        self.target_handlers.append(callback)
 
 
 def _armed(vrcft_running: bool = False):
@@ -289,16 +297,6 @@ def _loaded(vrcft_running: bool = False):
     return bridge, m, t
 
 
-def test_the_tested_module_is_this_checkouts():
-    """An editable install records one absolute path, so a second checkout can import the
-    first one's `src/` and pass whatever it changed (`docs/dispatched-work.md` Worktree
-    mechanics). The printed path is what a run reports beside its pass count."""
-    from pathlib import Path
-    print("osc_vrcft.__file__ =", osc_vrcft.__file__)
-    src = Path(__file__).resolve().parents[1] / "src"
-    assert Path(osc_vrcft.__file__).resolve().is_relative_to(src), osc_vrcft.__file__
-
-
 def test_both_toggles_go_active_when_vrcft_appears_after_the_avatar_loaded():
     bridge, m, t = _loaded(vrcft_running=False)
     bridge.osc.vrcft_running = True
@@ -397,6 +395,73 @@ def test_the_toggles_are_sent_as_bools_not_ints():
     `1 == True` in Python, so an equality assertion alone cannot see the difference."""
     for params in (osc_vrcft.ACTIVE_PARAMS, osc_vrcft.INACTIVE_PARAMS):
         assert all(type(v) is bool for v in params.values())
+
+
+# A send that did not land is not recorded: no target yet, or a target that is not VRChat.
+
+def test_a_poll_send_with_no_target_is_retried_until_it_lands():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.osc.has_target = False
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    m.update(t + 2 * POLL)
+    assert bridge.osc.sent == []
+    bridge.osc.has_target = True
+    m.update(t + 3 * POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+    bridge.osc.sent.clear()
+    m.update(t + 4 * POLL)
+    assert bridge.osc.sent == [], "kept resending after the send landed"
+
+
+def test_an_avatar_change_send_with_no_target_is_retried_by_the_poll():
+    bridge = _Bridge(vrcft_running=True)
+    bridge.osc.has_target = False
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    m._on_avatar_change(None, "/avatar/change", "avtr_first")
+    t = m._due
+    m.update(t)
+    assert bridge.osc.sent == []
+    bridge.osc.has_target = True
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_resends_the_current_state_to_the_new_target():
+    """VRCFT can take an empty target slot before VRChat is found, so the set recorded as
+    sent went to VRCFT's port; a VRChat that was already loaded sends no /avatar/change."""
+    bridge, m, t = _loaded(vrcft_running=True)
+    on_target = bridge.target_handlers[0]
+    on_target(None, ("127.0.0.1", 9000))
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+    bridge.osc.sent.clear()
+    m.update(t + 2 * POLL)
+    assert bridge.osc.sent == []
+
+
+def test_an_apply_in_flight_for_the_old_target_does_not_record():
+    bridge, m, t = _loaded(vrcft_running=False)
+
+    def _racing_check(name):
+        bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+        return True
+    bridge.osc.is_service_running = _racing_check
+
+    m.update(t + POLL)                       # transition seen, then the target moves: dropped
+    assert bridge.osc.sent == []
+    bridge.osc.is_service_running = lambda name: True
+    m.update(t + POLL + 0.01)                # the target selection rewound the poll clock
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_on_a_disabled_mapping_is_ignored():
+    bridge, m, t = _loaded(vrcft_running=True)
+    m.deactivate()
+    bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+    assert m._resend is False
 
 
 # Through the real OSCManager: its browser listener is what flips is_service_running in

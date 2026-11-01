@@ -73,6 +73,9 @@ def test_defaults_are_the_shipped_values():
     assert s.muteproxy.press_duration == 1.0 / 30
     assert s.vrcft.service_name == "VRCFT"
     assert s.vrcft.avatar_load_delay_secs == 1.0
+    # service_poll_secs is new with the mapping's service poll rather than moved, so pinned
+    # against its docstring: a few seconds is the lag the wearer sees when VRCFT starts after
+    # the avatar loaded, and one OSCManager lock acquire per poll.
     assert s.vrcft.service_poll_secs == 2.0
 
     # osc_leash.py -- new with the mapping rather than moved, so pinned against its docstring:
