@@ -235,11 +235,15 @@ class MuteProxySettings:
 class VRCFTSettings:
     service_name: str = "VRCFT"          # substring matched against discovered mDNS names
     avatar_load_delay_secs: float = 1.0
+    # New with the mapping's service poll rather than moved, so pinned against its docstring:
+    # how often to re-check whether VRCFT has appeared or gone.
+    service_poll_secs: float = 2.0
 
     def validate(self, at: str) -> None:
         if not self.service_name:
             raise ConfigError(f"{at}.service_name is empty; nothing would ever match")
         _non_negative(self.avatar_load_delay_secs, f"{at}.avatar_load_delay_secs")
+        _positive(self.service_poll_secs, f"{at}.service_poll_secs")
 
 
 @dataclass(frozen=True)

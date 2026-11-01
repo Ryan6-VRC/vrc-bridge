@@ -24,11 +24,15 @@ class _Osc:
     def __init__(self, vrcft_running: bool = False):
         self.vrcft_running = vrcft_running
         self.sent: list[tuple[str, object]] = []
+        # What OSCManager.send returns: False when no target is set.
+        self.has_target = True
 
     def is_service_running(self, name: str) -> bool:
         return self.vrcft_running
 
     def send(self, address: str, value) -> bool:
+        if not self.has_target:
+            return False
         self.sent.append((address, value))
         return True
 
@@ -38,7 +42,10 @@ class _Osc:
 
 class _Bridge:
     class _Log:
-        def info(self, *a): pass
+        def __init__(self):
+            self.infos: list = []
+        def info(self, *a): self.infos.append(a)
+        def debug(self, *a): pass
         def warning(self, *a): pass
         def exception(self, *a): pass
 
@@ -46,9 +53,13 @@ class _Bridge:
         self.log = self._Log()
         self.osc = _Osc(vrcft_running)
         self.handlers: list = []
+        self.target_handlers: list = []
 
     def on_osc(self, address, callback, *, watch=None):
         self.handlers.append((address, callback))
+
+    def on_target_selected(self, callback):
+        self.target_handlers.append(callback)
 
 
 def _armed(vrcft_running: bool = False):
@@ -258,3 +269,272 @@ def test_a_deactivation_arriving_during_the_fire_cancels_that_fire():
 
     m.update(m._due)
     assert bridge.osc.sent == []
+
+
+# --------------------------------------------------------------------------
+# Following VRCFT without an avatar change
+# --------------------------------------------------------------------------
+# The defect: the check ran only on /avatar/change, so a VRCFT started after the avatar
+# loaded left both toggles at 0 until the next swap. `update()` now also polls the service
+# every `service_poll_secs` and sends only on a transition.
+
+POLL = 2.0
+POLL_TUNE = VRCFTSettings(service_name="VRCFT", avatar_load_delay_secs=DELAY, service_poll_secs=POLL)
+
+
+def _loaded(vrcft_running: bool = False):
+    """A mapping whose avatar-change check has already fired, with `bridge.osc.sent` cleared.
+
+    Returns the clock the fire happened at, so a later tick is placed relative to it.
+    """
+    bridge = _Bridge(vrcft_running)
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    m._on_avatar_change(None, "/avatar/change", "avtr_first")
+    t = m._due
+    m.update(t)
+    assert dict(bridge.osc.sent) == (osc_vrcft.ACTIVE_PARAMS if vrcft_running
+                                     else osc_vrcft.INACTIVE_PARAMS)
+    bridge.osc.sent.clear()
+    return bridge, m, t
+
+
+def test_both_toggles_go_active_when_vrcft_appears_after_the_avatar_loaded():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_both_toggles_go_inactive_when_vrcft_disappears():
+    bridge, m, t = _loaded(vrcft_running=True)
+    bridge.osc.vrcft_running = False
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.INACTIVE_PARAMS
+
+
+def test_an_unchanged_service_is_not_resent_by_the_poll():
+    bridge, m, t = _loaded(vrcft_running=True)
+    for i in range(1, 6):
+        m.update(t + i * POLL)
+    assert bridge.osc.sent == []
+
+
+def test_the_poll_waits_out_its_interval():
+    """update() runs at update_hz; the service is read every `service_poll_secs`, not per tick."""
+    bridge, m, t = _loaded(vrcft_running=False)
+    m.update(t + POLL)                       # a poll: sees no change, schedules the next
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL + POLL / 2)
+    assert bridge.osc.sent == [], "polled again inside the interval"
+    m.update(t + 2 * POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_each_transition_sends_once():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    m.update(t + 2 * POLL)
+    bridge.osc.vrcft_running = False
+    m.update(t + 3 * POLL)
+    m.update(t + 4 * POLL)
+    sent = bridge.osc.sent
+    n = len(osc_vrcft.ACTIVE_PARAMS)
+    assert dict(sent[:n]) == osc_vrcft.ACTIVE_PARAMS
+    assert dict(sent[n:]) == osc_vrcft.INACTIVE_PARAMS
+    assert len(sent) == 2 * n
+
+
+def test_a_mapping_that_has_seen_no_avatar_change_follows_vrcft_after_its_first_look():
+    """The first poll records the state without sending; a transition after it does send."""
+    bridge = _Bridge(vrcft_running=False)
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    t = time.time()
+    m.update(t)
+    assert bridge.osc.sent == [], "the first look sent without a transition"
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_the_poll_stays_out_of_the_way_of_a_pending_avatar_change():
+    """An armed deadline owns the next send: the avatar-change path looks at the world once
+    the avatar is there, and a poll in the delay window would write during the load."""
+    bridge, m, t = _loaded(vrcft_running=False)
+    m._on_avatar_change(None, "/avatar/change", "avtr_second")
+    bridge.osc.vrcft_running = True
+    m.update(m._due - DELAY / 2)
+    assert bridge.osc.sent == []
+    m.update(m._due)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_disabled_mapping_does_not_poll():
+    bridge, m, t = _loaded(vrcft_running=False)
+    m.deactivate()
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    assert bridge.osc.sent == []
+
+
+def test_an_avatar_change_arriving_during_a_poll_cancels_it():
+    bridge, m, t = _loaded(vrcft_running=False)
+
+    def _racing_check(name):
+        m._on_avatar_change(None, "/avatar/change", "avtr_second")
+        return True
+    bridge.osc.is_service_running = _racing_check
+
+    m.update(t + POLL)
+    assert bridge.osc.sent == []
+
+
+def test_the_toggles_are_sent_as_bools_not_ints():
+    """Both are avatar Bool parameters; docs/osc.md has the type tag decide the dispatch, and
+    `1 == True` in Python, so an equality assertion alone cannot see the difference."""
+    for params in (osc_vrcft.ACTIVE_PARAMS, osc_vrcft.INACTIVE_PARAMS):
+        assert all(type(v) is bool for v in params.values())
+
+
+# A send that did not land is not recorded: no target yet, or a target that is not VRChat.
+
+def test_a_poll_send_with_no_target_is_retried_until_it_lands():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.osc.has_target = False
+    bridge.osc.vrcft_running = True
+    m.update(t + POLL)
+    m.update(t + 2 * POLL)
+    assert bridge.osc.sent == []
+    bridge.osc.has_target = True
+    m.update(t + 3 * POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+    bridge.osc.sent.clear()
+    m.update(t + 4 * POLL)
+    assert bridge.osc.sent == [], "kept resending after the send landed"
+
+
+def test_an_avatar_change_send_with_no_target_is_retried_by_the_poll():
+    bridge = _Bridge(vrcft_running=True)
+    bridge.osc.has_target = False
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    m._on_avatar_change(None, "/avatar/change", "avtr_first")
+    t = m._due
+    m.update(t)
+    assert bridge.osc.sent == []
+    bridge.osc.has_target = True
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_resends_the_current_state_to_the_new_target():
+    """VRCFT can take an empty target slot before VRChat is found, so the set recorded as
+    sent went to VRCFT's port; a VRChat that was already loaded sends no /avatar/change."""
+    bridge, m, t = _loaded(vrcft_running=True)
+    on_target = bridge.target_handlers[0]
+    on_target(None, ("127.0.0.1", 9000))
+    m.update(t + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+    bridge.osc.sent.clear()
+    m.update(t + 2 * POLL)
+    assert bridge.osc.sent == []
+
+
+def test_an_apply_in_flight_for_the_old_target_does_not_record():
+    bridge, m, t = _loaded(vrcft_running=False)
+
+    def _racing_check(name):
+        bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+        return True
+    bridge.osc.is_service_running = _racing_check
+
+    m.update(t + POLL)                       # transition seen, then the target moves: dropped
+    assert bridge.osc.sent == []
+    assert m._last_running is False, "the dropped apply recorded the state it did not send"
+    bridge.osc.is_service_running = lambda name: True
+    m.update(t + POLL + 0.01)                # the target selection rewound the poll clock
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_while_disabled_is_resent_on_reactivation():
+    """A service transition while disabled is caught up on reactivation; a target that
+    moved while disabled is owed the same, or no poll would ever send to it."""
+    bridge, m, t = _loaded(vrcft_running=True)
+    m.deactivate()
+    bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+    m.update(t + POLL)
+    assert bridge.osc.sent == []
+    m.activate()
+    m.update(t + 2 * POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_before_any_send_landed_keeps_the_first_look_rule():
+    """VRChat resolving before VRCFT's own add_service: the poll reads False with VRCFT
+    running, and a forced send there would zero the toggles the first look protects."""
+    bridge = _Bridge(vrcft_running=False)
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    m.update(100.0)                          # the first look records False
+    bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+    m.update(100.01)
+    assert bridge.osc.sent == [], "sent an unconfirmed False on a startup target selection"
+    bridge.osc.vrcft_running = True          # VRCFT's discovery completes
+    m.update(100.01 + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_retries_through_an_outage_announce_only_the_send_that_lands():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.log.infos.clear()
+    bridge.osc.has_target = False
+    bridge.osc.vrcft_running = True
+    for k in range(1, 6):
+        m.update(t + k * POLL)
+    assert bridge.log.infos == [], "a failed retry logged at INFO every poll"
+    bridge.osc.has_target = True
+    m.update(t + 6 * POLL)
+    assert len(bridge.log.infos) == 1
+
+
+# Through the real OSCManager: its browser listener is what flips is_service_running in
+# production, and a real datagram is what shows the wire type. Discovery itself stays a
+# live-run concern (fake_vrchat's header).
+
+def test_toggles_follow_the_services_browser_record_to_the_client():
+    from .fake_vrchat import FakeVRChat
+    from .test_target_selection import VRCFT, _ZcStub, service
+    from vrbridge.osc_manager import OSCManager
+
+    with FakeVRChat() as client, FakeVRChat() as vrcft_peer:
+        mgr = OSCManager(advertise=False, target=("127.0.0.1", client.osc_port))
+        listener = OSCManager._BrowserListener(mgr)
+        bridge = _Bridge()
+        bridge.osc = mgr
+        m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+        m.register()
+        m.activate()
+
+        lip, eye = "/avatar/parameters/LipTrackingActive", "/avatar/parameters/EyeTrackingActive"
+        m._on_avatar_change(None, "/avatar/change", "avtr_first")
+        t = m._due
+        m.update(t)
+        assert client.wait_for_count(2)
+        assert client.values_for(lip) == [False] and client.values_for(eye) == [False]
+
+        listener.add_service(_ZcStub(service(VRCFT, vrcft_peer.http_port)),
+                             "_oscjson._tcp.local.", VRCFT)
+        m.update(t + POLL)
+        assert client.wait_for_count(4)
+        assert client.values_for(lip)[-1] is True and client.values_for(eye)[-1] is True
+
+        listener.remove_service(None, "_oscjson._tcp.local.", VRCFT)
+        m.update(t + 2 * POLL)
+        assert client.wait_for_count(6)
+        assert client.values_for(lip)[-1] is False and client.values_for(eye)[-1] is False
