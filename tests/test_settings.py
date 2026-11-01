@@ -73,6 +73,7 @@ def test_defaults_are_the_shipped_values():
     assert s.muteproxy.press_duration == 1.0 / 30
     assert s.vrcft.service_name == "VRCFT"
     assert s.vrcft.avatar_load_delay_secs == 1.0
+    assert s.vrcft.service_poll_secs == 2.0
 
     # osc_leash.py -- new with the mapping rather than moved, so pinned against its docstring:
     # the geometry is the prototype avatar's, and slack/ramp/u_max are the values run live

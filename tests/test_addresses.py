@@ -122,10 +122,10 @@ def test_muteproxy_addresses():
 
 def test_vrcft_addresses():
     from vrbridge.mappings import osc_vrcft as vrcft
-    assert vrcft.ACTIVE_PARAMS == {"/avatar/parameters/LipTrackingActive": 1,
-                                   "/avatar/parameters/EyeTrackingActive": 1}
-    assert vrcft.INACTIVE_PARAMS == {"/avatar/parameters/LipTrackingActive": 0,
-                                     "/avatar/parameters/EyeTrackingActive": 0}
+    assert vrcft.ACTIVE_PARAMS == {"/avatar/parameters/LipTrackingActive": True,
+                                   "/avatar/parameters/EyeTrackingActive": True}
+    assert vrcft.INACTIVE_PARAMS == {"/avatar/parameters/LipTrackingActive": False,
+                                     "/avatar/parameters/EyeTrackingActive": False}
 
 
 def test_wardrobe_addresses():

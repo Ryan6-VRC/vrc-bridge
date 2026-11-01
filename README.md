@@ -310,7 +310,7 @@ vrc-bridge speaks to these projects over OSC. None of their code is vendored her
 - [VirtualLens2](https://vlens2.logilabo.dev/) by ろじらぼ / logilabo — the camera prefab `index_virtuallens` drives ([BOOTH](https://logilabo.booth.pm/items/2280136)).
 - [VRCLens](https://hirabiki.booth.pm/) by ひらびき / hirabiki — the camera prefab `index_vrclens` drives.
 - [OSCmooth](https://github.com/regzo2/OSCmooth) by regzo2 — the float-to-boolean quantization convention `index_puppet` follows.
-- [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) by benaclejames — detected over mDNS by `osc_vrcft`, which sets the matching avatar parameters.
+- [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) by benaclejames — detected over mDNS by `osc_vrcft`, which sets `EyeTrackingActive` and `LipTrackingActive` (avatar Bools) after each avatar change and again within a few seconds (`[vrcft] service_poll_secs`) of VRCFaceTracking starting or stopping.
 
 ## How it works
 

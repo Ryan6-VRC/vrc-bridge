@@ -11,26 +11,30 @@ from vrbridge.settings import settings
 
 # Avatar parameters to set when VRCFT is detected.
 # VRCFT may also control these, but setting them helps with avatar logic.
-ACTIVE_PARAMS: dict[str, int] = {
-    "/avatar/parameters/LipTrackingActive": 1,
-    "/avatar/parameters/EyeTrackingActive": 1,
+# Real bools, not 0/1: both are avatar Bool parameters, and an OSC argument's type has to
+# match the declared one (the workspace's docs/osc.md, "Argument types are exact").
+ACTIVE_PARAMS: dict[str, bool] = {
+    "/avatar/parameters/LipTrackingActive": True,
+    "/avatar/parameters/EyeTrackingActive": True,
 }
 
 # Avatar parameters to set when VRCFT is NOT detected.
-INACTIVE_PARAMS: dict[str, int] = {
-    "/avatar/parameters/LipTrackingActive": 0,
-    "/avatar/parameters/EyeTrackingActive": 0,
+INACTIVE_PARAMS: dict[str, bool] = {
+    "/avatar/parameters/LipTrackingActive": False,
+    "/avatar/parameters/EyeTrackingActive": False,
 }
 
-# The mDNS service-name substring and the post-avatar-change delay are
-# settings.VRCFTSettings.service_name / .avatar_load_delay_secs.
+# The mDNS service-name substring, the post-avatar-change delay and the service poll
+# interval are settings.VRCFTSettings.service_name / .avatar_load_delay_secs /
+# .service_poll_secs.
 
 # ----------------------------- Mapping ------------------------------------
 
 class VRCFTMapping(Mapping):
     """
     Detects if VRChat Face Tracking (VRCFT) is running and sets avatar
-    parameters accordingly after an avatar change.
+    parameters accordingly: after an avatar change, and again whenever the VRCFT service
+    appears or disappears.
 
     The load delay is served by `update()`, not by sleeping in the callback.
 
@@ -53,6 +57,18 @@ class VRCFTMapping(Mapping):
     ticks every registered mapping (`MappingRouter.run_forever`), so the deadline costs
     no thread and supersession is a field overwrite.
 
+    *Following VRCFT without an avatar change.* The avatar-change check alone left the
+    toggles at whatever VRCFT's state was at the last swap, so a VRCFT started after the
+    avatar loaded read 0/0 until the next swap. `update()` therefore also looks at the
+    service every `service_poll_secs` and sends only when the answer differs from the last
+    one this mapping acted on. It polls because `OSCManager` offers no event for an
+    arbitrary service coming or going: `add_target_listener` and `add_peer_listener` fire
+    for the VRChat client, never for VRCFT, and a new service-listener hook would be a
+    manager API for one caller where `is_service_running` is already a cheap read. The
+    first look only records the state, so a mapping starting under a running VRCFT sends
+    nothing until an avatar change or a transition; an armed avatar-change deadline owns
+    the next send, so polling pauses while one is pending.
+
     *The cost of that choice, stated because it is not obvious at the call site:* this
     mapping now needs its `update()` driven. Under any shipped router it is; a host that
     drives VRBridge without `MappingRouter.run_forever` gets no VRCFT parameter set at all.
@@ -69,6 +85,11 @@ class VRCFTMapping(Mapping):
         # Bumped on every arm so a fire in flight can tell it has been superseded --
         # osc_quant's `_seq` is the same idiom for the same reason.
         self._gen: int = 0
+        # What the last send (or the first poll) saw, so a poll sends only on a transition.
+        # None until either has run. Under _lock.
+        self._last_running: bool | None = None
+        # Wall-clock time of the next service poll, same clock as _due. Under _lock.
+        self._next_poll: float = 0.0
         # Armed on a datagram thread, read and cleared on the router loop thread.
         self._lock = threading.Lock()
 
@@ -89,25 +110,31 @@ class VRCFTMapping(Mapping):
             self._due = time.time() + self._tune.avatar_load_delay_secs
 
     def update(self, now: float) -> None:
-        """Fire the armed check once its delay has elapsed."""
+        """Fire the armed check once its delay has elapsed; with none armed, poll the service."""
         with self._lock:
             due = self._due
             if due is None:
-                return
-            # Drop rather than fire on a mapping the router switched off: the callback is
-            # gated, so arming already required being enabled, and a deactivation between
-            # arming and firing is a decision not to send.
-            if not self.enabled:
+                if not self.enabled or now < self._next_poll:
+                    return
+                self._next_poll = now + self._tune.service_poll_secs
+                gen = self._gen
+                on_change_only = True
+            else:
+                # Drop rather than fire on a mapping the router switched off: the callback
+                # is gated, so arming already required being enabled, and a deactivation
+                # between arming and firing is a decision not to send.
+                if not self.enabled:
+                    self._due = None
+                    return
+                if now < due:
+                    return
                 self._due = None
-                return
-            if now < due:
-                return
-            self._due = None
-            gen = self._gen
+                gen = self._gen
+                on_change_only = False
 
-        self._apply(gen)
+        self._apply(gen, on_change_only)
 
-    def _apply(self, gen: int) -> None:
+    def _apply(self, gen: int, on_change_only: bool = False) -> None:
         """Check for VRCFT and send the corresponding parameter set.
 
         `gen` is the arm this fire belongs to. The service check runs unlocked -- it takes
@@ -119,6 +146,10 @@ class VRCFTMapping(Mapping):
         exists to prevent. The lock is held across the sends deliberately; two `sendto`
         calls are the bounded cost of an exact claim, and design.md's rule bars holding a
         lock across a *fetch*, which this is not.
+
+        `on_change_only` is the service poll: it sends nothing unless the answer differs
+        from the last one acted on, and its first look only records the state. A poll
+        leaves `_gen` alone, so an avatar change landing mid-poll still cancels it.
         """
         is_vrcft_running = self.bridge.osc.is_service_running(self._tune.service_name)
 
@@ -127,9 +158,13 @@ class VRCFTMapping(Mapping):
         with self._lock:
             if gen != self._gen or not self.enabled:
                 return
+            previous = self._last_running
+            self._last_running = is_vrcft_running
+            if on_change_only and (previous is None or previous == is_vrcft_running):
+                return
             self._send(params_to_set, is_vrcft_running)
 
-    def _send(self, params_to_set: dict[str, int], is_vrcft_running: bool) -> None:
+    def _send(self, params_to_set: dict[str, bool], is_vrcft_running: bool) -> None:
         """Log and send. Called with `_lock` held."""
         if is_vrcft_running:
             self.bridge.log.info("VRCFT detected. Activating face tracking parameters.")
