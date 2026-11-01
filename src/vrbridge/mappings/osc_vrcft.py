@@ -80,10 +80,16 @@ class VRCFTMapping(Mapping):
     sends again whether or not the state changed. Two cases need it: no target yet, and
     VRCFT holding an empty target slot (design.md, Target selection) so the set went to
     VRCFT's port while a VRChat that was already loaded sends no `/avatar/change` to
-    repair it. A target selection (`on_target_selected`) sets `_resend` too, bumps `_gen`
-    so an apply in flight for the old target cannot record, and rewinds the poll clock so
-    the next tick sends to the new target. The send that went to VRCFT's own port is
-    recorded as landed, which is why the selection, not the send, is the repair.
+    repair it. A target selection (`on_target_selected`) bumps `_gen` so an apply in
+    flight for the old target cannot record, rewinds the poll clock, and sets `_resend`
+    once a send has landed, so the next tick sends to the new target. The send that went
+    to VRCFT's own port is recorded as landed, which is why the selection, not the send, is
+    the repair. Before any send has landed there is nothing to repair, and forcing one
+    would break the first-look rule: VRChat resolving before VRCFT's own `add_service`
+    reads False and zeroes a running VRCFT's toggles. The handler is not gated, so a
+    selection while the router has the mapping switched off is still owed on reactivation,
+    as a service transition is. A retried send logs at DEBUG, since `OSCManager.send`
+    already warned once for the outage (design.md, "A dropped send warns once per outage").
 
     *The cost of that choice, stated because it is not obvious at the call site:* this
     mapping now needs its `update()` driven. Under any shipped router it is; a host that
@@ -107,6 +113,8 @@ class VRCFTMapping(Mapping):
         # The next poll sends whether or not the state changed: the last send failed or the
         # send target moved. Under _lock.
         self._resend: bool = False
+        # Some send has landed, so a target selection has something to repair. Under _lock.
+        self._landed: bool = False
         # Wall-clock time of the next service poll, same clock as _due. Under _lock.
         self._next_poll: float = 0.0
         # Armed on a datagram thread, read and cleared on the router loop thread.
@@ -115,7 +123,9 @@ class VRCFTMapping(Mapping):
     def _attach(self) -> None:
         """Register a callback for avatar changes."""
         self.bridge.on_osc("/avatar/change", self._gate(self._on_avatar_change))
-        self.bridge.on_target_selected(self._gate(self._on_target_selected))
+        # Ungated: flipping fields while disabled is harmless (update() and _apply both
+        # check enabled), and a selection missed while disabled would never be resent.
+        self.bridge.on_target_selected(self._on_target_selected)
 
     def _on_target_selected(self, ctx, target) -> None:
         """A send target was chosen or re-resolved: what we last sent may have gone elsewhere.
@@ -124,8 +134,9 @@ class VRCFTMapping(Mapping):
         """
         with self._lock:
             self._gen += 1
-            self._resend = True
             self._next_poll = 0.0
+            if self._landed:
+                self._resend = True
 
     def _on_avatar_change(self, ctx, address: str, avatar_id: str):
         """Arm the deferred check. Returns immediately; `update()` does the work.
@@ -198,18 +209,22 @@ class VRCFTMapping(Mapping):
             if self._send(params_to_set, is_vrcft_running):
                 self._last_running = is_vrcft_running
                 self._resend = False
+                self._landed = True
             else:
                 self._resend = True
 
     def _send(self, params_to_set: dict[str, bool], is_vrcft_running: bool) -> bool:
-        """Log and send; True only if every send landed. Called with `_lock` held."""
-        if is_vrcft_running:
-            self.bridge.log.info("VRCFT detected. Activating face tracking parameters.")
-        else:
-            self.bridge.log.info("VRCFT not detected. Deactivating face tracking parameters.")
-
+        """Send and log; True only if every send landed. Called with `_lock` held."""
         # osc.send directly rather than through a stashed CallbackContext: ctx.send is a
         # passthrough to it, and index_puppet's update() already sends this way. Holding a
         # ctx from the arming callback would outlive the event it came from for no gain.
         results = [self.bridge.osc.send(addr, val) for addr, val in params_to_set.items()]
-        return all(results)
+        msg = ("VRCFT detected. Activating face tracking parameters." if is_vrcft_running
+               else "VRCFT not detected. Deactivating face tracking parameters.")
+        if all(results):
+            self.bridge.log.info(msg)
+            return True
+        # A failed send retries every poll for as long as the outage lasts; INFO here would
+        # repeat at that rate where OSCManager.send has already warned once.
+        self.bridge.log.debug("%s Not every send landed; the next poll retries.", msg)
+        return False

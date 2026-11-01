@@ -42,7 +42,10 @@ class _Osc:
 
 class _Bridge:
     class _Log:
-        def info(self, *a): pass
+        def __init__(self):
+            self.infos: list = []
+        def info(self, *a): self.infos.append(a)
+        def debug(self, *a): pass
         def warning(self, *a): pass
         def exception(self, *a): pass
 
@@ -452,16 +455,52 @@ def test_an_apply_in_flight_for_the_old_target_does_not_record():
 
     m.update(t + POLL)                       # transition seen, then the target moves: dropped
     assert bridge.osc.sent == []
+    assert m._last_running is False, "the dropped apply recorded the state it did not send"
     bridge.osc.is_service_running = lambda name: True
     m.update(t + POLL + 0.01)                # the target selection rewound the poll clock
     assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
 
 
-def test_a_target_selection_on_a_disabled_mapping_is_ignored():
+def test_a_target_selection_while_disabled_is_resent_on_reactivation():
+    """A service transition while disabled is caught up on reactivation; a target that
+    moved while disabled is owed the same, or no poll would ever send to it."""
     bridge, m, t = _loaded(vrcft_running=True)
     m.deactivate()
     bridge.target_handlers[0](None, ("127.0.0.1", 9000))
-    assert m._resend is False
+    m.update(t + POLL)
+    assert bridge.osc.sent == []
+    m.activate()
+    m.update(t + 2 * POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_a_target_selection_before_any_send_landed_keeps_the_first_look_rule():
+    """VRChat resolving before VRCFT's own add_service: the poll reads False with VRCFT
+    running, and a forced send there would zero the toggles the first look protects."""
+    bridge = _Bridge(vrcft_running=False)
+    m = VRCFTMapping(bridge, tuning=POLL_TUNE)
+    m.register()
+    m.activate()
+    m.update(100.0)                          # the first look records False
+    bridge.target_handlers[0](None, ("127.0.0.1", 9000))
+    m.update(100.01)
+    assert bridge.osc.sent == [], "sent an unconfirmed False on a startup target selection"
+    bridge.osc.vrcft_running = True          # VRCFT's discovery completes
+    m.update(100.01 + POLL)
+    assert dict(bridge.osc.sent) == osc_vrcft.ACTIVE_PARAMS
+
+
+def test_retries_through_an_outage_announce_only_the_send_that_lands():
+    bridge, m, t = _loaded(vrcft_running=False)
+    bridge.log.infos.clear()
+    bridge.osc.has_target = False
+    bridge.osc.vrcft_running = True
+    for k in range(1, 6):
+        m.update(t + k * POLL)
+    assert bridge.log.infos == [], "a failed retry logged at INFO every poll"
+    bridge.osc.has_target = True
+    m.update(t + 6 * POLL)
+    assert len(bridge.log.infos) == 1
 
 
 # Through the real OSCManager: its browser listener is what flips is_service_running in
