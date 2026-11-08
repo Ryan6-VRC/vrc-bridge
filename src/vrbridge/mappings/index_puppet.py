@@ -10,12 +10,18 @@ The codec and the smoothed-float/raw-bits split live in `vrbridge.quant_channel`
 of which this mapping is the first consumer; each axis address holds its own
 `QuantChannel` so `single_touch_mode: "together"` mirrors one raw value into two
 independent filters.
+
+Given the face sender, it also writes the puppet into the native face-tracking blob
+(`FACE_KEYS`): each axis's smoothed float as a +/- key pair, so 0 is rest, and
+`ACTIVE_FACE_KEY` 1 while Enable is. That reaches every viewer of an avatar whose face-tracking
+block forwards those keys, outside the synced-parameter budget, but only while the sender is
+sending face data. The OSC addresses are written either way.
 """
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import TYPE_CHECKING, Dict, Literal, Optional
 
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.quant_channel import ChannelSpec, QuantChannel
@@ -23,6 +29,9 @@ from vrbridge.quant_channel import derive_bool_addrs as _derive_bool_addrs
 from vrbridge.quant_channel import encode_unit as _quant_encode_unit
 from vrbridge.settings import PuppetSettings, settings
 from vrbridge import ControllerEventType, VRBridge
+
+if TYPE_CHECKING:
+    from vrbridge.mappings.osc_face import FaceSenderMapping
 
 Hand = Literal["left", "right"]
 
@@ -57,6 +66,17 @@ TOUCH_ACTIVE_ADDR = "/avatar/parameters/IndexPuppet/Enable"
 
 AXIS_ADDRS = (LEFT_X_ADDR, LEFT_Y_ADDR, RIGHT_X_ADDR, RIGHT_Y_ADDR)
 
+# The face-tracking blob keys each axis rides, (positive, negative), and the Enable key. A contract
+# with the avatar's face-tracking block, which forwards these keys to its puppet: change both or
+# neither. Every key is one the face sender never fills from face data (osc_face.WRITABLE_KEYS).
+FACE_KEYS = {
+    LEFT_X_ADDR:  ("NasalDilationLeft", "NasalConstrictLeft"),
+    LEFT_Y_ADDR:  ("EyeDilationLeft", "EyeConstrictLeft"),
+    RIGHT_X_ADDR: ("NasalDilationRight", "NasalConstrictRight"),
+    RIGHT_Y_ADDR: ("EyeDilationRight", "EyeConstrictRight"),
+}
+ACTIVE_FACE_KEY = "SoftPalateClose"
+
 
 def quant_addr_map(n: int) -> dict:
     """Boolean address map for all four axes at quant level n."""
@@ -75,8 +95,10 @@ class HandState:
 class IndexPuppetMapping(Mapping):
     name = "index_puppet"
 
-    def __init__(self, bridge: VRBridge, tuning: PuppetSettings | None = None):
+    def __init__(self, bridge: VRBridge, tuning: PuppetSettings | None = None,
+                 face: Optional["FaceSenderMapping"] = None):
         super().__init__(bridge)
+        self._face = face
         self._tune = tuning if tuning is not None else settings().puppet
         self._state: Dict[Hand, HandState] = {"left": HandState(), "right": HandState()}
         self._last_contact_ts: float = 0.0
@@ -114,8 +136,22 @@ class IndexPuppetMapping(Mapping):
 
     def _send_axis(self, ctx, base_addr: str, raw_value: float, now: float):
         """Send one axis sample: raw/immediate booleans, smoothed float -- the
-        split QuantChannel.send owns."""
-        self._channels[base_addr].send(ctx.send, raw_value, now)
+        split QuantChannel.send owns -- and the smoothed float into the blob."""
+        smoothed = self._channels[base_addr].send(ctx.send, raw_value, now)
+        if self._face is not None:
+            pos, neg = FACE_KEYS[base_addr]
+            self._face.set_keys({pos: max(smoothed, 0.0), neg: max(-smoothed, 0.0)})
+
+    def _send_active(self, send, on: bool):
+        """Enable, on its address and in the blob."""
+        send(TOUCH_ACTIVE_ADDR, 1 if on else 0)
+        if self._face is not None:
+            self._face.set_keys({ACTIVE_FACE_KEY: 1.0 if on else 0.0})
+
+    def _clear_face_keys(self):
+        if self._face is not None:
+            self._face.set_keys({k: 0.0 for pair in FACE_KEYS.values() for k in pair}
+                                | {ACTIVE_FACE_KEY: 0.0})
 
     def _send_for_hand(self, ctx, hand: Hand, x: float, y: float, now: float):
         """Send axis values honoring single_touch_mode."""
@@ -159,7 +195,7 @@ class IndexPuppetMapping(Mapping):
 
         # Reset master enable
         self._touch_active = False
-        ctx.send(TOUCH_ACTIVE_ADDR, 0)
+        self._send_active(ctx.send, False)
 
         # Reset hand states and zero outputs
         now = time.time()
@@ -167,6 +203,7 @@ class IndexPuppetMapping(Mapping):
         for channel in self._channels.values():
             channel.reset(0.0, now)
             channel.send(ctx.send, 0.0, now)
+        self._clear_face_keys()
 
     # -- controller handlers --
 
@@ -179,7 +216,7 @@ class IndexPuppetMapping(Mapping):
             self._last_contact_ts = time.time()
             if not self._touch_active:
                 self._touch_active = True
-                ctx.send(TOUCH_ACTIVE_ADDR, 1)
+                self._send_active(ctx.send, True)
 
             # If absolute provided on TOUCH, send first sample immediately
             if evt.ax is not None and evt.ay is not None:
@@ -232,9 +269,15 @@ class IndexPuppetMapping(Mapping):
         self.bridge.on_controller(ControllerEventType.TOUCHPAD_SCROLL_RAW, hand="right", callback=self._on_raw("right"))
         self.bridge.on_controller(ControllerEventType.TOUCHPAD_LIFT,       hand="right", callback=self._on_lift("right"))
 
+    def deactivate(self) -> None:
+        # Another mode owns the controls now: the puppet stops riding the blob at once rather than
+        # holding its last pose there until the next avatar change.
+        super().deactivate()
+        self._clear_face_keys()
+
     def update(self, now: float) -> None:
         # Clear the flag after N seconds of inactivity
         if not (self._state["left"].active or self._state["right"].active):
             if self._touch_active and (now - self._last_contact_ts) >= self._tune.touch_active_idle_secs:
-                self.bridge.osc.send(TOUCH_ACTIVE_ADDR, 0)
+                self._send_active(self.bridge.osc.send, False)
                 self._touch_active = False

@@ -23,6 +23,10 @@ this module owns when a blob is sent.
   A 404 reads as false (no avatar declares it, or one is loading); a failed read changes nothing. A
   read applies only if no streamed flag or avatar change landed while it was in flight, and it primes
   the stream's change filter, so the next streamed value is compared against what the gate holds.
+* **Other mappings' keys.** `set_keys` writes values into the keys `pack` never fills
+  (`WRITABLE_KEYS`), onto every blob after the filter, so a mapping can carry a channel of its own to
+  every viewer outside the synced-parameter budget. Such a value travels only while this sender is
+  sending; `index_puppet` is the consumer.
 * **Toggles.** `FaceTrackingToggles` is `osc_vrcft` following this source instead of VRCFT's mDNS
   advertisement: `EyeTrackingActive` and `LipTrackingActive` go true while face data flows and false
   when it stops, after each avatar change and on each transition. A router registers it in place of
@@ -37,7 +41,7 @@ import time
 from typing import Optional
 
 from vrbridge import VRBridge
-from vrbridge.face_blob import FaceFrame, FaceSmoother, decode, pack
+from vrbridge.face_blob import BLOB_KEYS, FaceFrame, FaceSmoother, _byte, decode, pack
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.mappings.osc_vrcft import VRCFTMapping
 from vrbridge.osc_manager import FETCH_NOT_FOUND
@@ -52,6 +56,18 @@ LISTEN_HOST = "127.0.0.1"
 # long gap cannot hand the filter a near-1 alpha and a derivative of nothing.
 _MAX_DT = 0.1
 _JOIN_SECS = 1.0
+
+#: The keys `face_blob.pack` never fills, so a value `set_keys` writes there overwrites no tracked
+#: data. `tests/test_face_blob.py`'s `NEVER_WRITTEN` asserts the same set against `pack` itself.
+WRITABLE_KEYS = frozenset({
+    "EyeDilationRight", "EyeDilationLeft", "EyeConstrictRight", "EyeConstrictLeft",
+    "NasalDilationRight", "NasalDilationLeft", "NasalConstrictRight", "NasalConstrictLeft",
+    "JawBackward", "JawClench", "JawMandibleRaise", "LipSuckCornerRight", "LipSuckCornerLeft",
+    "TongueUp", "TongueDown", "TongueRight", "TongueLeft", "TongueRoll", "TongueBendDown",
+    "TongueCurlUp", "TongueSquish", "TongueFlat", "TongueTwistRight", "TongueTwistLeft",
+    "SoftPalateClose", "ThroatSwallow", "NeckFlexRight", "NeckFlexLeft",
+})
+_KEY_INDEX = {k: BLOB_KEYS.index(k) for k in WRITABLE_KEYS}
 
 
 class FaceSenderMapping(Mapping):
@@ -79,6 +95,10 @@ class FaceSenderMapping(Mapping):
         # the sequence a read checks so a streamed flag or an avatar change supersedes it.
         self._full_face: Optional[bool] = None
         self._gate_seq = 0
+        # Written by other mappings' threads through set_keys, read by the worker: blob index -> byte.
+        # Its own lock, so a key write never waits on a gate read.
+        self._keys_lock = threading.Lock()
+        self._keys: dict[int, int] = {}
         #: The bound port, once listening. Differs from `[face] port` only when that is 0.
         self.port: Optional[int] = None
 
@@ -152,6 +172,18 @@ class FaceSenderMapping(Mapping):
         now = time.monotonic() if now is None else now
         return now - last <= self._tune.presence_timeout_secs
 
+    def set_keys(self, values: dict[str, float]) -> None:
+        """Write each value (0..1, quantized as `pack` quantizes) into its key on every blob from the
+        next tick on, until set again; 0 is the same as never set. Thread-safe. Raises ValueError,
+        writing nothing, if any name is outside `WRITABLE_KEYS`."""
+        bad = set(values) - WRITABLE_KEYS
+        if bad:
+            raise ValueError(f"osc_face: {sorted(bad)} are filled from face data or are not blob "
+                             f"keys; set_keys writes only WRITABLE_KEYS")
+        packed = {_KEY_INDEX[k]: _byte(v) for k, v in values.items()}
+        with self._keys_lock:
+            self._keys.update(packed)
+
     # ---- the worker: receive and send --------------------------------------
 
     def _run(self, sock: socket.socket, stop: threading.Event) -> None:
@@ -217,7 +249,11 @@ class FaceSenderMapping(Mapping):
             return
         frame = self._smoother.step(self._frame, dt) if self._smoother else self._frame
         if self._full_face is True and self.enabled:
-            self.bridge.osc.send(FACE_ADDR, pack(frame))
+            blob = bytearray(pack(frame))
+            with self._keys_lock:
+                for i, v in self._keys.items():
+                    blob[i] = v
+            self.bridge.osc.send(FACE_ADDR, bytes(blob))
 
     # ---- the gate: is the worn avatar native? -------------------------------
 

@@ -65,7 +65,7 @@ A **router** decides which mapping is active at any moment.
 
 **Core mappings**
 
-- **Index Puppet** — two-axis avatar puppet control from absolute finger position on the touchpads; optional mirroring to both hands from a single controller.
+- **Index Puppet** — two-axis avatar puppet control from absolute finger position on the touchpads; optional mirroring to both hands from a single controller. With the [face sender](#face-tracking-from-alvr) on, it also rides the face-tracking data.
 - **User Camera** — full VRChat User Camera control (aperture, exposure, zoom, capture, modes).
 - **VirtualLens2 / VRCLens** — dedicated control schemes for those camera prefabs; the `camera` router switches to them automatically when detected.
 - **Mute Proxy** — toggles the VRChat microphone from a watched OSC parameter.
@@ -240,6 +240,7 @@ What to expect:
 - It sets `EyeTrackingActive` and `LipTrackingActive` true while face data arrives and false when it stops, as the bridge does for VRCFaceTracking without the face sender.
 - The face is smoothed the way VRCFaceTracking smooths it by default. `smoothing`, `min_cutoff`, `beta` and `d_cutoff` under `[face]` retune it; `rate` sets how many updates a second it sends (60 by default).
 - A headset without face tracking, such as a Quest 3, sends no face data, so nothing is sent.
+- Index Puppet also writes its four axes and its Enable into face-tracking keys no headset fills, so an avatar whose face tracking forwards those keys gets the puppet on every viewer without spending synced parameters. Each axis is a pair, positive then negative, so 0 is rest: left X `NasalDilationLeft`/`NasalConstrictLeft`, left Y `EyeDilationLeft`/`EyeConstrictLeft`, the right side the same with `Right`, and Enable `SoftPalateClose`. Like the face, it reaches others only while face data is being sent; the puppet's OSC parameters are written as before.
 
 The mapping from the headset's face weights to VRChat's keys is ported from [VRCFT-ALVR](https://github.com/alvr-org/VRCFT-ALVR) and [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking), both Apache-2.0; [NOTICE](NOTICE) has the details.
 

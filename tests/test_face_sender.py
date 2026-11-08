@@ -12,7 +12,8 @@ import pytest
 
 from vrbridge.engine import VRBridge
 from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles, VRCFTMapping
-from vrbridge.mappings.osc_face import FACE_ADDR, FULL_FACE_ADDR
+from vrbridge.face_blob import BLOB_KEYS
+from vrbridge.mappings.osc_face import FACE_ADDR, FULL_FACE_ADDR, WRITABLE_KEYS
 from vrbridge.settings import FaceSettings, Settings, set_settings
 
 from .fake_vrchat import FakeVRChat
@@ -314,3 +315,36 @@ def test_a_held_port_keeps_vrcfts_toggles_in_the_default_router():
     finally:
         set_settings(None)
         holder.close()
+
+
+# ---- other mappings' keys ------------------------------------------------------------------
+
+def test_the_writable_keys_are_exactly_the_keys_pack_never_fills():
+    """Intended: set_keys may write a key only where it overwrites no tracked data, and
+    `test_face_blob`'s NEVER_WRITTEN is the set asserted against pack itself."""
+    from .test_face_blob import NEVER_WRITTEN
+    assert WRITABLE_KEYS == NEVER_WRITTEN
+
+
+def test_a_set_key_rides_every_blob_and_zero_takes_it_back(vrc, h):
+    vrc.set_node(FULL_FACE_ADDR, True)
+    h.face.set_keys({"SoftPalateClose": 1.0, "NasalDilationLeft": 0.5})
+    h.send(_payloads()[0], times=10, gap=0.01)
+    assert _wait(lambda: vrc.values_for(FACE_ADDR))
+    blob = vrc.values_for(FACE_ADDR)[-1]
+    assert blob[BLOB_KEYS.index("SoftPalateClose")] == 255
+    assert blob[BLOB_KEYS.index("NasalDilationLeft")] == int(0.5 * 255)
+
+    h.face.set_keys({"SoftPalateClose": 0.0, "NasalDilationLeft": 0.0})
+    n = len(vrc.values_for(FACE_ADDR))
+    h.send(_payloads()[0], times=10, gap=0.01)
+    assert _wait(lambda: len(vrc.values_for(FACE_ADDR)) > n + 2)
+    blob = vrc.values_for(FACE_ADDR)[-1]
+    assert blob[BLOB_KEYS.index("SoftPalateClose")] == 0
+    assert blob[BLOB_KEYS.index("NasalDilationLeft")] == 0
+
+
+def test_a_key_filled_from_face_data_is_refused_and_nothing_is_written(h):
+    with pytest.raises(ValueError):
+        h.face.set_keys({"SoftPalateClose": 1.0, "JawOpen": 1.0})
+    assert h.face._keys == {}

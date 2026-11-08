@@ -137,8 +137,8 @@ class QuantChannel:
 
     # -- sending ---------------------------------------------------------------
 
-    def send(self, send: Callable[[str, object], object], x: float, now: float) -> None:
-        """Emit one sample: raw/immediate bits, then the smoothed float.
+    def send(self, send: Callable[[str, object], object], x: float, now: float) -> float:
+        """Emit one sample: raw/immediate bits, then the smoothed float, which it returns.
 
         `send` is `ctx.send` / `OSCManager.send`; `now` is the caller's clock -- pass the
         event's own timestamp, not `time.time()` (module docstring).
@@ -159,3 +159,4 @@ class QuantChannel:
         # float() is the boundary coercion the module docstring argues for; do not remove
         # it on the observation that every current caller already passes a float.
         send(self.spec.address, float(smoothed))
+        return float(smoothed)

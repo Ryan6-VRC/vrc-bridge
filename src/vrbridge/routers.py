@@ -58,11 +58,12 @@ def _register_external_ai(router: MappingRouter, bridge: VRBridge) -> None:
     ext.activate()
 
 
-def _register_face(router: MappingRouter, bridge: VRBridge) -> bool:
+def _register_face(router: MappingRouter, bridge: VRBridge):
     """Register the face sender and its toggles always-on, outside mode switching, when
-    `[face] enabled` is true and its port binds. Returns whether it did, so a router carrying
-    `VRCFTMapping` leaves that out: the two toggle sources would contradict each other. A held port
-    (VRCFaceTracking running) registers no toggles and returns False, so VRCFT's toggles stay.
+    `[face] enabled` is true and its port binds. Returns the sender, or None when it did not, so a
+    router carrying `VRCFTMapping` leaves that out (the two toggle sources would contradict each
+    other) and `index_puppet` gets the sender whose blob it writes into. A held port (VRCFaceTracking
+    running) registers no toggles and returns None, so VRCFT's toggles stay.
 
     Off by default because it binds ALVR's face port, which VRCFaceTracking also binds. Outside
     mode switching because a face is tracked in every mode.
@@ -70,16 +71,16 @@ def _register_face(router: MappingRouter, bridge: VRBridge) -> bool:
     from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles
     from vrbridge.settings import settings
     if not settings().face.enabled:
-        return False
+        return None
     face = FaceSenderMapping(bridge)
     router.register(face)
     face.activate()
     if face.port is None:
-        return False
+        return None
     toggles = FaceTrackingToggles(bridge, face)
     router.register(toggles)
     toggles.activate()
-    return True
+    return face
 
 
 class DefaultRouter(MappingRouter):
@@ -117,7 +118,8 @@ class DefaultRouter(MappingRouter):
         mute.activate()
 
         # The face sender's toggles replace VRCFTMapping's when it is enabled.
-        if not _register_face(self, bridge):
+        face = _register_face(self, bridge)
+        if face is None:
             vrcft = VRCFTMapping(bridge)
             self.register(vrcft)
             vrcft.activate()
@@ -127,7 +129,7 @@ class DefaultRouter(MappingRouter):
         _register_external_ai(self, bridge)
 
         # Register the managed mappings (router will activate exactly one)
-        self.register(IndexPuppetMapping(bridge))
+        self.register(IndexPuppetMapping(bridge, face=face))
         self.register(UserCameraMapping(bridge))
 
         # Track what we last enabled to avoid redundant (de)activations.
@@ -225,10 +227,10 @@ class CameraPrefabRouter(MappingRouter):
         _register_persist(self, bridge)
         _register_leash(self, bridge)
         _register_external_ai(self, bridge)
-        _register_face(self, bridge)
+        face = _register_face(self, bridge)
 
         # Managed group
-        self.register(IndexPuppetMapping(bridge))
+        self.register(IndexPuppetMapping(bridge, face=face))
         self.register(VirtualLensMapping(bridge))
         self.register(VRCLensMapping(bridge))
 
