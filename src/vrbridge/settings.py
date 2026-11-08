@@ -233,6 +233,9 @@ class MuteProxySettings:
 
 @dataclass(frozen=True)
 class VRCFTSettings:
+    """`osc_vrcft`'s detection and timing. The load delay and poll interval also time the
+    face sender's `EyeTrackingActive`/`LipTrackingActive` toggles (`osc_face`), which reuse that
+    mapping with a different source."""
     service_name: str = "VRCFT"          # substring matched against discovered mDNS names
     avatar_load_delay_secs: float = 1.0
     # New with the mapping's service poll rather than moved, so pinned against its docstring:
@@ -369,6 +372,35 @@ class ExternalAISettings:
 
 
 @dataclass(frozen=True)
+class FaceSettings:
+    """`osc_face`: ALVR's face datagram in, the native `/tracking/face/v1` blob out. Its module
+    docstring owns the contract; `face_blob`'s owns the mapping and the filter.
+
+    The filter defaults reproduce VRCFaceTracking's Data Filter at its defaults as its 100 Hz
+    pipeline runs it (`face_blob`'s docstring has the arithmetic), so turning this on changes the
+    sender and not the feel; retune them only on a wear test. Cutoffs are Hz, beta is Hz per unit
+    of change per second."""
+    enabled: bool = False                # registered by every shipped router when true
+    port: int = 41463                    # ALVR's VRCFaceTracking sink port; 0 takes any free port, for tests
+    rate: float = 60.0                   # blob sends per second
+    presence_timeout_secs: float = 1.0   # face data older than this means no headset is tracking
+    gate_poll_secs: float = 2.0          # re-read of the avatar's full-face-tracking flag while data flows
+    smoothing: bool = True
+    min_cutoff: float = 10.0
+    beta: float = 0.5
+    d_cutoff: float = 1.0
+
+    def validate(self, at: str) -> None:
+        _in_range(self.port, 0, 65535, f"{at}.port")
+        _positive(self.rate, f"{at}.rate")
+        _positive(self.presence_timeout_secs, f"{at}.presence_timeout_secs")
+        _positive(self.gate_poll_secs, f"{at}.gate_poll_secs")
+        _positive(self.min_cutoff, f"{at}.min_cutoff")
+        _non_negative(self.beta, f"{at}.beta")
+        _positive(self.d_cutoff, f"{at}.d_cutoff")
+
+
+@dataclass(frozen=True)
 class Settings:
     controller: ControllerSettings = ControllerSettings()
     puppet: PuppetSettings = PuppetSettings()
@@ -381,6 +413,7 @@ class Settings:
     quantchannel: QuantChannelSettings = QuantChannelSettings()
     leash: LeashSettings = LeashSettings()
     external_ai: ExternalAISettings = ExternalAISettings()
+    face: FaceSettings = FaceSettings()
 
     def validate(self) -> None:
         for f in fields(self):

@@ -60,7 +60,7 @@ A **router** decides which mapping is active at any moment.
 
 | Router    | Behavior |
 |-----------|----------|
-| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `VRCFT` and `Persistence` stay on. |
+| `default` | Switches between `IndexPuppet` and `UserCamera` by the VRChat camera state; `MuteProxy`, `VRCFT` and `Persistence` stay on (with the [face sender](#face-tracking-from-alvr) enabled, it replaces `VRCFT`). |
 | `camera`  | Switches between `IndexPuppet`, `VirtualLens2`, and `VRCLens` based on the lens system detected on the current avatar; `MuteProxy` and `Persistence` stay on, but `VRCFT` is not registered. |
 
 **Core mappings**
@@ -72,6 +72,7 @@ A **router** decides which mapping is active at any moment.
 - **Wardrobe** — changes your worn avatar from a button on your own expression menu. Needs the [`osc-wardrobe`](#wardrobe) prefab on the avatar and a manifest listing the avatars each button means; it is opt-in, so register it from your own router. VRChat only accepts avatars in your favorites, recents, uploads or purchases.
 - **Persistence** — carries a prop's placed position across one swap to an avatar carrying the same prop ([below](#persistence-across-an-avatar-swap)). On in every router; it does nothing on an avatar without the prop.
 - **Leash** — a held or planted leash on your avatar pulls you toward its far end, over VRChat's `/input/` movement axes, taking only the axis it pulls on so you keep the other. Needs an avatar that publishes the five leash parameters listed in `vrbridge/mappings/osc_leash.py`, and optionally `SlackPlanted` and `Up`, the far end's height, which makes the slack a sphere rather than a circle on the ground (without it the distance is horizontal only); the avatar half is planned as a [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns) entry. Off by default; `[leash] enabled = true` in `vrbridge.toml` turns it on in every router, and the same section holds its tuning. The idea comes from [OSCLeash](https://github.com/ZenithVal/OSCLeash) by ZenithVal; this is a rewrite that shares no code with it.
+- **Face tracking from ALVR** — sends a Quest Pro's face and eye tracking, streamed over ALVR, to VRChat's native face-tracking input, in place of VRCFaceTracking ([below](#face-tracking-from-alvr)). Off by default; `[face] enabled = true` turns it on in every router.
 - **External AI socket** — one TCP socket another program connects to (an AI, a tool on another PC): it subscribes to avatar parameters, controller events, avatar changes and the instance roster, and writes avatar parameters and the worn avatar, as lines of JSON ([below](#external-ai-socket)). Off by default; `[external_ai] enabled = true` turns it on in every router.
 - **Parameter logger** — records whitelisted avatar parameters (names or globs) to a timestamped CSV as they change; runs standalone as `vrbridge-paramlog --params "MyThing/*" [--file out.csv]`. The whitelist is required — full traffic is too noisy to log raw. For two VRChat clients on one PC (each launched with `--osc=inPort:ip:outPort`), run one logger per client with `--osc-port`/`--osc-bind-port` naming that client's ports and `--no-advertise` so the other client's discovery does not also land here.
 
@@ -220,6 +221,28 @@ bridge.start()
 
 Against the Av3Emulator (`VRBridge(target=("127.0.0.1", 9000), bind_port=9001)`), a play, stop, play re-announces the same avatar, which on a live client means a reload and restores nothing. `BridgePersistMapping(bridge, treat_reload_as_swap=True)` makes it restore there. It is for testing only, because on a live client it would restore across Reset Avatar and world joins, so no router sets it: register that instance yourself on the library path, instead of running a router.
 
+## Face tracking from ALVR
+
+Send face and eye tracking from a headset streaming over [ALVR](https://github.com/alvr-org/ALVR) straight to VRChat's native face-tracking input (`/tracking/face/v1`), with no VRCFaceTracking in between. It works with avatars that use VRChat's native face tracking; an avatar built on VRCFaceTracking's `FT/v2` parameters gets nothing from it.
+
+Turn it on in `vrbridge.toml` on the PC running the ALVR streamer:
+
+```toml
+[face]
+enabled = true
+```
+
+In ALVR, leave face tracking's sink set to VRCFaceTracking: the bridge listens on the same port (`127.0.0.1:41463`), so **close VRCFaceTracking first**. If it is running, the bridge logs that it cannot listen on the port and the face sender stays off.
+
+What to expect:
+
+- The bridge sends only while face data arrives and you wear an avatar with native face tracking. Take the headset off, or switch to an avatar without it, and sending stops; VRChat relaxes the face two seconds later.
+- It sets `EyeTrackingActive` and `LipTrackingActive` true while face data arrives and false when it stops, as the bridge does for VRCFaceTracking without the face sender.
+- The face is smoothed the way VRCFaceTracking smooths it by default. `smoothing`, `min_cutoff`, `beta` and `d_cutoff` under `[face]` retune it; `rate` sets how many updates a second it sends (60 by default).
+- A headset without face tracking, such as a Quest 3, sends no face data, so nothing is sent.
+
+The mapping from the headset's face weights to VRChat's keys is ported from [VRCFT-ALVR](https://github.com/alvr-org/VRCFT-ALVR) and [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking), both Apache-2.0; [NOTICE](NOTICE) has the details.
+
 ## External AI socket
 
 Let another program watch and drive your avatar through the bridge: an AI companion, a stream tool, a script on another PC. It connects to one TCP socket, says what it wants to hear about, and gets each change as a line of JSON; it writes avatar parameters, and changes the worn avatar, the same way. Any language that can open a socket and read lines can be a client — there is nothing to install on its side.
@@ -305,12 +328,13 @@ VRChat sends no roster over OSC, so the bridge reads it from VRChat's own log fi
 
 ## Interoperates with
 
-vrc-bridge speaks to these projects over OSC. None of their code is vendored here — the parameter names their mappings drive are each project's own contract, and their documentation is the authority on them.
+vrc-bridge speaks to these projects over OSC. None of their code is vendored here, apart from the face-tracking mapping noted [above](#face-tracking-from-alvr) — the parameter names their mappings drive are each project's own contract, and their documentation is the authority on them.
 
 - [VirtualLens2](https://vlens2.logilabo.dev/) by ろじらぼ / logilabo — the camera prefab `index_virtuallens` drives ([BOOTH](https://logilabo.booth.pm/items/2280136)).
 - [VRCLens](https://hirabiki.booth.pm/) by ひらびき / hirabiki — the camera prefab `index_vrclens` drives.
 - [OSCmooth](https://github.com/regzo2/OSCmooth) by regzo2 — the float-to-boolean quantization convention `index_puppet` follows.
 - [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) by benaclejames — detected over mDNS by `osc_vrcft`, which sets `EyeTrackingActive` and `LipTrackingActive` (avatar Bools) after each avatar change and again within `[vrcft] service_poll_secs` of its mDNS advertisement appearing or being withdrawn.
+- [ALVR](https://github.com/alvr-org/ALVR) — its VRCFaceTracking face-tracking sink is the input `osc_face` reads.
 
 ## How it works
 
@@ -342,4 +366,4 @@ Import them in Voicemeeter and adapt the device/channel assignments to your own 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). `src/vrbridge/face_blob.py` contains Apache-2.0 work; see [NOTICE](NOTICE).

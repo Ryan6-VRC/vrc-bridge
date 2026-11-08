@@ -35,6 +35,10 @@ vrbridge-paramlog = "vrbridge.paramlog:main"
 Homepage = "https://github.com/Ryan6-VRC/vrc-bridge"
 Repository = "https://github.com/Ryan6-VRC/vrc-bridge"
 
+[tool.setuptools]
+# NOTICE and the Apache text travel with every build: face_blob carries Apache-2.0 ports.
+license-files = ["LICENSE", "NOTICE", "LICENSES/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

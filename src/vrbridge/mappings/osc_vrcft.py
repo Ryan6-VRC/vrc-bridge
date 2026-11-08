@@ -96,6 +96,8 @@ class VRCFTMapping(Mapping):
     drives VRBridge without `MappingRouter.run_forever` gets no VRCFT parameter set at all.
     """
     name = "osc_vrcft"
+    #: How the log names the source `_source_running` asks about.
+    source_label = "VRCFT"
 
     def __init__(self, bridge: VRBridge, tuning=None):
         super().__init__(bridge)
@@ -192,7 +194,7 @@ class VRCFTMapping(Mapping):
         from the last one acted on, and its first look only records the state. A poll
         leaves `_gen` alone, so an avatar change landing mid-poll still cancels it.
         """
-        is_vrcft_running = self.bridge.osc.is_service_running(self._tune.service_name)
+        is_vrcft_running = self._source_running()
 
         params_to_set = ACTIVE_PARAMS if is_vrcft_running else INACTIVE_PARAMS
 
@@ -213,14 +215,23 @@ class VRCFTMapping(Mapping):
             else:
                 self._resend = True
 
+    def _source_running(self) -> bool:
+        """Whether the face-tracking source is up: here, VRCFT's mDNS advertisement.
+
+        The one seam a subclass overrides to follow another source with the same timing,
+        supersession and resend rules (`osc_face.FaceTrackingToggles`). Called unlocked.
+        """
+        return self.bridge.osc.is_service_running(self._tune.service_name)
+
     def _send(self, params_to_set: dict[str, bool], is_vrcft_running: bool) -> bool:
         """Send and log; True only if every send landed. Called with `_lock` held."""
         # osc.send directly rather than through a stashed CallbackContext: ctx.send is a
         # passthrough to it, and index_puppet's update() already sends this way. Holding a
         # ctx from the arming callback would outlive the event it came from for no gain.
         results = [self.bridge.osc.send(addr, val) for addr, val in params_to_set.items()]
-        msg = ("VRCFT detected. Activating face tracking parameters." if is_vrcft_running
-               else "VRCFT not detected. Deactivating face tracking parameters.")
+        label = self.source_label
+        msg = (f"{label} detected. Activating face tracking parameters." if is_vrcft_running
+               else f"{label} not detected. Deactivating face tracking parameters.")
         if all(results):
             self.bridge.log.info(msg)
             return True
