@@ -6,7 +6,7 @@ Starts the bridge, selects a mapping or router, and runs the event loop.
 Usage:
     vrbridge [--log-level INFO] [--log-callbacks] [--router {name}] [--no-steamvr]
              [--osc-port PORT [--osc-host HOST]] [--osc-bind-port PORT] [--no-advertise]
-             [--log-file PATH | --no-log-file]
+             [--log-file PATH | --no-log-file] [--face {on,off}]
 
 The three OSC flags take their host/port/bind-port shape from the standalone OSC probe
 this repo is developed alongside, deliberately: both do the same job -- name the ports
@@ -20,6 +20,7 @@ Puppet and UserCamera mappings and keeping MuteProxy always-on.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import sys
 import threading
@@ -31,7 +32,7 @@ import vrbridge
 from vrbridge.logfile import attach_log_file, default_log_path, prune_logs
 from vrbridge.routers import CameraPrefabRouter, DefaultRouter, MappingRouter
 from vrbridge import VRBridge
-from vrbridge.settings import get_config_path
+from vrbridge.settings import get_config_path, set_settings, settings
 from vrbridge.utils import setup_logging
 
 #: Installed packages advertise routers under this entry-point group.
@@ -195,6 +196,18 @@ def build_parser(available: Dict[str, Type[MappingRouter]]) -> argparse.Argument
         ),
     )
 
+    parser.add_argument(
+        "--face",
+        default=None,
+        choices=["on", "off"],
+        help=(
+            "Face tracking for this run, over [face] enabled in the settings file. 'off' is a "
+            "headset without face tracking: no face sender (ALVR's face port stays unbound) and "
+            "EyeTrackingActive/LipTrackingActive held false, VRCFaceTracking's toggles included. "
+            "Default: the settings file decides."
+        ),
+    )
+
     log_dest = parser.add_mutually_exclusive_group()
 
     log_dest.add_argument(
@@ -273,6 +286,16 @@ def osc_target(args, parser: argparse.ArgumentParser) -> tuple[str, int] | None:
     return (host, args.osc_port)
 
 
+def apply_face_flag(face: str | None) -> None:
+    """Put `--face` into the process-wide settings, where every router reads it
+    (`FaceSettings.launch`); None leaves the file to decide. Loads the settings file, so it can
+    raise `ConfigError`."""
+    if face is None:
+        return
+    current = settings()
+    set_settings(dataclasses.replace(current, face=dataclasses.replace(current.face, launch=face)))
+
+
 def main(argv: list[str] | None = None) -> None:
     available = discover_routers()
     parser = build_parser(available)
@@ -306,6 +329,7 @@ def main(argv: list[str] | None = None) -> None:
     threading.excepthook = _thread_excepthook(threading.excepthook)
 
     try:
+        apply_face_flag(args.face)
         bridge = VRBridge(
             log_level=args.log_level,
             enable_steamvr=not args.no_steamvr,

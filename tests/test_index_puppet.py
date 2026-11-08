@@ -171,11 +171,14 @@ def test_with_any_face_key_bound_no_osc_is_sent_at_all(monkeypatch):
     assert ("set", {"SoftPalateClose": 1.0}) in face.calls
 
 
-@pytest.mark.parametrize("face_enabled, reason", [(False, "[face] enabled is false"),
-                                                   (True, "not listening")])
-def test_bound_keys_with_no_sender_log_once_and_send_nothing(monkeypatch, face_enabled, reason):
+@pytest.mark.parametrize("face_enabled, launch, reason", [(False, "", "[face] enabled is false"),
+                                                           (True, "", "not listening"),
+                                                           (False, "on", "not listening"),
+                                                           (True, "off", "--face off")])
+def test_bound_keys_with_no_sender_log_once_and_send_nothing(monkeypatch, face_enabled, launch,
+                                                            reason):
     from vrbridge.settings import FaceSettings, Settings, set_settings
-    set_settings(Settings(face=FaceSettings(enabled=face_enabled)))
+    set_settings(Settings(face=FaceSettings(enabled=face_enabled, launch=launch)))
     try:
         clock = _Clock(0.0)
         monkeypatch.setattr(index_puppet, "time", clock)

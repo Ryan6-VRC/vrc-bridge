@@ -54,12 +54,16 @@ class _Bridge:
         self.osc = _Osc(vrcft_running)
         self.handlers: list = []
         self.target_handlers: list = []
+        self.stop_handlers: list = []
 
     def on_osc(self, address, callback, *, watch=None):
         self.handlers.append((address, callback))
 
     def on_target_selected(self, callback):
         self.target_handlers.append(callback)
+
+    def on_stop(self, callback):
+        self.stop_handlers.append(callback)
 
 
 def _armed(vrcft_running: bool = False):

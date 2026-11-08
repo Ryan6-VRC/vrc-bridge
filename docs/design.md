@@ -285,9 +285,11 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Off by default, and no detection of VRCFaceTracking.** The sender binds ALVR's VRCFaceTracking sink port, which VRCFaceTracking itself binds, so the two cannot run together and whichever starts second fails; the sender's bind failure names the port and the cause, and that is the whole interlock, by the operator's call. On a failed bind the router registers no face toggles and keeps `osc_vrcft`'s, since VRCFaceTracking is then the live source. One sender per client is the client's rule as much as the port's: the client takes the last blob.
 
+**A headset without face tracking is never presented as tracked, and the launcher says which headset it is.** ALVR's face-tracking setting is global, and a Quest 3, which has no face cameras, streams a full face segment of Meta's inferred face, so face data arriving is not evidence of a tracked face. `--face off` (`FaceSettings.launch`, which `_build` refuses from the file) registers no sender and `NoFaceTrackingToggles` in place of both toggle sources, so nothing claims tracking: VRCFaceTracking relaying the same headset would relay the same inferred face. It is a launch flag rather than detection from the datagram because the supervisor that starts SteamVR already knows which headset is streaming. The face toggles send on their first poll, so a run started after one killed while they were true clears them.
+
 **Keys the mapping never writes stay a contract.** `tests/test_face_blob.py` pins the keys no ALVR input produces, because another writer may own some of them and reads 0 there as rest. A mapping change that starts writing one changes that contract.
 
-Not measured: a worn headset's packet rates (the recorded rates are a docked headset's), a Quest 3's zero-length datagrams (read from ALVR's source), and a remote viewer's view of the blob this sender sends.
+Not measured: a worn headset's packet rates (the recorded rates are a docked headset's), whether ALVR sends a Quest 3 zero-length datagrams with its face-tracking setting off (read from ALVR's source), and a remote viewer's view of the blob this sender sends.
 
 ## Provenance
 

@@ -133,6 +133,38 @@ def test_no_advertise_without_a_port_is_refused(parser):
         osc_target(args, parser)
 
 
+def test_face_is_absent_unless_given_and_takes_only_on_or_off(parser, capsys):
+    """Intended: absent leaves `[face]` to decide, which is what every existing launch gets."""
+    assert parser.parse_args([]).face is None
+    assert parser.parse_args(["--face", "off"]).face == "off"
+    assert parser.parse_args(["--face", "on"]).face == "on"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--face", "auto"])
+    assert "--face" in capsys.readouterr().err
+
+
+def test_face_reaches_the_settings_every_router_reads_before_the_bridge_is_built(
+        monkeypatch, tmp_path, main_that_dies_at_construction):
+    """`--face` must be in `settings().face` by the time a router reads it, and an absent flag must
+    leave the file's value untouched."""
+    from vrbridge.settings import FaceSettings, Settings, set_settings, settings
+    seen = []
+
+    def capture(**kwargs):
+        seen.append((settings().face.launch, settings().face.enabled))
+        raise _Boom("stop here")
+
+    monkeypatch.setattr(cli, "VRBridge", capture)
+    try:
+        for flag, launch in ((["--face", "off"], "off"), (["--face", "on"], "on"), ([], "")):
+            set_settings(Settings(face=FaceSettings(enabled=True)))
+            with pytest.raises(SystemExit):
+                main_that_dies_at_construction(["--no-log-file", *flag])
+            assert seen[-1] == (launch, True)
+    finally:
+        set_settings(None)
+
+
 def test_a_run_logs_to_a_new_file_unless_told_otherwise(parser, tmp_path):
     """Intended: on by default from the CLI, because the incident comes before anyone
     decides to record it; a named file and no file are the two ways out."""
