@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,11 @@ try:  # 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised only on 3.10
     import tomli as tomllib  # type: ignore[no-redef]
+
+
+#: Metadata for a field set at launch, from the command line, and never from the file: `_build`
+#: treats its name as unknown, so a file cannot set what the launcher decides.
+LAUNCH_ONLY = {"launch_only": True}
 
 
 class ConfigError(Exception):
@@ -428,8 +433,18 @@ class FaceSettings:
     min_cutoff: float = 10.0
     beta: float = 0.5
     d_cutoff: float = 1.0
+    # `--face on|off`: "" leaves `enabled` to decide; "on" runs the sender whatever `enabled` says;
+    # "off" is a headset without face tracking, so no sender and the EyeTrackingActive /
+    # LipTrackingActive toggles held false in place of osc_vrcft's (routers._register_face).
+    launch: str = field(default="", metadata=LAUNCH_ONLY)
+
+    @property
+    def sender_on(self) -> bool:
+        """Whether a router runs the face sender: `--face` when it was given, else `enabled`."""
+        return self.launch == "on" or (self.launch == "" and self.enabled)
 
     def validate(self, at: str) -> None:
+        _one_of(self.launch, ("", "on", "off"), f"{at}.launch")
         _in_range(self.port, 0, 65535, f"{at}.port")
         _positive(self.rate, f"{at}.rate")
         _positive(self.presence_timeout_secs, f"{at}.presence_timeout_secs")
@@ -581,7 +596,7 @@ def _build(cls, raw: dict, at: str):
     """
     if not isinstance(raw, dict):
         raise ConfigError(f"[{at}] is {raw!r}; expected a table")
-    known = {f.name: f for f in fields(cls)}
+    known = {f.name: f for f in fields(cls) if not f.metadata.get("launch_only")}
     unknown = sorted(set(raw) - set(known))
     if unknown:
         raise ConfigError(

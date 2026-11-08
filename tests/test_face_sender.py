@@ -14,7 +14,8 @@ import pytest
 
 from vrbridge.engine import VRBridge
 from vrbridge.face_blob import BLOB_KEYS
-from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles, VRCFTMapping
+from vrbridge.mappings import (FaceSenderMapping, FaceTrackingToggles, NoFaceTrackingToggles,
+                               VRCFTMapping)
 from vrbridge.mappings.osc_face import FACE_ADDR, FULL_FACE_ADDR
 from vrbridge.settings import FaceSettings, Settings, set_settings
 
@@ -225,6 +226,10 @@ def test_data_resuming_with_the_same_bytes_rereads_the_flag(vrc):
 
 # ---- the toggles -----------------------------------------------------------------------------
 
+ON = [("/avatar/parameters/LipTrackingActive", True), ("/avatar/parameters/EyeTrackingActive", True)]
+OFF = [("/avatar/parameters/LipTrackingActive", False), ("/avatar/parameters/EyeTrackingActive", False)]
+
+
 class _Source:
     def __init__(self):
         self.active = False
@@ -242,12 +247,11 @@ def test_toggles_follow_the_face_source_not_vrcfts_advertisement():
     m = FaceTrackingToggles(bridge, src, tuning=VRCFTSettings(service_poll_secs=0.01))
     m.register()
     m.activate()
-    m.update(1.0)                              # first look records False, sends nothing
-    assert bridge.osc.sent == []
+    m.update(1.0)
+    assert bridge.osc.sent == OFF
     src.active = True
     m.update(2.0)
-    assert bridge.osc.sent == [("/avatar/parameters/LipTrackingActive", True),
-                               ("/avatar/parameters/EyeTrackingActive", True)]
+    assert bridge.osc.sent[-2:] == ON
     assert any("ALVR face data detected" in a[0] for a in bridge.log.infos)
     src.active = False
     m.update(3.0)
@@ -268,6 +272,63 @@ def test_toggles_send_true_when_face_data_already_flows_at_startup():
     m.update(1.0)
     assert bridge.osc.sent == [("/avatar/parameters/LipTrackingActive", True),
                                ("/avatar/parameters/EyeTrackingActive", True)]
+
+
+def test_toggles_send_false_on_the_first_poll_until_one_lands():
+    """A bridge killed while the toggles were true leaves them true on the avatar; the next run
+    clears them on its first poll, and retries while there is no target to send to."""
+    from vrbridge.settings import VRCFTSettings
+    bridge = _Bridge()
+    m = FaceTrackingToggles(bridge, _Source(), tuning=VRCFTSettings(service_poll_secs=0.01))
+    m.register()
+    m.activate()
+    bridge.osc.has_target = False
+    m.update(1.0)
+    bridge.osc.has_target = True
+    m.update(2.0)
+    assert bridge.osc.sent[-2:] == OFF
+    n = len(bridge.osc.sent)
+    m.update(3.0)
+    assert len(bridge.osc.sent) == n                       # landed, so the poll is quiet again
+
+
+@pytest.mark.parametrize("last_true", [True, False])
+def test_a_clean_stop_sends_false_only_after_true(last_true):
+    from vrbridge.settings import VRCFTSettings
+    bridge = _Bridge()
+    src = _Source()
+    src.active = last_true
+    m = FaceTrackingToggles(bridge, src, tuning=VRCFTSettings(service_poll_secs=0.01))
+    m.register()
+    m.activate()
+    m.update(1.0)
+    n = len(bridge.osc.sent)
+    for cb in bridge.stop_handlers:
+        cb(None)
+    assert bridge.osc.sent[n:] == (OFF if last_true else [])
+
+
+def test_face_off_toggles_send_false_and_never_true():
+    """`--face off`: even with VRCFaceTracking advertising, which `osc_vrcft` answers with true, the
+    toggles go false on the first poll, after an avatar change and on a new send target."""
+    from vrbridge.settings import VRCFTSettings
+    bridge = _Bridge(vrcft_running=True)
+    m = NoFaceTrackingToggles(bridge, tuning=VRCFTSettings(service_poll_secs=0.01,
+                                                           avatar_load_delay_secs=0.0))
+    m.register()
+    m.activate()
+    m.update(1.0)
+    assert bridge.osc.sent == OFF
+    m._on_avatar_change(None, "/avatar/change", "avtr_next")
+    m.update(m._due)
+    assert bridge.osc.sent == OFF * 2
+    for cb in bridge.target_handlers:
+        cb(None, ("127.0.0.1", 9000))
+    m.update(10.0)
+    assert bridge.osc.sent == OFF * 3
+    for cb in bridge.stop_handlers:
+        cb(None)
+    assert bridge.osc.sent == OFF * 3
 
 
 # ---- the routers -----------------------------------------------------------------------------
@@ -295,6 +356,53 @@ def test_shipped_routers_register_it_only_when_enabled(router_name, enabled):
         assert vrcft is None
         router.evaluate()
         assert face.enabled and toggles.enabled
+    finally:
+        if router is not None and "osc_face" in router._mappings:
+            router._mappings["osc_face"].deactivate()
+        set_settings(None)
+
+
+def _free_udp_port() -> int:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@pytest.mark.parametrize("router_name", ["default", "camera"])
+def test_face_off_registers_no_sender_and_holds_the_toggles_false_over_the_file(router_name):
+    """Intended: `--face off` outranks `[face] enabled = true`. No sender, so the face port stays
+    unbound and no blob can be sent, and the held-false toggles stand in for the sender's and VRCFT's."""
+    from vrbridge.cli import ROUTERS
+    port = _free_udp_port()
+    set_settings(Settings(face=FaceSettings(enabled=True, port=port, launch="off")))
+    try:
+        bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
+        router = ROUTERS[router_name](bridge)
+        assert "osc_face" not in router._mappings
+        assert "osc_vrcft" not in router._mappings
+        toggles = router._mappings.get("osc_face_toggles")
+        assert isinstance(toggles, NoFaceTrackingToggles) and toggles.enabled
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", port))                    # free: nothing of the bridge's holds it
+        probe.close()
+    finally:
+        set_settings(None)
+
+
+@pytest.mark.parametrize("router_name", ["default", "camera"])
+def test_face_on_runs_the_sender_over_a_file_that_leaves_it_off(router_name):
+    from vrbridge.cli import ROUTERS
+    set_settings(Settings(face=FaceSettings(enabled=False, port=0, launch="on")))
+    router = None
+    try:
+        bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
+        router = ROUTERS[router_name](bridge)
+        assert isinstance(router._mappings.get("osc_face"), FaceSenderMapping)
+        toggles = router._mappings.get("osc_face_toggles")
+        assert type(toggles) is FaceTrackingToggles
+        assert "osc_vrcft" not in router._mappings
     finally:
         if router is not None and "osc_face" in router._mappings:
             router._mappings["osc_face"].deactivate()

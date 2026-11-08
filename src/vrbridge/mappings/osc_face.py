@@ -12,9 +12,11 @@ this module owns when a blob is sent.
   the latest values are held and one blob is sent per tick at `[face] rate`. The filter steps on the
   tick, with the tick's real period, so its feel does not depend on the input rate.
 * **Presence.** The source is active while a datagram carrying an eye or face segment arrived within
-  `presence_timeout_secs`. Zero-length datagrams (ALVR with a headset that has no face tracking) and
-  silence are both inactive. Nothing is sent while inactive, and the client zeroes every forwarded
-  value 2 s after the last blob, which is the intended behaviour when the headset comes off.
+  `presence_timeout_secs`. Zero-length datagrams and silence are both inactive. Nothing is sent while
+  inactive, and the client zeroes every forwarded value 2 s after the last blob, which is the intended
+  behaviour when the headset comes off. Presence is not tracking: ALVR's face-tracking setting is
+  global, and a Quest 3, which has no face cameras, streams a full face segment of Meta's inferred
+  face, so the launcher says which headset this is with `--face off` (`routers._register_face`).
 * **Native only.** A blob goes out only while the worn avatar's `/avatar/avatarfullfacetracking` is
   true, VRCFaceTracking's own gate: on any other avatar the blob would take over eye gaze. The client
   streams that flag on its out-port when an avatar loads, which updates the gate at once; because a
@@ -32,8 +34,11 @@ this module owns when a blob is sent.
   is no ownership: two writers to one key is misconfiguration, and the last write wins.
 * **Toggles.** `FaceTrackingToggles` is `osc_vrcft` following this source instead of VRCFT's mDNS
   advertisement: `EyeTrackingActive` and `LipTrackingActive` go true while face data flows and false
-  when it stops, after each avatar change and on each transition. A router registers it in place of
-  `VRCFTMapping`, never beside it, since the two would contradict each other.
+  when it stops, on the first poll, after each avatar change and on each transition, and false on a
+  clean stop if they were true. The first poll sends whatever it sees because a bridge killed while
+  they were true leaves them true on the avatar. `NoFaceTrackingToggles` is the same with a source
+  that never runs, `--face off`'s. A router registers one of them in place of `VRCFTMapping`, never
+  beside it, since two sources would contradict each other.
 """
 from __future__ import annotations
 
@@ -46,7 +51,7 @@ from typing import Iterable, Optional
 from vrbridge import VRBridge
 from vrbridge.face_blob import BLOB_KEYS, FaceFrame, FaceSmoother, _byte, decode, pack
 from vrbridge.mappings.mapping_base import Mapping
-from vrbridge.mappings.osc_vrcft import VRCFTMapping
+from vrbridge.mappings.osc_vrcft import INACTIVE_PARAMS, VRCFTMapping
 from vrbridge.osc_manager import FETCH_NOT_FOUND
 from vrbridge.settings import settings
 
@@ -317,13 +322,37 @@ class FaceTrackingToggles(VRCFTMapping):
     name = "osc_face_toggles"
     source_label = "ALVR face data"
 
-    def __init__(self, bridge: VRBridge, sender: FaceSenderMapping, tuning=None):
+    def __init__(self, bridge: VRBridge, sender: Optional[FaceSenderMapping], tuning=None):
         super().__init__(bridge, tuning)
         self._sender = sender
         # The first-look rule exists for VRCFT's mDNS discovery latency, which this source does not
-        # have: ALVR may already be streaming when the router starts, and a first look that only
-        # recorded True would never send it. Starting from False makes that first look a transition.
-        self._last_running = False
+        # have. A resend owed from the start makes the first poll send what it sees, true or false,
+        # and keep retrying until a send lands.
+        self._resend = True
+
+    def _attach(self) -> None:
+        super()._attach()
+        self.bridge.on_stop(self._on_stop)
+
+    def _on_stop(self, ctx) -> None:
+        """Send false if true was the last set to land, so a clean exit leaves no claim behind."""
+        with self._lock:
+            self._gen += 1               # nothing in flight records after this
+            if self._landed and self._last_running:
+                if self._send(INACTIVE_PARAMS, False):
+                    self._last_running = False
 
     def _source_running(self) -> bool:
         return self._sender.source_active()
+
+
+class NoFaceTrackingToggles(FaceTrackingToggles):
+    """`--face off`: the toggles held false, from the first poll and after each avatar change and
+    send-target selection, for a headset without face tracking. Nothing here ever sends true."""
+    source_label = "--face off: face tracking"
+
+    def __init__(self, bridge: VRBridge, tuning=None):
+        super().__init__(bridge, None, tuning)
+
+    def _source_running(self) -> bool:
+        return False

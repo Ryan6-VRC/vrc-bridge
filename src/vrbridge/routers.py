@@ -63,17 +63,30 @@ def _register_external_ai(router: MappingRouter, bridge: VRBridge) -> None:
 
 def _register_face(router: MappingRouter, bridge: VRBridge) -> Optional[FaceSenderMapping]:
     """Register the face sender and its toggles always-on, outside mode switching, when
-    `[face] enabled` is true and its port binds. Returns the sender, or None when it did not, so a
-    router carrying `VRCFTMapping` leaves that out (the two toggle sources would contradict each
-    other) and `index_puppet` gets the sender whose feed it writes. A held port (VRCFaceTracking
-    running) registers no toggles and returns None, so VRCFT's toggles stay.
+    `FaceSettings.sender_on` (`--face on`, or `[face] enabled` with no `--face`) and its port binds.
+    Returns the sender, or None when it did not, so `index_puppet` gets the sender whose feed it
+    writes. A held port (VRCFaceTracking running) registers no toggles and returns None, so a router
+    carrying `VRCFTMapping` keeps VRCFT's toggles.
+
+    `--face off` is a headset without face tracking: no sender, so ALVR's port stays unbound and no
+    blob is sent, and `NoFaceTrackingToggles` holds the toggles false. A router carrying
+    `VRCFTMapping` registers it only when no `osc_face_toggles` is registered, so it is left out
+    here too: anything VRCFaceTracking relayed from this headset would be the same untracked face.
 
     Off by default because it binds ALVR's face port, which VRCFaceTracking also binds. Outside
     mode switching because a face is tracked in every mode.
     """
-    from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles
+    from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles, NoFaceTrackingToggles
     from vrbridge.settings import settings
-    if not settings().face.enabled:
+    tune = settings().face
+    if tune.launch == "off":
+        held = NoFaceTrackingToggles(bridge)
+        router.register(held)
+        held.activate()
+        bridge.log.info("--face off: no face sender, and EyeTrackingActive/LipTrackingActive "
+                        "are held false.")
+        return None
+    if not tune.sender_on:
         return None
     face = FaceSenderMapping(bridge)
     router.register(face)
@@ -93,8 +106,8 @@ class DefaultRouter(MappingRouter):
       - index_usercamera   when /usercamera/Mode != 0
 
     MuteProxy and BridgePersist are always-on, the leash when `[leash] enabled`, and the
-    external AI socket when `[external_ai] enabled`. With `[face] enabled` the face sender and its
-    toggles are always-on in place of VRCFT; otherwise VRCFT is.
+    external AI socket when `[external_ai] enabled`. With the face sender on, it and its toggles are
+    always-on in place of VRCFT, and with `--face off` the toggles held false are; otherwise VRCFT is.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -120,9 +133,9 @@ class DefaultRouter(MappingRouter):
         self.register(mute)
         mute.activate()
 
-        # The face sender's toggles replace VRCFTMapping's when it is enabled.
+        # Face toggles of either kind replace VRCFTMapping's: never two sources for one parameter.
         face = _register_face(self, bridge)
-        if face is None:
+        if "osc_face_toggles" not in self._mappings:
             vrcft = VRCFTMapping(bridge)
             self.register(vrcft)
             vrcft.activate()
@@ -194,7 +207,8 @@ class CameraPrefabRouter(MappingRouter):
       - osc_persist: BridgePersist namespaces across an avatar swap.
       - osc_leash: when `[leash] enabled`, a held or planted leash pulls the wearer.
       - external_ai: when `[external_ai] enabled`, the socket an external program connects to.
-      - osc_face, osc_face_toggles: when `[face] enabled`, the face-tracking sender.
+      - osc_face, osc_face_toggles: when the face sender is on, the face-tracking sender; with
+        `--face off`, osc_face_toggles alone, holding the toggles false.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)

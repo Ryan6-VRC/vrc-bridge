@@ -158,6 +158,8 @@ def test_a_present_file_overrides_only_what_it_names(tmp_path):
     ("[vrclens]\nzoom_steps = ['a']\n", "zoom_steps[0]"),
     ("[virtuallens]\naperture_min_x = 1.5\n", "aperture_min_x"),
     ("[usercamera]\nfocaldist_min = -1.0\n", "focaldist_min"),
+    # `--face` is the launcher's: a file that set it would decide what the command line decides.
+    ("[face]\nlaunch = 'off'\n", "launch"),
 ])
 def test_bad_settings_are_refused_and_name_the_key(tmp_path, body, must_name):
     """A refusal has to name the offending key.

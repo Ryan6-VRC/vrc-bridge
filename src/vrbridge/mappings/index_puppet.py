@@ -254,7 +254,9 @@ class IndexPuppetMapping(Mapping):
             return QuantOutput(self._tune, self.bridge.osc.send)
         if face is not None:
             return FaceOutput(self._tune, face)
-        reason = ("[face] enabled is false" if not settings().face.enabled else
+        face_tune = settings().face
+        reason = ("--face off" if face_tune.launch == "off" else
+                  "[face] enabled is false" if not face_tune.sender_on else
                   "the face sender is not listening, which it logged (VRCFaceTracking holding its port?)")
         self.bridge.log.error(
             "IndexPuppet: [puppet] face_* keys are bound, which selects the face feed, but there is "
