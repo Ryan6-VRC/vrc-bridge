@@ -159,7 +159,7 @@ wardrobe = WardrobeMapping.load_from_settings(bridge, pinned_manifest_id=1)
 
 ## Quant channels
 
-Send a continuous value to an avatar two ways at once: a full-precision float for the wearer's own client, plus OSCmooth-shaped quantized booleans (`<Name>1/2/4…` + `<Name>Negative`) that are the only part remote players see. The avatar-side decode/smoothing layers come from the `quant-channel` entry in [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns); this repo owns the sender half: the codec (`vrbridge.quant_channel`), the manifest loader (`vrbridge.quant_manifest`), and the directory mapping that learns which manifest describes the worn avatar (`vrbridge.mappings.QuantChannelDirectory`). `index_puppet` is the shipped consumer.
+Send a continuous value to an avatar two ways at once: a full-precision float for the wearer's own client, plus OSCmooth-shaped quantized booleans (`<Name>1/2/4…` + `<Name>Negative`) that are the only part remote players see. The avatar-side decode/smoothing layers come from the `quant-channel` entry in [vrc-patterns](https://github.com/Ryan6-VRC/vrc-patterns); this repo owns the sender half: the codec (`vrbridge.quant_channel`), the manifest loader (`vrbridge.quant_manifest`), and the directory mapping that learns which manifest describes the worn avatar (`vrbridge.mappings.QuantChannelDirectory`). `index_puppet` is the shipped consumer, and it sends quant only while no `[puppet] face_*` key is bound ([Face feed](#face-feed)).
 
 **The manifest is the extension surface.** The generator emits one JSON manifest per avatar module; install it into `manifests/` next to your `vrbridge.toml` (or point `[quantchannel] manifest_dir` elsewhere). One file per module:
 
@@ -242,6 +242,27 @@ What to expect:
 - A headset without face tracking, such as a Quest 3, sends no face data, so nothing is sent.
 
 The mapping from the headset's face weights to VRChat's keys is ported from [VRCFT-ALVR](https://github.com/alvr-org/VRCFT-ALVR) and [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking), both Apache-2.0; [NOTICE](NOTICE) has the details.
+
+## Face feed
+
+Any mapping can put its own values on the face sender's blob, so they reach every viewer through VRChat's face-tracking sync instead of your synced-parameter budget. `set_keys({"SoftPalateClose": 1.0})` writes a value from 0 to 1 into any key of `vrbridge.face_blob.BLOB_KEYS` until `clear_keys(["SoftPalateClose"])` drops it. A key the headset leaves empty carries your value; a key it fills is overridden for as long as you hold the value, and goes back to the tracked value when you clear it. Values skip the face filter, so smooth them yourself. They travel only while the sender is already sending, that is, while face data arrives and the worn avatar has native face tracking; a value set while nothing is sent is held until sending resumes. Nothing arbitrates between two mappings writing one key: the last write wins.
+
+The Index puppet is the shipped consumer. Bind its values to keys under `[puppet]` and it sends over the face feed instead of quant:
+
+```toml
+[puppet]
+face_active      = "SoftPalateClose"     # 1 while the puppet is in use
+face_left_x_pos  = "NasalDilationLeft"   # each axis takes two keys, one per direction
+face_left_x_neg  = "NasalConstrictLeft"
+face_left_y_pos  = "NeckFlexLeft"
+face_left_y_neg  = "ThroatSwallow"
+face_right_x_pos = "NasalDilationRight"
+face_right_x_neg = "NasalConstrictRight"
+face_right_y_pos = "NeckFlexRight"
+face_right_y_neg = "JawBackward"
+```
+
+Any `face_*` key bound selects the face feed for every avatar, and all of them empty is quant. Your avatar forwards those keys and recombines each axis as `_pos − _neg`. The puppet is smoothed in the bridge at `float_smooth_tau_secs`, and once it comes to rest it clears its keys, so a tracked key you bound goes back to the headset. With no face data (a Quest 3, or face tracking off) the puppet reaches nobody, you included, since your own client also reads it from the blob. With keys bound and no face sender running, the puppet logs an error at startup and sends nothing; it does not fall back to quant. Update the bridge before adding these lines: an older bridge refuses the unknown keys and does not start.
 
 ## External AI socket
 

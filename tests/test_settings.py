@@ -253,3 +253,41 @@ def test_puppet_quant_level_is_bounded_by_the_codec():
         PuppetSettings(quant_level=9).validate("puppet")
     PuppetSettings(quant_level=0).validate("puppet")
     PuppetSettings(quant_level=8).validate("puppet")
+
+
+PUPPET_FACE_TOML = """[puppet]
+face_active      = "SoftPalateClose"
+face_left_x_pos  = "NasalDilationLeft"
+face_left_x_neg  = "NasalConstrictLeft"
+face_left_y_pos  = "NeckFlexLeft"
+face_left_y_neg  = "ThroatSwallow"
+face_right_x_pos = "NasalDilationRight"
+face_right_x_neg = "NasalConstrictRight"
+face_right_y_pos = "NeckFlexRight"
+face_right_y_neg = "JawBackward"
+"""
+
+
+def test_puppet_face_keys_load_and_default_to_unbound(tmp_path):
+    """Intended: empty is unbound, and no `face_*` line is quant exactly as before; the nine
+    lines the rollout adds load through the plain string path."""
+    assert Settings().puppet.face_bindings() == {}
+    p = tmp_path / "vrbridge.toml"
+    p.write_text(PUPPET_FACE_TOML)
+    bound = load_settings(p).puppet.face_bindings()
+    assert len(bound) == 9 and bound["face_left_y_neg"] == "ThroatSwallow"
+
+
+@pytest.mark.parametrize("lines, must_name", [
+    ('face_active = "Nope"\n', "face_active"),                                # not a blob key
+    ('face_active = "JawOpen"\nface_left_x_pos = "JawOpen"\n'
+     'face_left_x_neg = "JawBackward"\n', "face_left_x_pos"),                 # a key named twice
+    ('face_right_y_pos = "NeckFlexRight"\n', "face_right_y_neg"),             # half an axis
+    ('face_right_y_neg = "JawBackward"\n', "face_right_y_pos"),
+])
+def test_puppet_face_keys_are_refused_by_name(tmp_path, lines, must_name):
+    p = tmp_path / "vrbridge.toml"
+    p.write_text("[puppet]\n" + lines)
+    with pytest.raises(ConfigError) as exc:
+        load_settings(p)
+    assert f"puppet.{must_name}" in str(exc.value) and str(p) in str(exc.value)
