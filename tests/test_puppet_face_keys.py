@@ -94,10 +94,16 @@ def test_the_blob_carries_the_smoothed_float_not_the_raw_sample():
     assert face.keys["NasalDilationRight"] == pytest.approx(floats[-1])
 
 
-def test_a_lift_rests_the_axes_and_active_drops_after_the_idle_window(rig):
-    m, face, ctx = rig
+def test_a_lift_rests_the_axes_and_active_drops_after_the_idle_window():
+    """At a non-zero tau: one eased lift sample leaves the float short of 0, the blob must not."""
+    bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
+    face = _Face()
+    m = IndexPuppetMapping(bridge, face=face, tuning=PuppetSettings(
+        float_smooth_tau_secs=0.05, single_touch_mode="separate", touch_active_idle_secs=0.5))
+    m.activate()
+    ctx = _Ctx()
     m._on_touch("left")(ctx, _evt(0.5, 0.5, 1.0))
-    m._on_lift("left")(ctx, _evt(None, None, 1.1))
+    m._on_lift("left")(ctx, _evt(None, None, 1.02))
     assert all(face.keys.get(k, 0.0) == 0.0 for pair in FACE_KEYS.values() for k in pair)
     assert face.keys[ACTIVE_FACE_KEY] == 1.0          # held through the idle window, as Enable is
     m.update(m._last_contact_ts + 0.6)
@@ -121,4 +127,19 @@ def test_without_a_face_sender_the_puppet_writes_only_its_addresses():
     m.activate()
     ctx = _Ctx()
     m._on_touch("left")(ctx, _evt(0.5, 0.5, 1.0))
+    assert (TOUCH_ACTIVE_ADDR, 1) in ctx.sent
+
+
+def test_a_mode_switch_mid_touch_leaves_enable_consistent_on_reactivation(rig):
+    """A lift while deactivated is dropped; the next touch after reactivation must still raise
+    Enable on both the address and the blob."""
+    m, face, ctx = rig
+    m._on_touch("left")(ctx, _evt(0.5, 0.5, 1.0))
+    m.deactivate()
+    assert face.keys[ACTIVE_FACE_KEY] == 0.0
+    m._on_lift("left")(ctx, _evt(None, None, 1.1))     # dropped: disabled
+    m.activate()
+    ctx.sent.clear()
+    m._on_touch("left")(ctx, _evt(0.7, 0.0, 2.0))
+    assert face.keys[ACTIVE_FACE_KEY] == 1.0
     assert (TOUCH_ACTIVE_ADDR, 1) in ctx.sent

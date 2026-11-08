@@ -134,10 +134,16 @@ class IndexPuppetMapping(Mapping):
         y = ay * self._tune.invert_y
         return _clamp_unit(x), _clamp_unit(y)
 
-    def _send_axis(self, ctx, base_addr: str, raw_value: float, now: float):
+    def _send_axis(self, ctx, base_addr: str, raw_value: float, now: float, rest: bool = False):
         """Send one axis sample: raw/immediate booleans, smoothed float -- the
-        split QuantChannel.send owns -- and the smoothed float into the blob."""
+        split QuantChannel.send owns -- and the smoothed float into the blob.
+
+        `rest` (a lift) puts exact 0 in the blob, as the bits get: the one eased sample a lift
+        sends leaves the float short of 0 with no later sample to finish, and the blob, unlike the
+        float, is what every viewer sees while Enable is still held."""
         smoothed = self._channels[base_addr].send(ctx.send, raw_value, now)
+        if rest:
+            smoothed = 0.0
         if self._face is not None:
             pos, neg = FACE_KEYS[base_addr]
             self._face.set_keys({pos: max(smoothed, 0.0), neg: max(-smoothed, 0.0)})
@@ -153,7 +159,7 @@ class IndexPuppetMapping(Mapping):
             self._face.set_keys({k: 0.0 for pair in FACE_KEYS.values() for k in pair}
                                 | {ACTIVE_FACE_KEY: 0.0})
 
-    def _send_for_hand(self, ctx, hand: Hand, x: float, y: float, now: float):
+    def _send_for_hand(self, ctx, hand: Hand, x: float, y: float, now: float, rest: bool = False):
         """Send axis values honoring single_touch_mode."""
         # Determine if we should mirror to the other hand
         other = self._other_hand(hand)
@@ -173,13 +179,13 @@ class IndexPuppetMapping(Mapping):
                 targets.append((LEFT_X_ADDR, LEFT_Y_ADDR))
 
         for addr_x, addr_y in targets:
-            self._send_axis(ctx, addr_x, x, now)
-            self._send_axis(ctx, addr_y, y, now)
+            self._send_axis(ctx, addr_x, x, now, rest)
+            self._send_axis(ctx, addr_y, y, now, rest)
 
     def _send_zero_for_hand(self, ctx, hand: Hand, now: float):
         """Send zeros, mirroring when appropriate for single_touch_mode."""
         # Reuse generic logic with 0.0
-        self._send_for_hand(ctx, hand, 0.0, 0.0, now)
+        self._send_for_hand(ctx, hand, 0.0, 0.0, now, rest=True)
 
     def _reset_all(self, ctx):
         """Reset internal state and send exact zeros (e.g., on avatar change).
@@ -271,8 +277,14 @@ class IndexPuppetMapping(Mapping):
 
     def deactivate(self) -> None:
         # Another mode owns the controls now: the puppet stops riding the blob at once rather than
-        # holding its last pose there until the next avatar change.
+        # holding its last pose there until the next avatar change. A lift arriving while disabled is
+        # dropped, so touch state is reset too; kept, it would hold Enable up and make the next
+        # touch skip setting it.
         super().deactivate()
+        self._state = {"left": HandState(), "right": HandState()}
+        if self._touch_active:
+            self._touch_active = False
+            self._send_active(self.bridge.osc.send, False)
         self._clear_face_keys()
 
     def update(self, now: float) -> None:
