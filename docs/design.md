@@ -283,7 +283,7 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **It replaces `osc_vrcft`'s toggles rather than running beside them.** With VRCFaceTracking gone its mDNS advertisement is gone, and `osc_vrcft` would send `EyeTrackingActive`/`LipTrackingActive` false on every avatar change. `FaceTrackingToggles` is that mapping following face data instead, so a router registers one or the other, never both.
 
-**Off by default, and no detection of VRCFaceTracking.** The sender binds ALVR's VRCFaceTracking sink port, which VRCFaceTracking itself binds, so the two cannot run together and whichever starts second fails; the sender's bind failure names the port and the cause, and that is the whole interlock, by the operator's call. One sender per client is the client's rule as much as the port's: the client takes the last blob.
+**Off by default, and no detection of VRCFaceTracking.** The sender binds ALVR's VRCFaceTracking sink port, which VRCFaceTracking itself binds, so the two cannot run together and whichever starts second fails; the sender's bind failure names the port and the cause, and that is the whole interlock, by the operator's call. On a failed bind the router registers no face toggles and keeps `osc_vrcft`'s, since VRCFaceTracking is then the live source. One sender per client is the client's rule as much as the port's: the client takes the last blob.
 
 **Keys the mapping never writes stay a contract.** `tests/test_face_blob.py` pins the keys no ALVR input produces, because another writer may own some of them and reads 0 there as rest. A mapping change that starts writing one changes that contract.
 

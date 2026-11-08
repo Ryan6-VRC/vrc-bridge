@@ -20,7 +20,9 @@ this module owns when a blob is sent.
   streams that flag on its out-port when an avatar loads, which updates the gate at once; because a
   streamed row can be lost under inbound load, the flag is also read by name over OSCQuery every
   `gate_poll_secs` while the source is active, on an avatar change, and when the source comes back.
-  A 404 reads as false (no avatar declares it, or one is loading); a failed read changes nothing.
+  A 404 reads as false (no avatar declares it, or one is loading); a failed read changes nothing. A
+  read applies only if no streamed flag or avatar change landed while it was in flight, and it primes
+  the stream's change filter, so the next streamed value is compared against what the gate holds.
 * **Toggles.** `FaceTrackingToggles` is `osc_vrcft` following this source instead of VRCFT's mDNS
   advertisement: `EyeTrackingActive` and `LipTrackingActive` go true while face data flows and false
   when it stops, after each avatar change and on each transition. A router registers it in place of
@@ -73,8 +75,10 @@ class FaceSenderMapping(Mapping):
         self._warned_tags: set[bytes] = set()
         # Written by the worker, read by the gate thread and the toggles: a monotonic time or None.
         self._last_data: Optional[float] = None
-        # The worn avatar's full-face-tracking flag; None until something has said.
+        # The worn avatar's full-face-tracking flag; None until something has said. Under _lock, with
+        # the sequence a read checks so a streamed flag or an avatar change supersedes it.
         self._full_face: Optional[bool] = None
+        self._gate_seq = 0
         #: The bound port, once listening. Differs from `[face] port` only when that is 0.
         self.port: Optional[int] = None
 
@@ -188,7 +192,10 @@ class FaceSenderMapping(Mapping):
     def _on_datagram(self, data: bytes, now: float) -> None:
         if data == self._last_payload:
             if self._last_had_data:
+                returning = not self.source_active(now)
                 self._last_data = now
+                if returning:
+                    self._gate_wake.set()
             return
         self._last_payload = data
         dgram = decode(data)
@@ -218,6 +225,8 @@ class FaceSenderMapping(Mapping):
         self._set_full_face(bool(value))
 
     def _on_avatar_change(self, ctx, address: str, value) -> None:
+        with self._lock:
+            self._gate_seq += 1
         self._gate_wake.set()
 
     def _gate_loop(self, stop: threading.Event) -> None:
@@ -228,14 +237,24 @@ class FaceSenderMapping(Mapping):
                 return
             if not (woke or self.source_active()):
                 continue
+            with self._lock:
+                seq = self._gate_seq
             res = self.bridge.osc.fetch(FULL_FACE_ADDR)
             if res.ok:
-                self._set_full_face(bool(res.value))
+                self._set_full_face(bool(res.value), seq)
             elif res.reason == FETCH_NOT_FOUND:
-                self._set_full_face(False)
+                self._set_full_face(False, seq)
 
-    def _set_full_face(self, value: bool) -> None:
+    def _set_full_face(self, value: bool, read_seq: Optional[int] = None) -> None:
+        """Apply the flag. A streamed value (`read_seq` None) supersedes any read in flight; a read
+        applies only if nothing superseded it, and primes the change filter with what it read."""
         with self._lock:
+            if read_seq is None:
+                self._gate_seq += 1
+            elif read_seq != self._gate_seq:
+                return
+            else:
+                self.bridge.osc.prime(FULL_FACE_ADDR, value)
             changed, self._full_face = self._full_face != value, value
         if changed:
             self.bridge.log.info(
@@ -251,6 +270,10 @@ class FaceTrackingToggles(VRCFTMapping):
     def __init__(self, bridge: VRBridge, sender: FaceSenderMapping, tuning=None):
         super().__init__(bridge, tuning)
         self._sender = sender
+        # The first-look rule exists for VRCFT's mDNS discovery latency, which this source does not
+        # have: ALVR may already be streaming when the router starts, and a first look that only
+        # recorded True would never send it. Starting from False makes that first look a transition.
+        self._last_running = False
 
     def _source_running(self) -> bool:
         return self._sender.source_active()

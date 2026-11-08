@@ -60,8 +60,9 @@ def _register_external_ai(router: MappingRouter, bridge: VRBridge) -> None:
 
 def _register_face(router: MappingRouter, bridge: VRBridge) -> bool:
     """Register the face sender and its toggles always-on, outside mode switching, when
-    `[face] enabled` is true. Returns whether it did, so a router carrying `VRCFTMapping` leaves
-    that out: the two toggle sources would contradict each other.
+    `[face] enabled` is true and its port binds. Returns whether it did, so a router carrying
+    `VRCFTMapping` leaves that out: the two toggle sources would contradict each other. A held port
+    (VRCFaceTracking running) registers no toggles and returns False, so VRCFT's toggles stay.
 
     Off by default because it binds ALVR's face port, which VRCFaceTracking also binds. Outside
     mode switching because a face is tracked in every mode.
@@ -73,6 +74,8 @@ def _register_face(router: MappingRouter, bridge: VRBridge) -> bool:
     face = FaceSenderMapping(bridge)
     router.register(face)
     face.activate()
+    if face.port is None:
+        return False
     toggles = FaceTrackingToggles(bridge, face)
     router.register(toggles)
     toggles.activate()

@@ -180,6 +180,46 @@ def test_deactivate_closes_the_socket_and_activate_reopens_it(h):
     assert h.face._sock is not None and h.face.port is not None and first is not None
 
 
+def test_a_read_primes_the_change_filter_so_the_next_streamed_flag_lands(vrc, h):
+    """A native avatar left True in the stream's cache; a read then closed the gate. The next
+    native avatar's streamed True must open it, not be eaten by the change filter as a repeat."""
+    h.bridge.osc.watch(FULL_FACE_ADDR)
+    h.bridge.osc._update_cache_and_fire(FULL_FACE_ADDR, True)
+    h.send(_payloads()[0], times=10, gap=0.01)          # node absent: the read 404s to False
+    assert _wait(lambda: h.face._full_face is False)
+    h.bridge.osc._update_cache_and_fire(FULL_FACE_ADDR, True)
+    assert h.face._full_face is True
+
+
+def test_a_read_in_flight_does_not_overwrite_a_streamed_flag(vrc):
+    harness = _Harness(vrc, FaceSettings(enabled=True, port=0, rate=100.0, gate_poll_secs=60.0))
+    try:
+        vrc.set_node(FULL_FACE_ADDR, False)
+        with vrc.hold_next_node_get() as gate:
+            harness.face._on_avatar_change(None, "/avatar/change", "avtr_next")
+            assert gate.wait_until_parked()
+            harness.face._on_full_face(None, FULL_FACE_ADDR, True)   # lands while the read waits
+            gate.release()
+        time.sleep(0.1)
+        assert harness.face._full_face is True
+    finally:
+        harness.close()
+
+
+def test_data_resuming_with_the_same_bytes_rereads_the_flag(vrc):
+    harness = _Harness(vrc, FaceSettings(enabled=True, port=0, rate=100.0,
+                                         presence_timeout_secs=0.1, gate_poll_secs=60.0))
+    try:
+        p = _payloads()[0]
+        harness.send(p)
+        assert _wait(lambda: len(vrc.node_gets) == 1)       # the source arriving reads once
+        assert _wait(lambda: not harness.face.source_active(), timeout=1.0)
+        harness.send(p)                                      # back, byte-identical
+        assert _wait(lambda: len(vrc.node_gets) == 2, timeout=1.0)
+    finally:
+        harness.close()
+
+
 # ---- the toggles -----------------------------------------------------------------------------
 
 class _Source:
@@ -212,6 +252,21 @@ def test_toggles_follow_the_face_source_not_vrcfts_advertisement():
                                     ("/avatar/parameters/EyeTrackingActive", False)]
 
 
+def test_toggles_send_true_when_face_data_already_flows_at_startup():
+    """ALVR may be streaming before the router starts. VRCFT's first-look rule would record that
+    True and never send it; the face source has no discovery latency to wait out."""
+    from vrbridge.settings import VRCFTSettings
+    bridge = _Bridge()
+    src = _Source()
+    src.active = True
+    m = FaceTrackingToggles(bridge, src, tuning=VRCFTSettings(service_poll_secs=0.01))
+    m.register()
+    m.activate()
+    m.update(1.0)
+    assert bridge.osc.sent == [("/avatar/parameters/LipTrackingActive", True),
+                               ("/avatar/parameters/EyeTrackingActive", True)]
+
+
 # ---- the routers -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -241,3 +296,21 @@ def test_shipped_routers_register_it_only_when_enabled(router_name, enabled):
         if router is not None and "osc_face" in router._mappings:
             router._mappings["osc_face"].deactivate()
         set_settings(None)
+
+
+def test_a_held_port_keeps_vrcfts_toggles_in_the_default_router():
+    """VRCFaceTracking holding the port is the documented interlock: the face sender stays off, so
+    its toggles must not replace VRCFT's, which would send both False while VRCFT is the source."""
+    from vrbridge.cli import ROUTERS
+    holder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    holder.bind(("127.0.0.1", 0))
+    set_settings(Settings(face=FaceSettings(enabled=True, port=holder.getsockname()[1])))
+    try:
+        bridge = VRBridge(enable_steamvr=False, advertise=False, discover=False)
+        router = ROUTERS["default"](bridge)
+        assert router._mappings["osc_face"].port is None
+        assert "osc_face_toggles" not in router._mappings
+        assert isinstance(router._mappings.get("osc_vrcft"), VRCFTMapping)
+    finally:
+        set_settings(None)
+        holder.close()
