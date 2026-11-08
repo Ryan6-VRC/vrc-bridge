@@ -23,6 +23,13 @@ this module owns when a blob is sent.
   A 404 reads as false (no avatar declares it, or one is loading); a failed read changes nothing. A
   read applies only if no streamed flag or avatar change landed while it was in flight, and it primes
   the stream's change filter, so the next streamed value is compared against what the gate holds.
+* **The feed.** Another mapping puts its own values on the blob with `set_keys({name: value})`, in any
+  key of `face_blob.BLOB_KEYS`: one `pack` leaves at 0, or one it fills, which the value overrides for
+  as long as it is held. `clear_keys(names)` drops overrides, and each key goes back to what `pack`
+  produced. A value is clamped to 0..1 and quantized as `pack` quantizes, and skips the filter, so a
+  consumer owns its own smoothing. Overrides travel only on the blobs the gate already sends: one set
+  while nothing is sent is held, never expired, and rides the first blob once sending resumes. There
+  is no ownership: two writers to one key is misconfiguration, and the last write wins.
 * **Toggles.** `FaceTrackingToggles` is `osc_vrcft` following this source instead of VRCFT's mDNS
   advertisement: `EyeTrackingActive` and `LipTrackingActive` go true while face data flows and false
   when it stops, after each avatar change and on each transition. A router registers it in place of
@@ -34,10 +41,10 @@ import select
 import socket
 import threading
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 from vrbridge import VRBridge
-from vrbridge.face_blob import FaceFrame, FaceSmoother, decode, pack
+from vrbridge.face_blob import BLOB_KEYS, FaceFrame, FaceSmoother, _byte, decode, pack
 from vrbridge.mappings.mapping_base import Mapping
 from vrbridge.mappings.osc_vrcft import VRCFTMapping
 from vrbridge.osc_manager import FETCH_NOT_FOUND
@@ -52,6 +59,7 @@ LISTEN_HOST = "127.0.0.1"
 # long gap cannot hand the filter a near-1 alpha and a derivative of nothing.
 _MAX_DT = 0.1
 _JOIN_SECS = 1.0
+_KEY_INDEX = {k: i for i, k in enumerate(BLOB_KEYS)}
 
 
 class FaceSenderMapping(Mapping):
@@ -79,6 +87,11 @@ class FaceSenderMapping(Mapping):
         # the sequence a read checks so a streamed flag or an avatar change supersedes it.
         self._full_face: Optional[bool] = None
         self._gate_seq = 0
+        # Other mappings' overrides, blob index -> byte. Written from their threads and copied by the
+        # worker each tick, under a lock of their own: a key write never waits on a gate read. The
+        # sender is already running when its consumers are built, so it guards the very first call.
+        self._feed_lock = threading.Lock()
+        self._overrides: dict[int, int] = {}
         #: The bound port, once listening. Differs from `[face] port` only when that is 0.
         self.port: Optional[int] = None
 
@@ -152,6 +165,34 @@ class FaceSenderMapping(Mapping):
         now = time.monotonic() if now is None else now
         return now - last <= self._tune.presence_timeout_secs
 
+    # ---- the feed: other mappings' values on the blob ------------------------
+
+    def set_keys(self, values: dict[str, float]) -> None:
+        """Override each named key with its value, clamped to 0..1, from the next blob sent until
+        `clear_keys` drops it. 0 is an override like any other. Thread-safe. Raises ValueError,
+        writing nothing, if any name is not in `BLOB_KEYS`."""
+        index = self._index(values)
+        packed = {index[k]: _byte(v) for k, v in values.items()}
+        with self._feed_lock:
+            self._overrides.update(packed)
+
+    def clear_keys(self, names: Iterable[str]) -> None:
+        """Drop the overrides on `names`, so each key carries what `pack` produced again; a name with
+        no override is left as it is. Thread-safe. Raises ValueError, dropping nothing, if any name is
+        not in `BLOB_KEYS`."""
+        index = self._index(list(names))
+        with self._feed_lock:
+            for i in index.values():
+                self._overrides.pop(i, None)
+
+    @staticmethod
+    def _index(names) -> dict[str, int]:
+        bad = sorted(set(names) - _KEY_INDEX.keys())
+        if bad:
+            raise ValueError(f"osc_face: {bad} are not keys of /tracking/face/v1 "
+                             "(face_blob.BLOB_KEYS)")
+        return {k: _KEY_INDEX[k] for k in names}
+
     # ---- the worker: receive and send --------------------------------------
 
     def _run(self, sock: socket.socket, stop: threading.Event) -> None:
@@ -217,7 +258,16 @@ class FaceSenderMapping(Mapping):
             return
         frame = self._smoother.step(self._frame, dt) if self._smoother else self._frame
         if self._full_face is True and self.enabled:
-            self.bridge.osc.send(FACE_ADDR, pack(frame))
+            with self._feed_lock:
+                overrides = dict(self._overrides)
+            blob = pack(frame)
+            if overrides:
+                # After the filter: an override is the consumer's value as it wrote it.
+                b = bytearray(blob)
+                for i, v in overrides.items():
+                    b[i] = v
+                blob = bytes(b)
+            self.bridge.osc.send(FACE_ADDR, blob)
 
     # ---- the gate: is the worn avatar native? -------------------------------
 

@@ -3,14 +3,17 @@
 The datagrams are the recorded fixture or synthetic ones sent to the mapping's real socket, so the
 path under test is the production one from `recv` to the client's `/tracking/face/v1` receiver.
 """
+import contextlib
 import socket
 import struct
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from vrbridge.engine import VRBridge
+from vrbridge.face_blob import BLOB_KEYS
 from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles, VRCFTMapping
 from vrbridge.mappings.osc_face import FACE_ADDR, FULL_FACE_ADDR
 from vrbridge.settings import FaceSettings, Settings, set_settings
@@ -314,3 +317,83 @@ def test_a_held_port_keeps_vrcfts_toggles_in_the_default_router():
     finally:
         set_settings(None)
         holder.close()
+
+
+# ---- the feed ---------------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _flowing(h):
+    """Keep the fixture's first datagram arriving every 10 ms, as a worn headset would."""
+    stop = threading.Event()
+
+    def run():
+        while not stop.is_set():
+            h.send(_payloads()[0])
+            time.sleep(0.01)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join()
+
+
+def _byte_at(vrc, key, nth=-1):
+    return vrc.values_for(FACE_ADDR)[nth][BLOB_KEYS.index(key)]
+
+
+def test_set_keys_refuses_a_name_outside_the_blob_and_writes_nothing(h):
+    with pytest.raises(ValueError, match="NotAKey"):
+        h.face.set_keys({"SoftPalateClose": 1.0, "NotAKey": 1.0})
+    assert h.face._overrides == {}
+    with pytest.raises(ValueError, match="NotAKey"):
+        h.face.clear_keys(["NotAKey"])
+
+
+def test_an_override_lands_in_a_key_pack_leaves_empty(vrc, h):
+    vrc.set_node(FULL_FACE_ADDR, True)
+    h.face.set_keys({"SoftPalateClose": 1.0, "NasalDilationLeft": 0.5, "NeckFlexLeft": 0.0})
+    with _flowing(h):
+        assert _wait(lambda: vrc.values_for(FACE_ADDR))
+    assert _byte_at(vrc, "SoftPalateClose") == 255
+    assert _byte_at(vrc, "NasalDilationLeft") == int(0.5 * 255)
+    assert _byte_at(vrc, "NeckFlexLeft") == 0
+
+
+def test_an_override_beats_a_tracked_key_until_it_is_cleared(vrc, h):
+    """Intended: priority over the tracker lasts exactly as long as the override is held."""
+    vrc.set_node(FULL_FACE_ADDR, True)
+    with _flowing(h):
+        assert _wait(lambda: len(vrc.values_for(FACE_ADDR)) > 5)
+        tracked = _byte_at(vrc, "JawOpen")
+        assert tracked > 0                                   # the fixture opens the jaw a little
+        h.face.set_keys({"JawOpen": 0.0})                    # 0 is an override like any other
+        assert _wait(lambda: _byte_at(vrc, "JawOpen") == 0)
+        h.face.clear_keys(["JawOpen"])
+        assert _wait(lambda: _byte_at(vrc, "JawOpen") == tracked)
+
+
+def test_an_override_skips_the_filter(vrc, h):
+    """At 100 Hz the One-Euro filter takes several ticks over a step; an override is on the wire
+    whole from the first blob that copied it. The blob after the set may have copied before it."""
+    vrc.set_node(FULL_FACE_ADDR, True)
+    with _flowing(h):
+        assert _wait(lambda: vrc.values_for(FACE_ADDR))
+        h.face.set_keys({"MouthClosed": 1.0})
+        n = len(vrc.values_for(FACE_ADDR))
+        assert _wait(lambda: len(vrc.values_for(FACE_ADDR)) >= n + 2)
+    assert _byte_at(vrc, "MouthClosed", n + 1) == 255
+
+
+def test_nothing_is_sent_while_the_gate_is_closed_and_a_held_override_travels_once_it_opens(vrc, h):
+    vrc.set_node(FULL_FACE_ADDR, False)
+    with _flowing(h):
+        assert _wait(lambda: h.face._full_face is False)
+        h.face.set_keys({"SoftPalateClose": 1.0})
+        time.sleep(0.1)
+        assert vrc.values_for(FACE_ADDR) == []
+        vrc.set_node(FULL_FACE_ADDR, True)                   # so the next poll agrees
+        h.face._on_full_face(None, FULL_FACE_ADDR, True)
+        assert _wait(lambda: vrc.values_for(FACE_ADDR))
+    assert _byte_at(vrc, "SoftPalateClose", 0) == 255

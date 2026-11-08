@@ -82,6 +82,10 @@ class SmoothScrollSettings:
         _positive(self.sticky_reset_gap, f"{at}.sticky_reset_gap")
 
 
+#: The puppet's four output axes, by the names its outputs and its `face_*` settings share.
+PUPPET_AXES = ("left_x", "left_y", "right_x", "right_y")
+
+
 @dataclass(frozen=True)
 class PuppetSettings:
     quant_level: int = 3                 # magnitude bits for the OSCmooth-style codec
@@ -98,6 +102,25 @@ class PuppetSettings:
     # cross-checks against this value: retuning here without regenerating that manifest
     # refuses the arm.
     float_smooth_tau_secs: float = 0.05  # <= 0 disables float smoothing
+    # The face-feed transport: which `/tracking/face/v1` key carries each value. Any one set selects
+    # the face feed in place of quant, for every avatar; all empty (the default) is quant, as before.
+    # A signed axis takes two keys, its positive direction in `_pos` and its magnitude below zero in
+    # `_neg`, so silence and the client's 2 s timeout both read as rest. The names are the operator's
+    # avatar layout, which is why they are settings: the bridge carries no avatar's key table.
+    face_active: str = ""                # 1 while the puppet is in use, else 0
+    face_left_x_pos: str = ""
+    face_left_x_neg: str = ""
+    face_left_y_pos: str = ""
+    face_left_y_neg: str = ""
+    face_right_x_pos: str = ""
+    face_right_x_neg: str = ""
+    face_right_y_pos: str = ""
+    face_right_y_neg: str = ""
+
+    def face_bindings(self) -> dict[str, str]:
+        """The bound `face_*` settings, setting name to key; empty when the transport is quant."""
+        names = ["face_active"] + [f"face_{a}_{d}" for a in PUPPET_AXES for d in ("pos", "neg")]
+        return {n: getattr(self, n) for n in names if getattr(self, n)}
 
     def validate(self, at: str) -> None:
         # Bounded by the codec, and enforced here so a bad value is a ConfigError naming
@@ -111,6 +134,22 @@ class PuppetSettings:
         _one_of(self.single_touch_mode, ("together", "separate"), f"{at}.single_touch_mode")
         _one_of(self.invert_x, (-1, 1), f"{at}.invert_x")
         _one_of(self.invert_y, (-1, 1), f"{at}.invert_y")
+        from vrbridge.face_blob import BLOB_KEYS
+        seen: dict[str, str] = {}
+        for name, key in self.face_bindings().items():
+            if key not in BLOB_KEYS:
+                raise ConfigError(f"{at}.{name} is {key!r}; expected a /tracking/face/v1 key "
+                                  "(vrbridge.face_blob.BLOB_KEYS), such as 'SoftPalateClose'")
+            if key in seen:
+                raise ConfigError(f"{at}.{name} and {at}.{seen[key]} both name {key!r}; one key "
+                                  "carries one value")
+            seen[key] = name
+        for axis in PUPPET_AXES:
+            pos, neg = getattr(self, f"face_{axis}_pos"), getattr(self, f"face_{axis}_neg")
+            if bool(pos) != bool(neg):
+                unset = f"face_{axis}_neg" if pos else f"face_{axis}_pos"
+                raise ConfigError(f"{at}.{unset} is empty while its other direction is bound; "
+                                  "bind an axis in both directions or neither")
 
 
 @dataclass(frozen=True)
