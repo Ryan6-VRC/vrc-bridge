@@ -1,0 +1,25 @@
+vrc-bridge
+Copyright (c) 2026 Ryan6-VRC
+Licensed under the MIT License; see LICENSE.
+
+src/vrbridge/face_blob.py contains work ported from two projects licensed under the Apache License,
+Version 2.0. A copy of that license is in LICENSES/Apache-2.0.txt, and it governs the ported portions.
+
+VRCFT-ALVR, by the ALVR contributors
+https://github.com/alvr-org/VRCFT-ALVR (ported from commit 0c4442b49665416d0474e1ef1b001319042a0571)
+  - ALVRModule/FbFaceTracking.cs: the XR_FB_face_tracking2 to Unified Expressions mapping
+    (face_blob.FB_TO_UE, face_blob.map_face) and the face weight order (face_blob.FB_NAMES).
+  - ALVRModule/EyeTracking.cs: the gaze conversion from a quaternion (face_blob.gaze_from_quat).
+
+VRCFaceTracking, by benaclejames and contributors
+https://github.com/benaclejames/VRCFaceTracking (ported from commit c8405b62b3176612be4dcaa8ff4f38eb8a62484f)
+  - VRCFaceTracking.Core/Params/Data/Mutation/Correctors.cs: the MouthClosed and lip suck correctors
+    (face_blob.correct).
+  - VRCFaceTracking.Core/Params/Data/Mutation/Filter.cs: the One-Euro filter (face_blob.OneEuro).
+  - VRCFaceTracking.Core/Params/Data/UnifiedData.cs and Params/Expressions/UnifiedExpressions.cs: the
+    /tracking/face/v1 byte layout and the Unified Expressions order (face_blob.pack, face_blob.UE_SHAPES).
+
+Changes made in porting: translated from C# to Python; the filter takes the real sample period in
+place of its fixed 10 Hz; a zero quaternion reads as straight ahead and the gaze asin argument is
+clamped; a negative upper lip raiser is read as 0 before its 1/6 power; the pupil keys are always 0;
+the eyelid blend and gaze symmetrize correctors, which default off, are not carried.

@@ -17,7 +17,7 @@ Do not relitigate these; they are the operator's.
 | Library **and** application, with a declared seam | The library path is the documented extension route; a `[project.entry-points]` router group makes third-party routers reachable from the CLI. |
 | Operator-tunable values live in a config file | Retuning must not require editing installed source. A constant that is a *contract* rather than a feel setting stays in source and says so — `osc_wardrobe.REPEAT_GUARD_SECS` and `osc_manager._SERVE_POLL_SECS` are both deliberate, and `settings.py`'s header rule draws the line. |
 | Parameter discovery is **descoped** | Discovery serves an observer poking an avatar they did not author; a user here owns both ends and already knows the names. Never build it standalone, and do not accept a dependency that carries it in. A consumer reading a subtree it owns (`OSCManager.fetch_tree`; `osc_persist` reads a namespace's, and the `BridgePersist/` root they all live under) is not discovery: it names the subtree, and the names under it are the avatar's half of a contract the consumer already holds. |
-| Named ancestors get **links, not notices** | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking; we borrowed code from none of them. |
+| Named ancestors get **links, not notices**, with one exception | We interface with OSCmooth, VirtualLens2, VRCLens, VRCFaceTracking and ALVR. The one borrow is `face_blob`, ported from VRCFT-ALVR and VRCFaceTracking under Apache-2.0, which carries NOTICE; §The face sender says why it is a port. |
 | The OSCLeash **port** is deleted and does not return | It was the sole code borrow. `osc_leash` is a clean rewrite over face-proximity box sensing, sharing no code with it; the avatar half belongs in a `vrc-patterns` entry. |
 | Test-determinism machinery lives in the fake, never as a seam in the code under test | `FakeVRChat`'s knobs — `node_fault`, `node_garbage`, `node_404_first`, `hold_next_node_get` — make a hard-to-reach path reachable. A seam in the code under test would instead encode the interleaving its author already knew about, and its placement would be chosen by whoever already knew the bug. |
 | The external AI socket is the worked integration example | One plain-TCP NDJSON socket, config-enabled and loopback by default, is how an outside program reads and drives an avatar; §The external AI socket holds its rulings. |
@@ -269,7 +269,27 @@ A contact-flippable latch can chatter, and two flips inside one pulse duration w
 
 **Nothing blocks a datagram or controller thread.** Every bridge callback formats and queues; `get`'s fetch runs on a per-connection worker; a slow client's full queue drops its oldest event rather than waiting, and is told how many. A client that stops reading must cost the bridge memory bounded by the queue depth and nothing else (§Inbound delivery semantics, on what a block costs each thread).
 
+## The face sender: the rulings, not the mechanism
+
+`osc_face` sends VRChat's native `/tracking/face/v1` blob from ALVR's face datagram, taking VRCFaceTracking's place for an avatar with native face tracking; `face_blob` is the pure half. Only the decisions live here: the wire, the gate and the cadence are `osc_face`'s module docstring's, and the mapping, filter and byte layout are `face_blob`'s.
+
+**The blob is VRCFaceTracking's blob, by construction.** The FB-to-Unified-Expressions table, the gaze conversion, the correctors, the filter and the byte layout are ports, so a datagram packs to the bytes VRCFaceTracking would have sent from it. That is what makes a live mirror check against a VRCFT session a comparison of like with like, and it is §The warrant criterion applied: the table's nonlinear terms were tuned against faces by their authors, and re-deriving them spends headset time re-proving what already works. Change one only on a wear test. Only VRCFT's correctors that are on by default are carried; its calibration, parameter adjustment and the module zoo are deliberately absent, since the operator wants no UI and no calibration on the sender.
+
+**The filter's defaults are VRCFT's filter as its pipeline actually runs it.** VRCFaceTracking's Data Filter hardcodes a 10 Hz period but runs once per 100 Hz update request, so its shipped defaults behave as a real-time One-Euro with every cutoff ten times larger and beta unchanged. `FaceSettings` ships those real-time values, so enabling the sender changes nothing a wearer feels; a smoother face is a retune of `[face]`, made on a wear test.
+
+**One send per tick, filtered on the tick.** ALVR sends one datagram per tracking packet, a few hundred a second, mostly repeats, with eye and face sampled independently at different rates. The client applies the latest value once per frame, so forwarding each datagram buys nothing; holding the latest values and filtering at a fixed tick with its real period makes the feel independent of the headset's packet rate.
+
+**Native avatars only, gated as VRCFaceTracking gates.** On an avatar without native face tracking a blob still takes over eye gaze, so nothing is sent unless the worn avatar's `/avatar/avatarfullfacetracking` is true. The client streams that flag when an avatar loads, and the stream alone is not trusted: §Persistence across a swap measured single rows lost under face-tracking load, so the flag is also read by name over OSCQuery while face data flows. Reading one named node is not discovery (§Settled decisions). An avatar driven by VRCFaceTracking's `FT/v2` parameters is out of scope; the operator runs native avatars only.
+
+**It replaces `osc_vrcft`'s toggles rather than running beside them.** With VRCFaceTracking gone its mDNS advertisement is gone, and `osc_vrcft` would send `EyeTrackingActive`/`LipTrackingActive` false on every avatar change. `FaceTrackingToggles` is that mapping following face data instead, so a router registers one or the other, never both.
+
+**Off by default, and no detection of VRCFaceTracking.** The sender binds ALVR's VRCFaceTracking sink port, which VRCFaceTracking itself binds, so the two cannot run together and whichever starts second fails; the sender's bind failure names the port and the cause, and that is the whole interlock, by the operator's call. One sender per client is the client's rule as much as the port's: the client takes the last blob.
+
+**Keys the mapping never writes stay a contract.** `tests/test_face_blob.py` pins the keys no ALVR input produces, because another writer may own some of them and reads 0 there as rest. A mapping change that starts writing one changes that contract.
+
+Not measured: a worn headset's packet rates (the recorded rates are a docked headset's), a Quest 3's zero-length datagrams (read from ALVR's source), and a remote viewer's view of the blob this sender sends.
+
 ## Provenance
 
-Every named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, and Voicemeeter.
+Every named project here is an interface, not an ancestor, and each carries a link from the README's §Interoperates-with rather than a notice: VirtualLens2, VRCLens, OSCmooth, VRCFaceTracking, ALVR, and Voicemeeter. The exception is `face_blob`, a port from VRCFT-ALVR and VRCFaceTracking under Apache-2.0: NOTICE names what came from where and what changed, and LICENSES/Apache-2.0.txt travels with it.
 

@@ -58,14 +58,36 @@ def _register_external_ai(router: MappingRouter, bridge: VRBridge) -> None:
     ext.activate()
 
 
+def _register_face(router: MappingRouter, bridge: VRBridge) -> bool:
+    """Register the face sender and its toggles always-on, outside mode switching, when
+    `[face] enabled` is true. Returns whether it did, so a router carrying `VRCFTMapping` leaves
+    that out: the two toggle sources would contradict each other.
+
+    Off by default because it binds ALVR's face port, which VRCFaceTracking also binds. Outside
+    mode switching because a face is tracked in every mode.
+    """
+    from vrbridge.mappings import FaceSenderMapping, FaceTrackingToggles
+    from vrbridge.settings import settings
+    if not settings().face.enabled:
+        return False
+    face = FaceSenderMapping(bridge)
+    router.register(face)
+    face.activate()
+    toggles = FaceTrackingToggles(bridge, face)
+    router.register(toggles)
+    toggles.activate()
+    return True
+
+
 class DefaultRouter(MappingRouter):
     """
     Switch between:
       - index_puppet       when /usercamera/Mode == 0
       - index_usercamera   when /usercamera/Mode != 0
 
-    MuteProxy, VRCFT and BridgePersist are always-on, the leash when `[leash] enabled`, and the
-    external AI socket when `[external_ai] enabled`.
+    MuteProxy and BridgePersist are always-on, the leash when `[leash] enabled`, and the
+    external AI socket when `[external_ai] enabled`. With `[face] enabled` the face sender and its
+    toggles are always-on in place of VRCFT; otherwise VRCFT is.
     """
 
     def __init__(self, bridge: VRBridge):
@@ -91,10 +113,11 @@ class DefaultRouter(MappingRouter):
         self.register(mute)
         mute.activate()
 
-        # Register VRCFTMapping (always on)
-        vrcft = VRCFTMapping(bridge)
-        self.register(vrcft)
-        vrcft.activate()
+        # The face sender's toggles replace VRCFTMapping's when it is enabled.
+        if not _register_face(self, bridge):
+            vrcft = VRCFTMapping(bridge)
+            self.register(vrcft)
+            vrcft.activate()
 
         _register_persist(self, bridge)
         _register_leash(self, bridge)
@@ -163,6 +186,7 @@ class CameraPrefabRouter(MappingRouter):
       - osc_persist: BridgePersist namespaces across an avatar swap.
       - osc_leash: when `[leash] enabled`, a held or planted leash pulls the wearer.
       - external_ai: when `[external_ai] enabled`, the socket an external program connects to.
+      - osc_face, osc_face_toggles: when `[face] enabled`, the face-tracking sender.
     """
     def __init__(self, bridge: VRBridge):
         super().__init__(bridge)
@@ -198,6 +222,7 @@ class CameraPrefabRouter(MappingRouter):
         _register_persist(self, bridge)
         _register_leash(self, bridge)
         _register_external_ai(self, bridge)
+        _register_face(self, bridge)
 
         # Managed group
         self.register(IndexPuppetMapping(bridge))

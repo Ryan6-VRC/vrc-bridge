@@ -93,6 +93,15 @@ def test_defaults_are_the_shipped_values():
     ea = s.external_ai
     assert (ea.enabled, ea.bind, ea.port, ea.log_dir) == (False, "127.0.0.1", 9002, "")
 
+    # osc_face.py -- new with the mapping, so pinned against its docstring: off by default because
+    # it binds the port VRCFaceTracking binds, 41463 because that is ALVR's VRCFaceTracking sink
+    # port, and the filter values are VRCFaceTracking's Data Filter defaults as its 100 Hz pipeline
+    # runs them (test_face_blob proves the equivalence), so a move is a wear-test call.
+    fa = s.face
+    assert (fa.enabled, fa.port, fa.rate) == (False, 41463, 60.0)
+    assert (fa.presence_timeout_secs, fa.gate_poll_secs) == (1.0, 2.0)
+    assert (fa.smoothing, fa.min_cutoff, fa.beta, fa.d_cutoff) == (True, 10.0, 0.5, 1.0)
+
 
 @pytest.mark.parametrize("raw, key", [
     ({"port": 65536}, "external_ai.port"),

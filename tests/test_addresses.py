@@ -209,3 +209,19 @@ def test_router_selector_addresses():
     assert routers.VRCL_FEATURE_TOGGLE_ADDR == vc.VRCL_TOGGLE
     assert routers.USERCAMERA_MODE_ADDR == uc.USERC_MODE
     assert routers.AVATAR_CHANGE_ADDR == "/avatar/change"
+
+
+def test_face_sender_addresses():
+    """VRChat's native face-tracking input and the avatar flag that gates it (the client's own
+    surface: the face-tracking OSC page, and the node VRCFaceTracking reads), plus ALVR's
+    VRCFaceTracking sink port and segment tags (`alvr/server_core/src/tracking/face.rs`)."""
+    from vrbridge import face_blob as fb
+    from vrbridge.mappings import osc_face as of
+    from vrbridge.settings import FaceSettings
+    assert of.FACE_ADDR == "/tracking/face/v1"
+    assert of.FULL_FACE_ADDR == "/avatar/avatarfullfacetracking"
+    assert of.AVATAR_CHANGE_ADDR == "/avatar/change"
+    assert of.LISTEN_HOST == "127.0.0.1"
+    assert FaceSettings().port == 0xA1F7 == 41463
+    assert (fb.TAG_EYES, fb.TAG_COMB, fb.TAG_FACE2) == (b"EyesQuat", b"CombQuat", b"Face2Fb\0")
+    assert fb.BLOB_SIZE == 102
