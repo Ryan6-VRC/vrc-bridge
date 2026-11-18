@@ -187,8 +187,9 @@ class LeashMapping(Mapping):
         self._sent: Dict[str, Optional[float]] = {VERTICAL_ADDR: None, HORIZONTAL_ADDR: None,
                                                   RUN_ADDR: None}
         self._last_step: Optional[float] = None
-        # Whether the zeros now pending have already been warned about; the step re-sends them
-        # every tick, and only the first drop of an outage says so at WARNING.
+        # Whether the zeros now pending have already been warned about. The step re-sends them
+        # every tick, and only the first drop says so at WARNING; a release event always warns,
+        # and movement delivered since, a target selection or the zeros landing re-arm it.
         self._drop_warned = False
         # The first read of Slack and SlackPlanted (module docstring), per leaf. A read carries the
         # generation it started in and stores only if no avatar change or target selection has
@@ -393,6 +394,8 @@ class LeashMapping(Mapping):
             v = _wire(v)
             if v != self._sent[address] and self.bridge.osc.send(address, v):
                 self._sent[address] = v
+                if v != 0:
+                    self._drop_warned = False   # new movement: its release is a new loss
 
     def _rest_locked(self, why: Optional[str] = None, *, force: bool = False,
                      final: bool = False) -> None:
@@ -400,12 +403,14 @@ class LeashMapping(Mapping):
 
         A dropped zero stays pending (its `_sent` entry keeps the old value) and is re-sent on the
         next step. With `final` there is no next step, so the send is retried a few times here.
-        The first drop warns; the step's re-sends of the same zeros log at DEBUG until they land
-        or a target is selected (design.md, "A dropped send warns once per outage"): with no
-        target yet, the step re-sends every tick until VRChat is found.
+        A drop warns, except that the step's own re-sends (no `why`) of zeros already warned
+        about log at DEBUG until movement is delivered, the zeros land or a target is selected
+        (design.md, "A dropped send warns once per outage"): with no target yet, the step
+        re-sends every tick until VRChat is found. A release event and the stop always warn.
         """
         self._peak = None
         if not force and all(v == 0 for v in self._sent.values()):
+            self._drop_warned = False
             return
         if why:
             self.bridge.log.info("Leash: %s; releasing movement.", why)
@@ -422,7 +427,7 @@ class LeashMapping(Mapping):
                 return
             if final:
                 time.sleep(STOP_RETRY_WAIT)
-        if self._drop_warned and not final:
+        if self._drop_warned and why is None and not final:
             self.bridge.log.debug("Leash: a zero to %s was dropped again; re-sent on the next step.",
                                   ", ".join(pending))
             return
