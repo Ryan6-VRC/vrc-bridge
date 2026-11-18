@@ -600,6 +600,68 @@ def test_stopping_retries_a_dropped_zero(rig):
     assert_at_rest(r)
 
 
+def test_a_dropped_zero_warns_once_until_it_lands(rig):
+    """Intended: the step re-sends a dropped zero every tick, so with VRChat not yet found the
+    warning would repeat at the tick rate. The first drop warns and the step's re-sends are DEBUG;
+    movement delivered since re-arms it, a release event always warns, and once the zeros land
+    the leash is at rest.
+
+    Captures on the bridge's logger directly, as test_pulse does: it does not propagate once
+    setup_logging() has run, so caplog would depend on test order.
+    """
+    import logging
+    r = rig()
+    real = r.bridge.osc.send
+    down = {"on": False}
+
+    def gated(address, value):
+        return False if down["on"] and value == 0 else real(address, value)
+    r.bridge.osc.send = gated
+
+    seen = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    def lines(level, text):
+        return [x for x in seen if x.levelno == level and text in x.getMessage()]
+
+    handler = Capture()
+    handler.setLevel(logging.DEBUG)
+    r.bridge.log.addHandler(handler)
+    level = r.bridge.log.level
+    r.bridge.log.setLevel(logging.DEBUG)
+    try:
+        pulling(r)
+        down["on"] = True
+        r.emit(Held=False)
+        for _ in range(5):
+            r.tick()
+        assert len(lines(logging.WARNING, "Leash: a zero")) == 1
+        assert len(lines(logging.DEBUG, "dropped again")) == 4
+
+        # the pull resumes while the zeros are still owed: its movement lands, so its release
+        # is a new loss and warns
+        r.held_at(forward=2.0, right=-1.0)
+        r.step()
+        assert r.last(HORIZONTAL_ADDR) < -0.1
+        r.emit(Held=False)
+        r.tick()
+        assert len(lines(logging.WARNING, "Leash: a zero")) == 2
+
+        # a release event warns even with the step's drop already warned
+        r.m.deactivate()
+        assert len(lines(logging.WARNING, "Leash: a zero")) == 3
+
+        down["on"] = False
+        r.tick()
+        assert_at_rest(r)
+    finally:
+        r.bridge.log.setLevel(level)
+        r.bridge.log.removeHandler(handler)
+
+
 # --------------------------------------------------------------------------
 # A torn frame
 # --------------------------------------------------------------------------
