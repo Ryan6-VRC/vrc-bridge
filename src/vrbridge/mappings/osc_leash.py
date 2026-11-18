@@ -187,6 +187,9 @@ class LeashMapping(Mapping):
         self._sent: Dict[str, Optional[float]] = {VERTICAL_ADDR: None, HORIZONTAL_ADDR: None,
                                                   RUN_ADDR: None}
         self._last_step: Optional[float] = None
+        # Whether the zeros now pending have already been warned about; the step re-sends them
+        # every tick, and only the first drop of an outage says so at WARNING.
+        self._drop_warned = False
         # The first read of Slack and SlackPlanted (module docstring), per leaf. A read carries the
         # generation it started in and stores only if no avatar change or target selection has
         # bumped it since.
@@ -245,6 +248,7 @@ class LeashMapping(Mapping):
             self.bridge.osc.forget(self._addr[UP])
             for address in self._sent:
                 self._sent[address] = None
+            self._drop_warned = False
 
     def _on_stop(self, ctx) -> None:
         with self._lock:
@@ -396,6 +400,9 @@ class LeashMapping(Mapping):
 
         A dropped zero stays pending (its `_sent` entry keeps the old value) and is re-sent on the
         next step. With `final` there is no next step, so the send is retried a few times here.
+        The first drop warns; the step's re-sends of the same zeros log at DEBUG until they land
+        or a target is selected (design.md, "A dropped send warns once per outage"): with no
+        target yet, the step re-sends every tick until VRChat is found.
         """
         self._peak = None
         if not force and all(v == 0 for v in self._sent.values()):
@@ -411,9 +418,15 @@ class LeashMapping(Mapping):
                     self._sent[address] = zero
                     pending.remove(address)
             if not pending:
+                self._drop_warned = False
                 return
             if final:
                 time.sleep(STOP_RETRY_WAIT)
+        if self._drop_warned and not final:
+            self.bridge.log.debug("Leash: a zero to %s was dropped again; re-sent on the next step.",
+                                  ", ".join(pending))
+            return
+        self._drop_warned = True
         self.bridge.log.warning("Leash: a zero to %s was dropped; the wearer may still be moving.%s",
                                 ", ".join(pending),
-                                "" if final else " It is re-sent on the next step.")
+                                "" if final else " It is re-sent on every step until it lands.")

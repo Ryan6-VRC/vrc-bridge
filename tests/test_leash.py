@@ -600,6 +600,55 @@ def test_stopping_retries_a_dropped_zero(rig):
     assert_at_rest(r)
 
 
+def test_a_dropped_zero_warns_once_until_it_lands(rig):
+    """Intended: the step re-sends a dropped zero every tick, so with VRChat not yet found the
+    warning would repeat at the tick rate; the first drop warns, the re-sends are DEBUG, and a
+    later drop after the zeros landed warns again.
+
+    Captures on the bridge's logger directly, as test_pulse does: it does not propagate once
+    setup_logging() has run, so caplog would depend on test order.
+    """
+    import logging
+    r = rig()
+    real = r.bridge.osc.send
+    down = {"on": False}
+
+    def gated(address, value):
+        return False if down["on"] and value == 0 else real(address, value)
+    r.bridge.osc.send = gated
+
+    seen = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    def warnings():
+        return [x for x in seen
+                if x.levelno == logging.WARNING and "Leash: a zero" in x.getMessage()]
+
+    handler = Capture()
+    r.bridge.log.addHandler(handler)
+    try:
+        pulling(r)
+        down["on"] = True
+        r.emit(Held=False)
+        for _ in range(5):
+            r.tick()
+        assert len(warnings()) == 1
+        down["on"] = False
+        r.tick()
+        assert_at_rest(r)
+
+        pulling(r)
+        down["on"] = True
+        r.emit(Held=False)
+        r.step()
+        assert len(warnings()) == 2
+    finally:
+        r.bridge.log.removeHandler(handler)
+
+
 # --------------------------------------------------------------------------
 # A torn frame
 # --------------------------------------------------------------------------
