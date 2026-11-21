@@ -44,13 +44,15 @@ this module owns when a blob is sent.
   `face_<date>_<time>_<pid>`, in the layout of `tests/fixtures/alvr_face_docked.bin`: `<dI` (the
   receive time on `time.perf_counter`, the payload's length), then the payload. On Windows that clock
   is the system-wide performance counter, so the times line up with other processes' on the same PC;
-  `anchor.json` beside it pairs one reading with the wall clock. Written on the receive thread and
-  flushed about once a second; a write that fails is logged once and ends recording for the run.
+  `anchor.json` beside it pairs one reading with the wall clock. A writer thread of its own owns the
+  file, so a slow disk never holds up the face; it flushes about once a second, and a write that fails
+  is logged once and ends recording until the sender is next activated.
 """
 from __future__ import annotations
 
 import json
 import os
+import queue
 import select
 import socket
 import struct
@@ -109,12 +111,8 @@ class FaceSenderMapping(Mapping):
         self._overrides: dict[int, int] = {}
         #: The bound port, once listening. Differs from `[face] port` only when that is 0.
         self.port: Optional[int] = None
-        # Recording (`[face] record_dir`), owned by the worker thread; closed by `_shutdown`.
-        self._rec = None
-        self._rec_failed = False
-        self._rec_flushed = 0.0
-        #: The folder this run records into, once the first datagram is written.
-        self.record_path: Optional[str] = None
+        # `[face] record_dir`: one recorder per activation, made by `_start`, closed by `_shutdown`.
+        self._rec: Optional[_FaceRecorder] = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -155,6 +153,8 @@ class FaceSenderMapping(Mapping):
                                     name="vrbridge-face-gate")]
         with self._lock:
             self._sock, self._stop, self._threads = sock, stop, threads
+        if self._tune.record_dir:
+            self._rec = _FaceRecorder(self._tune.record_dir, self.bridge.log)
         self.port = sock.getsockname()[1]
         for t in threads:
             t.start()
@@ -172,12 +172,16 @@ class FaceSenderMapping(Mapping):
         for t in threads:
             t.join(timeout=_JOIN_SECS)
         self._last_data = None
-        rec, self._rec = self._rec, None
-        if rec is not None:
-            rec.close()
+        if self._rec is not None:
+            self._rec.close(_JOIN_SECS)
 
     def _on_stop(self, ctx) -> None:
         self._shutdown()
+
+    @property
+    def record_path(self) -> Optional[str]:
+        """The folder the current or last activation records into, once its first datagram is written."""
+        return self._rec.path if self._rec is not None else None
 
     # ---- state other mappings read ----------------------------------------
 
@@ -263,8 +267,8 @@ class FaceSenderMapping(Mapping):
                     self._gate_wake.set()
             return
         self._last_payload = data
-        if data and self._tune.record_dir and not self._rec_failed:
-            self._record(data)
+        if data and self._rec is not None:
+            self._rec.put(time.perf_counter(), data)
         dgram = decode(data)
         if dgram.unknown is not None and dgram.unknown not in self._warned_tags:
             self._warned_tags.add(dgram.unknown)
@@ -278,26 +282,6 @@ class FaceSenderMapping(Mapping):
             self._last_data = now
             if returning:
                 self._gate_wake.set()
-
-    def _record(self, data: bytes) -> None:
-        now = time.perf_counter()
-        try:
-            if self._rec is None:
-                stamp = time.strftime("%Y%m%d_%H%M%S")
-                path = os.path.join(self._tune.record_dir, f"face_{stamp}_{os.getpid()}")
-                os.makedirs(path, exist_ok=True)
-                with open(os.path.join(path, "anchor.json"), "w", encoding="utf-8") as f:
-                    json.dump({"perf_counter": time.perf_counter(), "wall": time.time()}, f)
-                self._rec = open(os.path.join(path, "face.bin"), "ab")
-                self.record_path = path
-                self.bridge.log.info("osc_face: recording face data into %s", path)
-            self._rec.write(struct.pack("<dI", now, len(data)) + data)
-            if now - self._rec_flushed >= 1.0:
-                self._rec.flush()
-                self._rec_flushed = now
-        except OSError as e:
-            self._rec_failed = True
-            self.bridge.log.error("osc_face: recording stopped for this run: %s", e)
 
     def _tick(self, dt: float, now: float) -> None:
         if not self.source_active(now):
@@ -397,3 +381,57 @@ class NoFaceTrackingToggles(FaceTrackingToggles):
 
     def _source_running(self) -> bool:
         return False
+
+
+class _FaceRecorder:
+    """`[face] record_dir` (the module docstring's Recording): the receive thread only queues; this
+    thread makes the folder, writes and flushes, and closes the file when `close` is called."""
+
+    def __init__(self, root: str, log) -> None:
+        self._root, self._log = os.path.expanduser(root), log
+        self._q: queue.SimpleQueue = queue.SimpleQueue()
+        #: The run's folder, once its first datagram is written.
+        self.path: Optional[str] = None
+        self._thread = threading.Thread(target=self._run, daemon=True, name="vrbridge-face-record")
+        self._thread.start()
+
+    def put(self, t: float, data: bytes) -> None:
+        self._q.put((t, data))
+
+    def close(self, timeout: float) -> None:
+        self._q.put(None)
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        f, failed, flushed = None, False, time.monotonic()
+        try:
+            while True:
+                try:
+                    item = self._q.get(timeout=1.0)
+                except queue.Empty:
+                    item = ()
+                if item is None:
+                    return
+                try:
+                    if item and not failed:
+                        t, data = item
+                        if f is None:
+                            path = os.path.join(self._root,
+                                                f"face_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}")
+                            os.makedirs(path, exist_ok=True)
+                            with open(os.path.join(path, "anchor.json"), "w", encoding="utf-8") as a:
+                                json.dump({"perf_counter": time.perf_counter(), "wall": time.time()}, a)
+                            f = open(os.path.join(path, "face.bin"), "ab")
+                            self.path = path
+                            self._log.info("osc_face: recording face data into %s", path)
+                        f.write(struct.pack("<dI", t, len(data)) + data)
+                    if f is not None and time.monotonic() - flushed >= 1.0:
+                        f.flush()
+                        flushed = time.monotonic()
+                except OSError as e:
+                    if not failed:
+                        self._log.error("osc_face: face recording stopped: %s", e)
+                    failed = True
+        finally:
+            if f is not None:
+                f.close()

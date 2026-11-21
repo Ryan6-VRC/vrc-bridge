@@ -518,8 +518,7 @@ def test_record_dir_keeps_each_changed_datagram_in_the_fixtures_layout(vrc, tmp_
         h.send(a, times=3, gap=0.01)     # repeats are not new data
         h.send(b"", gap=0.01)            # a zero-length datagram is not data
         h.send(b, gap=0.01)
-        assert _wait(lambda: h.face.record_path is not None)
-        time.sleep(0.1)
+        assert _wait(lambda: h.face.record_path is not None and h.face._last_payload == b)
     finally:
         h.close()
     folder = Path(h.face.record_path)
