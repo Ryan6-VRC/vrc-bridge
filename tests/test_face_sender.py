@@ -505,3 +505,38 @@ def test_nothing_is_sent_while_the_gate_is_closed_and_a_held_override_travels_on
         h.face._on_full_face(None, FULL_FACE_ADDR, True)
         assert _wait(lambda: vrc.values_for(FACE_ADDR))
     assert _byte_at(vrc, "SoftPalateClose", 0) == 255
+
+
+def test_record_dir_keeps_each_changed_datagram_in_the_fixtures_layout(vrc, tmp_path):
+    import dataclasses
+    import json
+    payloads = _payloads()
+    a = payloads[0]
+    b = next(p for p in payloads if p != a)
+    h = _Harness(vrc, dataclasses.replace(TUNE, record_dir=str(tmp_path)))
+    try:
+        h.send(a, times=3, gap=0.01)     # repeats are not new data
+        h.send(b"", gap=0.01)            # a zero-length datagram is not data
+        h.send(b, gap=0.01)
+        assert _wait(lambda: h.face.record_path is not None)
+        time.sleep(0.1)
+    finally:
+        h.close()
+    folder = Path(h.face.record_path)
+    assert folder.parent == tmp_path and folder.name.startswith("face_")
+    data, i, got, times = (folder / "face.bin").read_bytes(), 0, [], []
+    while i < len(data):
+        t, n = struct.unpack_from("<dI", data, i)
+        got.append(data[i + 12:i + 12 + n])
+        times.append(t)
+        i += 12 + n
+    assert got == [a, b]
+    assert times == sorted(times)
+    anchor = json.loads((folder / "anchor.json").read_text())
+    assert set(anchor) == {"perf_counter", "wall"}
+
+
+def test_no_record_dir_writes_nothing(vrc, tmp_path, h):
+    h.send(_payloads()[0], times=2, gap=0.01)
+    time.sleep(0.1)
+    assert h.face.record_path is None

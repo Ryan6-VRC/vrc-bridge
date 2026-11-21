@@ -433,6 +433,7 @@ class FaceSettings:
     min_cutoff: float = 10.0
     beta: float = 0.5
     d_cutoff: float = 1.0
+    record_dir: str = ""                 # when set, every changed datagram is kept under it (osc_face, Recording)
     # `--face on|off`: "" leaves `enabled` to decide; "on" runs the sender whatever `enabled` says;
     # "off" is a headset without face tracking, so no sender and the EyeTrackingActive /
     # LipTrackingActive toggles held false in place of osc_vrcft's (routers._register_face).

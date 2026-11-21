@@ -39,11 +39,21 @@ this module owns when a blob is sent.
   they were true leaves them true on the avatar. `NoFaceTrackingToggles` is the same with a source
   that never runs, `--face off`'s. A router registers one of them in place of `VRCFTMapping`, never
   beside it, since two sources would contradict each other.
+* **Recording.** With `[face] record_dir` set, every datagram whose bytes differ from the one before,
+  zero-length ones aside, is appended to `face.bin` in a folder of its own per run,
+  `face_<date>_<time>_<pid>`, in the layout of `tests/fixtures/alvr_face_docked.bin`: `<dI` (the
+  receive time on `time.perf_counter`, the payload's length), then the payload. On Windows that clock
+  is the system-wide performance counter, so the times line up with other processes' on the same PC;
+  `anchor.json` beside it pairs one reading with the wall clock. Written on the receive thread and
+  flushed about once a second; a write that fails is logged once and ends recording for the run.
 """
 from __future__ import annotations
 
+import json
+import os
 import select
 import socket
+import struct
 import threading
 import time
 from typing import Iterable, Optional
@@ -99,6 +109,12 @@ class FaceSenderMapping(Mapping):
         self._overrides: dict[int, int] = {}
         #: The bound port, once listening. Differs from `[face] port` only when that is 0.
         self.port: Optional[int] = None
+        # Recording (`[face] record_dir`), owned by the worker thread; closed by `_shutdown`.
+        self._rec = None
+        self._rec_failed = False
+        self._rec_flushed = 0.0
+        #: The folder this run records into, once the first datagram is written.
+        self.record_path: Optional[str] = None
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -156,6 +172,9 @@ class FaceSenderMapping(Mapping):
         for t in threads:
             t.join(timeout=_JOIN_SECS)
         self._last_data = None
+        rec, self._rec = self._rec, None
+        if rec is not None:
+            rec.close()
 
     def _on_stop(self, ctx) -> None:
         self._shutdown()
@@ -244,6 +263,8 @@ class FaceSenderMapping(Mapping):
                     self._gate_wake.set()
             return
         self._last_payload = data
+        if data and self._tune.record_dir and not self._rec_failed:
+            self._record(data)
         dgram = decode(data)
         if dgram.unknown is not None and dgram.unknown not in self._warned_tags:
             self._warned_tags.add(dgram.unknown)
@@ -257,6 +278,26 @@ class FaceSenderMapping(Mapping):
             self._last_data = now
             if returning:
                 self._gate_wake.set()
+
+    def _record(self, data: bytes) -> None:
+        now = time.perf_counter()
+        try:
+            if self._rec is None:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                path = os.path.join(self._tune.record_dir, f"face_{stamp}_{os.getpid()}")
+                os.makedirs(path, exist_ok=True)
+                with open(os.path.join(path, "anchor.json"), "w", encoding="utf-8") as f:
+                    json.dump({"perf_counter": time.perf_counter(), "wall": time.time()}, f)
+                self._rec = open(os.path.join(path, "face.bin"), "ab")
+                self.record_path = path
+                self.bridge.log.info("osc_face: recording face data into %s", path)
+            self._rec.write(struct.pack("<dI", now, len(data)) + data)
+            if now - self._rec_flushed >= 1.0:
+                self._rec.flush()
+                self._rec_flushed = now
+        except OSError as e:
+            self._rec_failed = True
+            self.bridge.log.error("osc_face: recording stopped for this run: %s", e)
 
     def _tick(self, dt: float, now: float) -> None:
         if not self.source_active(now):
